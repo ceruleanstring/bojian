@@ -1,0 +1,35 @@
+format: 1
+name: 寫週報
+params:
+  - key: tone
+    label: 語氣
+    default: 條列重點
+  - key: highlight_count
+    label: 重點數量
+    default: 3 項
+nodes:
+  - id: collect
+    title: 蒐集本週工作事項
+    executor: ai
+    stop_point: never
+    instruction: |
+      這是剝繭的內建範例流程，不連任何真實系統。請生成一份擬真的示範用本週工作紀錄：
+      完成的事、進行中的事、卡住的事各列幾條（含具體名稱與進度百分比），
+      再附兩三場本週會議與結論。結尾註明「（示範資料，非真實內容）」。
+    next: [draft]
+  - id: draft
+    title: 寫成週報
+    executor: ai
+    stop_point: always
+    instruction: |
+      把上一步的工作紀錄整理成一份週報，分四段：本週完成／進行中／下週計畫／需要協助。
+      語氣採「{{tone}}」，全篇挑出 {{highlight_count}} 個重點加粗放最前面。
+    next: [send]
+  - id: send
+    title: 送出給主管
+    executor: human
+    stop_point: always
+    instruction: |
+      看過沒問題就把週報送出去。送完回來標記完成，
+      可以順手留一句主管的回饋，讓流程之後學著調整。
+    next: []
