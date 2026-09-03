@@ -1,0 +1,21 @@
+{
+  "name": "bojian",
+  "version": "0.2.0",
+  "private": true,
+  "description": "剝繭 — 把日常工作拆成愈用愈聰明的流程",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test",
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "docx": "^9.7.1",
+    "docxtemplater": "^3.69.3",
+    "exceljs": "^4.4.0",
+    "js-yaml": "^4.1.0",
+    "mammoth": "^1.12.2",
+    "marked": "^18.0.11",
+    "pizzip": "^3.2.0"
+  }
+}
