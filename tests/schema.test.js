@@ -85,6 +85,16 @@ test('節點 id 重複 → 擋下', () => {
   assert.throws(() => validateWorkflow(def), SchemaError);
 });
 
+test('交貨查核輪：check.enabled 合法；check 非物件／enabled 非布林 → 擋下且訊息點名', () => {
+  const def = loadExample();
+  def.check = { enabled: false };
+  validateWorkflow(def); // 不丟例外即通過
+  def.check = 'yes';
+  assert.throws(() => validateWorkflow(def), (e) => e instanceof SchemaError && e.message.includes('check 要是物件'));
+  def.check = { enabled: 'no' };
+  assert.throws(() => validateWorkflow(def), (e) => e instanceof SchemaError && e.message.includes('check.enabled 要是開或關'));
+});
+
 // ---- S3：有向圖（分岔＋平行）----
 import { DAG_DEF } from './fixtures.js';
 

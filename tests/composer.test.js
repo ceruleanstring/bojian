@@ -74,6 +74,13 @@ test('資料通道輪：草稿裡人做步驟帶 handoff 欄位能過驗證', as
   assert.equal(out.draft.nodes[1].handoff, '訂位結果與時間');
 });
 
+test('交貨查核輪：prompt 的 RULES 含第 10／11 條（具體要求進 review_focus／最後一步要拿得到原始資料）', async () => {
+  const adapter = fakeAdapter([ok('拆好了', VALID_DEF)]);
+  await compose({ adapter, messages: [{ role: 'user', text: '拆聚餐' }] });
+  assert.ok(adapter.calls[0].includes('review_focus（必守'), 'RULES 要教它具體要求寫進 review_focus（必守…）');
+  assert.ok(adapter.calls[0].includes('最後交付成品的那一步必須直接拿得到原始資料'), 'RULES 要教它最後一步要接得到原始資料');
+});
+
 test('連兩次都壞：ComposeError 人話', async () => {
   const bad = ok('看起來像對的', { format: 1, name: '', params: [], nodes: [] });
   const adapter = fakeAdapter([bad, bad]);

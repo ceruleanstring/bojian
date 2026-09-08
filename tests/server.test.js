@@ -11,17 +11,29 @@ import { createStore } from '../src/store.js';
 function fakeAdapter() {
   const calls = [];
   let completeResponses = [];
+  let checkResponses = [];
+  let editRulesResponses = [];
+  let editRulesDelay = 0; // 真 AI 擬規則要 10–60 秒，這裡用毫秒模擬那段空窗
   let available = true;
   return {
     calls,
     setCompleteResponses(rs) { completeResponses = rs; },
+    // 交貨查核輪：查核／擬規則各自一條隊列，跟一般 complete()（分岔、compose…）分開——kind 對不上就照舊
+    setCheckResponses(rs) { checkResponses = rs; },
+    setEditRulesResponses(rs) { editRulesResponses = rs; },
+    setEditRulesDelay(ms) { editRulesDelay = ms; },
     setAvailable(v) { available = v; },
-    async complete() {
+    async complete({ meta } = {}) {
+      if (meta?.kind === 'check') return checkResponses.length > 1 ? checkResponses.shift() : checkResponses[0] ?? '';
+      if (meta?.kind === 'edit-rules') {
+        if (editRulesDelay) await new Promise((r) => setTimeout(r, editRulesDelay));
+        return editRulesResponses.length > 1 ? editRulesResponses.shift() : editRulesResponses[0] ?? '';
+      }
       return completeResponses.length > 1 ? completeResponses.shift() : completeResponses[0] ?? '';
     },
     async checkAvailable() { return available; },
-    async executeNode({ nodeId, instruction, upstream }) {
-      calls.push({ nodeId, instruction, upstream });
+    async executeNode({ nodeId, instruction, upstream, editRules }) {
+      calls.push({ nodeId, instruction, upstream, editRules });
       return `產出:${nodeId}`;
     },
   };
@@ -739,6 +751,23 @@ test('產檔輪：親手存的新流程預設開產檔權限；匯入確認一�
   }
 });
 
+test('交貨查核輪：新建流程不帶 check → 預設開；帶 check 原樣保存', async () => {
+  const { app, base } = await startApp();
+  try {
+    const def = { format: 1, name: '不帶check', params: [], nodes: [{ id: 'a', title: 'A', executor: 'ai', stop_point: 'never', instruction: '做', next: [] }] };
+    const made = (await api(base, 'POST', '/api/workflows', { category: '測試', def })).json;
+    const saved = (await api(base, 'GET', `/api/workflows/${encodeURIComponent('測試')}/${made.id}`)).json;
+    assert.equal(saved.check.enabled, true);
+
+    const def2 = { ...def, name: '帶check關', check: { enabled: false } };
+    const made2 = (await api(base, 'POST', '/api/workflows', { category: '測試', def: def2 })).json;
+    const saved2 = (await api(base, 'GET', `/api/workflows/${encodeURIComponent('測試')}/${made2.id}`)).json;
+    assert.deepEqual(saved2.check, { enabled: false });
+  } finally {
+    await app.stop();
+  }
+});
+
 test('排程與健檢輪：欄位還是佔位文字／必填空白 → POST /runs 409 param-unfilled；填了就開跑；preflight 帶 values 也查', async () => {
   const { app, base, dataDir } = await startApp();
   try {
@@ -760,6 +789,227 @@ test('排程與健檢輪：欄位還是佔位文字／必填空白 → POST /run
     assert.deepEqual(pf.json.issues.filter((i) => i.code === 'param-unfilled').map((i) => i.param), ['notes']);
     const ok = await api(base, 'POST', `${wfp}/runs`, { overrides: { post_data: '9/1 貼文 A 讚 120', notes: '無' } });
     assert.equal(ok.status, 200);
+  } finally {
+    await app.stop();
+  }
+});
+
+// ===== 交貨查核輪：三條路由、edit 先擬規則、待辦、用量彙總 =====
+
+test('交貨查核輪：check-retry／check-accept／edit-rules——狀態不符 400 人話，成功寫回 run', async () => {
+  const { app, base, dataDir } = await startApp();
+  try {
+    const store = createStore(dataDir);
+    const def = {
+      format: 1, name: '查核路由測試', params: [],
+      nodes: [{ id: 'a', title: '步驟A', executor: 'ai', stop_point: 'never', instruction: '做A', next: [] }],
+      check: { enabled: false }, // 這條測試只驗路由接線，不需要真的問查核員
+    };
+    store.writeWorkflow('測試', 'check-routes', def);
+    const wfp = `/api/workflows/${encodeURIComponent('測試')}/check-routes`;
+    const blocks = [{ kind: 'number-mismatch', claim: '總數 13 件', source: '明細共 14 件', detail: '算式不成立：6+3+4=13' }];
+    const mkStep = (status, extra = {}) => ({ status, output: '產出:a', edited_output: null, edit_note: null, check_note: null, ...extra });
+    const mkRun = (rid, step) => store.writeRun('測試', 'check-routes', rid, {
+      run_id: rid, workflow: { category: '測試', id: 'check-routes', name: def.name }, def,
+      status: 'paused', source: 'manual', params: {}, started_at: new Date().toISOString(), finished_at: null,
+      steps: { a: step },
+    });
+
+    // 狀態不符（不是「查核攔下」）→ 400 人話
+    mkRun('r-mismatch', mkStep('waiting_review'));
+    const badRetry = await api(base, 'POST', `${wfp}/runs/r-mismatch/check-retry`, { node: 'a', note: '亂改' });
+    assert.equal(badRetry.status, 400);
+    assert.ok(badRetry.json.error.includes('查核攔下'), badRetry.json.error);
+    const badAccept = await api(base, 'POST', `${wfp}/runs/r-mismatch/check-accept`, { node: 'a' });
+    assert.equal(badAccept.status, 400);
+    assert.ok(badAccept.json.error.includes('查核攔下'), badAccept.json.error);
+
+    // check-retry 成功：check_note 記下（永久紀錄，重跑不會清掉）；重跑到底後多一筆 retry-note attempt、check_note_pending 用過就清
+    mkRun('r-retry', mkStep('waiting_check', {
+      check: { status: 'blocked', blocks, flags: [], missing: [], items: [], summary: '數字對不上', note: '', attempts: 2 },
+      attempts: [{ at: '2026-09-08T00:00:00.000Z', reason: 'first', output: '產出:a', check: { status: 'blocked', blocks, flags: [] } }],
+    }));
+    const retryRes = await api(base, 'POST', `${wfp}/runs/r-retry/check-retry`, { node: 'a', note: '總數請照明細重算' });
+    assert.equal(retryRes.status, 200);
+    assert.equal(retryRes.json.steps.a.check_note, '總數請照明細重算');
+    assert.notEqual(retryRes.json.steps.a.status, 'waiting_check', '要離開查核攔下狀態');
+    const settled = await pollRun(base, `${wfp}/runs/r-retry`, (r) => r.status === 'done');
+    assert.equal(settled.steps.a.attempts.length, 2, '重跑多一筆 attempt');
+    assert.equal(settled.steps.a.attempts[1].reason, 'retry-note');
+    assert.equal(settled.steps.a.check_note_pending, false, '吃過就清');
+
+    // check-accept 成功：直接放行，不再進停點
+    mkRun('r-accept', mkStep('waiting_check', {
+      check: { status: 'blocked', blocks, flags: [], missing: [], items: [], summary: '數字對不上', note: '', attempts: 2 },
+    }));
+    const acceptRes = await api(base, 'POST', `${wfp}/runs/r-accept/check-accept`, { node: 'a' });
+    assert.equal(acceptRes.status, 200);
+    assert.equal(acceptRes.json.steps.a.check.status, 'accepted');
+    assert.equal(acceptRes.json.steps.a.status, 'done');
+
+    // edit-rules：整份覆寫（空文字丟掉）；壞格式 400
+    mkRun('r-rules', mkStep('done', { edit_rules: [{ text: '舊規則', scope: 'all' }] }));
+    const rulesRes = await api(base, 'POST', `${wfp}/runs/r-rules/edit-rules`, {
+      node: 'a', rules: [{ text: '金額用千元', scope: 'this-step' }, { text: '  ', scope: 'all' }],
+    });
+    assert.equal(rulesRes.status, 200);
+    assert.deepEqual(rulesRes.json.steps.a.edit_rules, [{ text: '金額用千元', scope: 'this-step' }]);
+    const badRules = await api(base, 'POST', `${wfp}/runs/r-rules/edit-rules`, { node: 'a', rules: '不是陣列' });
+    assert.equal(badRules.status, 400);
+  } finally {
+    await app.stop();
+  }
+});
+
+test('交貨查核輪：edit 路由在回應前已含 deriveEditRules 擬出的規則', async () => {
+  const { app, base, adapter } = await startApp();
+  try {
+    const def = {
+      format: 1, name: '擬規則測試', params: [],
+      nodes: [{ id: 'a', title: '步驟A', executor: 'ai', stop_point: 'always', instruction: '做A', next: [] }],
+      check: { enabled: false },
+    };
+    const { id } = (await api(base, 'POST', '/api/workflows', { category: '測試', def })).json;
+    const wfp = `/api/workflows/${encodeURIComponent('測試')}/${id}`;
+    const started = await api(base, 'POST', `${wfp}/runs`, {});
+    const runPath = `${wfp}/runs/${started.json.run_id}`;
+    await pollRun(base, runPath, (r) => r.steps.a.status === 'waiting_review');
+    adapter.setEditRulesResponses([JSON.stringify({ rules: [{ text: '金額一律用千元', scope: 'all' }] })]);
+    const editRes = await api(base, 'POST', `${runPath}/edit`, { node: 'a', output: '改過的內容', note: '金額改千元' });
+    assert.equal(editRes.status, 200);
+    assert.equal(editRes.json.steps.a.edited_output, '改過的內容');
+    assert.deepEqual(editRes.json.steps.a.edit_rules, [{ text: '金額一律用千元', scope: 'all' }], 'edit 回應要已經含擬好的規則');
+  } finally {
+    await app.stop();
+  }
+});
+
+// 裁定 28：擬規則要 10–60 秒，這段時間 run 不准是 running——否則 UI 每秒的 GET 就會把下游放出去，
+// 下游在規則寫進檔案之前開跑＝停點改的東西沒帶到，而且沒有任何錯誤訊息。
+test('交貨查核輪：擬規則那段時間 GET run 不會先把下游放出去，規則擬完才續跑', async () => {
+  const { app, base, adapter } = await startApp();
+  try {
+    const def = {
+      format: 1, name: '擬規則競態', params: [],
+      nodes: [
+        { id: 'a', title: '步驟A', executor: 'ai', stop_point: 'always', instruction: '做A', next: ['b'] },
+        { id: 'b', title: '步驟B', executor: 'ai', stop_point: 'never', instruction: '做B', next: [] },
+      ],
+      check: { enabled: false },
+    };
+    const { id } = (await api(base, 'POST', '/api/workflows', { category: '測試', def })).json;
+    const wfp = `/api/workflows/${encodeURIComponent('測試')}/${id}`;
+    const started = await api(base, 'POST', `${wfp}/runs`, {});
+    const runPath = `${wfp}/runs/${started.json.run_id}`;
+    await pollRun(base, runPath, (r) => r.steps.a.status === 'waiting_review');
+
+    adapter.setEditRulesResponses([JSON.stringify({ rules: [{ text: '金額一律用千元', scope: 'all' }] })]);
+    adapter.setEditRulesDelay(200);
+    const editing = api(base, 'POST', `${runPath}/edit`, { node: 'a', output: '改過的內容', note: '金額改千元' });
+    for (let i = 0; i < 5; i++) { // UI 每秒輪詢：擬規則還沒回來時連問五次
+      await api(base, 'GET', runPath);
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.equal(adapter.calls.filter((c) => c.nodeId === 'b').length, 0, '規則還沒擬好，下游不准開跑');
+
+    const editRes = await editing;
+    assert.equal(editRes.status, 200);
+    await pollRun(base, runPath, (r) => r.status === 'done');
+    const bCall = adapter.calls.find((c) => c.nodeId === 'b');
+    assert.deepEqual(bCall.editRules, ['金額一律用千元'], '放行後下游要帶著擬好的規則跑');
+  } finally {
+    await app.stop();
+  }
+});
+
+test('交貨查核輪：GET run 帶 usage_by_node——依 node／kind 彙總；edit-rules 不算進 step 或 check', async () => {
+  const { app, base, dataDir } = await startApp();
+  try {
+    const store = createStore(dataDir);
+    const def = {
+      format: 1, name: '用量彙總測試', params: [],
+      nodes: [{ id: 'a', title: '步驟A', executor: 'ai', stop_point: 'never', instruction: '做A', next: [] }],
+    };
+    store.writeWorkflow('測試', 'usage-wf', def);
+    const rid = 'r-usage';
+    store.writeRun('測試', 'usage-wf', rid, {
+      run_id: rid, workflow: { category: '測試', id: 'usage-wf', name: def.name }, def,
+      status: 'done', source: 'manual', started_at: new Date().toISOString(), finished_at: new Date().toISOString(),
+      steps: { a: { status: 'done', output: '產出' } },
+    });
+    const nowIso = new Date().toISOString();
+    store.appendUsage({ at: nowIso, kind: 'step', category: '測試', workflow: 'usage-wf', run: rid, node: 'a', input_tokens: 100, output_tokens: 20, cache_creation_input_tokens: 5, cache_read_input_tokens: 3 });
+    store.appendUsage({ at: nowIso, kind: 'check', category: '測試', workflow: 'usage-wf', run: rid, node: 'a', input_tokens: 50, output_tokens: 10 });
+    store.appendUsage({ at: nowIso, kind: 'edit-rules', category: '測試', workflow: 'usage-wf', run: rid, node: 'a', input_tokens: 999, output_tokens: 999 });
+
+    const wfp = `/api/workflows/${encodeURIComponent('測試')}/usage-wf`;
+    const run = (await api(base, 'GET', `${wfp}/runs/${rid}`)).json;
+    assert.deepEqual(run.usage_by_node.a.step, { input: 108, output: 20, calls: 1 }, 'input=input+快取建立+快取讀取');
+    assert.deepEqual(run.usage_by_node.a.check, { input: 50, output: 10, calls: 1 });
+  } finally {
+    await app.stop();
+  }
+});
+
+test('交貨查核輪：GET /api/dashboard 的 recent[].usage.check 正確彙總；既有欄位不變', async () => {
+  const { app, base, dataDir } = await startApp();
+  try {
+    const store = createStore(dataDir);
+    const def = {
+      format: 1, name: '儀表板查核測試', params: [],
+      nodes: [{ id: 'a', title: '步驟A', executor: 'ai', stop_point: 'never', instruction: '做A', next: [] }],
+    };
+    store.writeWorkflow('測試', 'dash-check', def);
+    const rid = 'r-dash-check';
+    store.writeRun('測試', 'dash-check', rid, {
+      run_id: rid, workflow: { category: '測試', id: 'dash-check', name: def.name }, def,
+      status: 'done', source: 'manual', started_at: new Date().toISOString(), finished_at: new Date().toISOString(),
+      steps: { a: { status: 'done', output: '產出' } },
+    });
+    const nowIso = new Date().toISOString();
+    store.appendUsage({ at: nowIso, kind: 'step', run: rid, node: 'a', input_tokens: 100, output_tokens: 20 });
+    store.appendUsage({ at: nowIso, kind: 'check', run: rid, node: 'a', input_tokens: 30, output_tokens: 8, cache_creation_input_tokens: 2 });
+
+    const dash = (await api(base, 'GET', '/api/dashboard?limit=5&days=30')).json;
+    const card = dash.recent.find((r) => r.run_id === rid);
+    assert.ok(card, '要有這張卡');
+    assert.deepEqual(card.usage.check, { input: 32, output: 8 });
+    assert.equal(card.usage.input, 132, '既有欄位不變（總量含 check 那筆：100 ＋ 30 ＋ 2 快取建立）');
+  } finally {
+    await app.stop();
+  }
+});
+
+test('交貨查核輪：GET /api/todos 對 waiting_check 出一條 tone hold，desc 是第一條 block 的 detail', async () => {
+  const { app, base, dataDir } = await startApp();
+  try {
+    const store = createStore(dataDir);
+    const def = {
+      format: 1, name: '待辦查核測試', params: [],
+      nodes: [{ id: 'a', title: '步驟A', executor: 'ai', stop_point: 'never', instruction: '做A', next: [] }],
+    };
+    store.writeWorkflow('測試', 'todo-check', def);
+    const rid = 'r-todo-check';
+    store.writeRun('測試', 'todo-check', rid, {
+      run_id: rid, workflow: { category: '測試', id: 'todo-check', name: def.name }, def,
+      status: 'paused', source: 'manual', started_at: new Date().toISOString(), finished_at: null,
+      steps: {
+        a: {
+          status: 'waiting_check',
+          check: {
+            status: 'blocked',
+            blocks: [{ kind: 'number-mismatch', claim: '總數 13 件', source: '明細共 14 件', detail: '算式不成立：6+3+4=13' }],
+            flags: [], missing: [], items: [], summary: '數字對不上', note: '', attempts: 2,
+          },
+        },
+      },
+    });
+    const todos = (await api(base, 'GET', '/api/todos')).json.items;
+    const item = todos.find((x) => x.run?.run_id === rid);
+    assert.ok(item, '要有這條待辦');
+    assert.equal(item.kind, 'waiting_check');
+    assert.equal(item.tone, 'hold');
+    assert.equal(item.desc, '算式不成立：6+3+4=13');
   } finally {
     await app.stop();
   }

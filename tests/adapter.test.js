@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { createHostAdapter, HostError } from '../src/host-adapter.js';
+import { createHostAdapter, HostError, LEAN_WORKER_SYSTEM, LEAN_GENERIC_SYSTEM } from '../src/host-adapter.js';
 
 // 假子行程：可控 stdout／stderr／結束碼／不結束
 function fakeChild() {
@@ -231,6 +231,71 @@ test('卷宗協定：renderPrompt 與實際送進 stdin 的 prompt 一字不差'
   assert.equal(adapter.renderPrompt(args), child.stdin.written);
 });
 
+// ===== 查核輪 T3：buildPrompt 四新段 =====
+
+test('buildPrompt：paramBlocks → 「# 欄位內容（原文）」段出現在「# 上一步的產出」之前，每塊帶 label 與原文', () => {
+  const adapter = createHostAdapter({});
+  const prompt = adapter.renderPrompt({
+    ...NODE_ARGS,
+    paramBlocks: [{ label: '來信', value: '寄件人：林小姐\n主旨：刮傷' }],
+  });
+  assert.ok(prompt.includes('# 欄位內容（原文）'));
+  assert.ok(prompt.includes('【欄位：來信】'));
+  assert.ok(prompt.includes('寄件人：林小姐\n主旨：刮傷'));
+  assert.ok(prompt.indexOf('# 欄位內容（原文）') < prompt.indexOf('# 上一步的產出'), '欄位內容段要在上一步的產出之前');
+});
+
+test('buildPrompt：editRules → 「# 使用者在停點改過的要求（後面每一步都要守）」出現在「# 限制條件」之後，逐條列點', () => {
+  const adapter = createHostAdapter({});
+  const prompt = adapter.renderPrompt({
+    ...NODE_ARGS,
+    constraints: '不承諾賠償金額',
+    editRules: ['每段不超過三句', '不用「親愛的」開頭'],
+  });
+  assert.ok(prompt.includes('# 使用者在停點改過的要求（後面每一步都要守）'));
+  assert.ok(prompt.includes('- 每段不超過三句'));
+  assert.ok(prompt.includes('- 不用「親愛的」開頭'));
+  assert.ok(prompt.indexOf('# 限制條件') < prompt.indexOf('# 使用者在停點改過的要求'), '要在限制條件之後');
+});
+
+test('buildPrompt：redo → 「# 上一次交貨被查核退回（必須逐條修正，其餘保持）」出現在「# 交件前自我檢查」之後，blocks／missing 各一行', () => {
+  const adapter = createHostAdapter({});
+  const prompt = adapter.renderPrompt({
+    ...NODE_ARGS,
+    reviewFocus: '數字要對得上',
+    redo: {
+      blocks: [{ kind: 'number-mismatch', claim: '總數 13 件', source: '共 14 件', detail: '算式不成立：6+3+4+1=14' }],
+      missing: [{ claim: '客戶滿意度', detail: '原始資料沒有調查結果' }],
+    },
+  });
+  assert.ok(prompt.includes('# 上一次交貨被查核退回（必須逐條修正，其餘保持）'));
+  assert.ok(prompt.includes('- 錯在哪：算式不成立：6+3+4+1=14｜成品寫：總數 13 件｜原始資料：共 14 件'));
+  assert.ok(prompt.includes('- 原始資料沒有「客戶滿意度」，明寫未知或估計，不准編'));
+  assert.ok(prompt.indexOf('# 交件前自我檢查') < prompt.indexOf('# 上一次交貨被查核退回'), '要在交件前自我檢查之後');
+});
+
+test('buildPrompt：checkNote → 「# 使用者的回話（這次必須照做）」緊接查核退回段之後；沒有 redo 也照樣出現在同一位置', () => {
+  const adapter = createHostAdapter({});
+  const prompt = adapter.renderPrompt({ ...NODE_ARGS, reviewFocus: '數字要對得上', checkNote: '這次要用千元為單位' });
+  assert.ok(prompt.includes('# 使用者的回話（這次必須照做）'));
+  assert.ok(prompt.includes('這次要用千元為單位'));
+  assert.ok(prompt.indexOf('# 交件前自我檢查') < prompt.indexOf('# 使用者的回話'), '要在交件前自我檢查之後（沒有 redo 時緊接在同一位置）');
+});
+
+test('buildPrompt：四個新段都不給 → 輸出與現況逐字相同（固定樣本比對）', () => {
+  const adapter = createHostAdapter({});
+  const SAMPLE_ARGS = {
+    nodeId: 'x', title: '整理歸納', instruction: '整理成表',
+    roleContext: '你是客服主管', background: '過去三個月的客訴紀錄',
+    constraints: '不承諾賠償金額', examples: '範例：客戶A 退貨 500 元',
+    outputFormat: 'Markdown 表格，欄位=日期/標題', creativity: 'strict',
+    reviewFocus: '數字要對得上', attachments: ['C:/tmp/files/範本.docx'],
+    upstream: '原始資料',
+  };
+  const FIXED_SAMPLE = "你是「剝繭」流程裡的一個步驟執行者。只輸出這一步的產出內容本身——不要開場白、不要收尾語、不要解釋你做了什麼。\n這不是對話：沒有人會回覆你，你的產出會直接交給下一步（或給使用者過目，他只能核可或動手修改）。不要反問、不要邀請回覆、不要用「要哪個再說」收尾。任務要你提供多個選項時，自己選定一個推薦，讓產出以推薦版本為主體、備選附在後面標明。\n特例：如果要求裡指定的資料你拿不齊或拿不到——缺月份、缺欄位、少一段、工具不可用、搜尋無結果、上游沒交貨都算——第一行輸出「【資料不全】」加一句缺什麼，換行後再給你能給的部分。不准把「無項目」「找不到」這類空話當正式產出交出去。\n說明缺什麼時用使用者聽得懂的話講——只講「缺哪些資料、從哪裡拿得到」，不提工具、連線、指令或系統名稱。\n全篇使用與「要求」相同的語言，不夾雜其他語言的字詞（專有名詞照原文除外）。\n\n# 角色與情境\n你是客服主管\n\n# 這一步：整理歸納\n\n# 要求\n整理成表\n\n# 背景資料\n過去三個月的客訴紀錄\n\n# 限制條件（不可違反）\n不承諾賠償金額\n\n# 範例（照這個樣子）\n範例：客戶A 退貨 500 元\n\n# 參考檔案（先用你的檔案讀取能力逐一打開看，照裡面的規格與風格做）\n- C:/tmp/files/範本.docx\n\n# 產出格式要求（嚴格遵守）\nMarkdown 表格，欄位=日期/標題\n\n# 風格\n嚴謹精確——照資料與要求寫，不自行發揮、不添加未經證實的內容。\n\n# 交件前自我檢查（使用者也會用同一標準驗收）\n數字要對得上\n\n# 上一步的產出（你的輸入）\n原始資料";
+  assert.equal(adapter.renderPrompt(SAMPLE_ARGS), FIXED_SAMPLE);
+});
+
 test('checkAvailable：結束碼 0 → true；spawn error → false', async () => {
   let child;
   const adapter = createHostAdapter({ spawnFn: () => (child = fakeChild()) });
@@ -241,4 +306,169 @@ test('checkAvailable：結束碼 0 → true；spawn error → false', async () =
   const p2 = adapter2.checkAvailable();
   child.emit('error', new Error('ENOENT'));
   assert.equal(await p2, false);
+});
+
+// ===== 不帶行李模式（BOJIAN_LEAN）：預設關；開了才換系統提示、只送用得到的工具定義 =====
+
+// 自動應答的假子行程：spawn 參數留底，下一個 tick 回一筆 JSON 讓 promise 收斂
+function capture(reply = jsonReply()) {
+  const rec = {};
+  rec.spawnFn = (a, extra) => {
+    rec.args = a;
+    rec.extra = extra;
+    const c = fakeChild();
+    setTimeout(() => { c.stdout.emit('data', reply); c.emit('close', 0); }, 0);
+    return c;
+  };
+  return rec;
+}
+
+// 環境變數在測試間會互相污染：明確設定／清掉，跑完還原
+async function withLeanEnv(value, fn) {
+  const saved = process.env.BOJIAN_LEAN;
+  if (value === undefined) delete process.env.BOJIAN_LEAN;
+  else process.env.BOJIAN_LEAN = value;
+  try { return await fn(); } finally {
+    if (saved === undefined) delete process.env.BOJIAN_LEAN;
+    else process.env.BOJIAN_LEAN = saved;
+  }
+}
+
+const FM = { cwd: 'C:/tmp/run-out', fileName: '報告.docx' };
+
+test('帶行李：明講關閉（lean:false）——executeNode／complete 的 spawn 參數與現況逐字相同', async () => {
+  await withLeanEnv(undefined, async () => {
+    const a = capture();
+    const adapter = createHostAdapter({ spawnFn: a.spawnFn, lean: false });
+    await adapter.executeNode(NODE_ARGS);
+    assert.deepEqual(a.args, ['-p', '--output-format', 'json', '--allowedTools', 'WebSearch', 'WebFetch', 'Read']);
+    assert.equal(adapter.isLean(), false);
+
+    const b = capture();
+    await createHostAdapter({ spawnFn: b.spawnFn, lean: false }).executeNode({ ...NODE_ARGS, model: 'opus', fileMode: FM });
+    assert.deepEqual(b.args, ['-p', '--output-format', 'json', '--allowedTools', 'WebSearch', 'WebFetch', 'Read', 'Write', 'Edit', 'Bash(node *)', '--model', 'opus']);
+
+    const c = capture();
+    await createHostAdapter({ spawnFn: c.spawnFn, lean: false }).complete({ prompt: '測' });
+    assert.deepEqual(c.args, ['-p', '--output-format', 'json']);
+  });
+});
+
+test('不帶行李：沒給 option、沒設環境變數——預設就是輕裝', async () => {
+  await withLeanEnv(undefined, async () => {
+    const a = capture();
+    const adapter = createHostAdapter({ spawnFn: a.spawnFn });
+    assert.equal(adapter.isLean(), true);
+    await adapter.executeNode(NODE_ARGS);
+    assert.deepEqual(a.args, [
+      '-p', '--output-format', 'json',
+      '--strict-mcp-config', '--disable-slash-commands',
+      '--system-prompt', LEAN_WORKER_SYSTEM,
+      '--tools', 'WebSearch,WebFetch,Read',
+      '--allowedTools', 'WebSearch', 'WebFetch', 'Read',
+    ]);
+
+    const c = capture();
+    await createHostAdapter({ spawnFn: c.spawnFn }).complete({ prompt: '測' });
+    assert.deepEqual(c.args, [
+      '-p', '--output-format', 'json',
+      '--strict-mcp-config', '--disable-slash-commands',
+      '--system-prompt', LEAN_GENERIC_SYSTEM,
+      '--tools', '',
+    ]);
+  });
+});
+
+test('不帶行李：option 明寫開啟——executeNode 依序帶六個輕裝旗標，--tools 只列用得到的，--allowedTools 清單原封不動接在後面', async () => {
+  await withLeanEnv(undefined, async () => {
+    const a = capture();
+    const adapter = createHostAdapter({ spawnFn: a.spawnFn, lean: true });
+    await adapter.executeNode(NODE_ARGS);
+    assert.equal(adapter.isLean(), true);
+    assert.deepEqual(a.args, [
+      '-p', '--output-format', 'json',
+      '--strict-mcp-config', '--disable-slash-commands',
+      '--system-prompt', LEAN_WORKER_SYSTEM,
+      '--tools', 'WebSearch,WebFetch,Read',
+      '--allowedTools', 'WebSearch', 'WebFetch', 'Read',
+    ]);
+
+    const b = capture();
+    await createHostAdapter({ spawnFn: b.spawnFn, lean: true }).executeNode({ ...NODE_ARGS, model: 'opus', fileMode: FM });
+    assert.deepEqual(b.args, [
+      '-p', '--output-format', 'json',
+      '--strict-mcp-config', '--disable-slash-commands',
+      '--system-prompt', LEAN_WORKER_SYSTEM,
+      '--tools', 'WebSearch,WebFetch,Read,Write,Edit,Bash',
+      '--allowedTools', 'WebSearch', 'WebFetch', 'Read', 'Write', 'Edit', 'Bash(node *)',
+      '--model', 'opus',
+    ]);
+    assert.equal(b.extra.cwd, 'C:/tmp/run-out', '產檔模式的工作目錄與 NODE_PATH 不受輕裝影響');
+    assert.ok(b.extra.env.NODE_PATH.endsWith('node_modules'));
+
+    const c = capture();
+    await createHostAdapter({ spawnFn: c.spawnFn, lean: true }).complete({ prompt: '測' });
+    assert.deepEqual(c.args, [
+      '-p', '--output-format', 'json',
+      '--strict-mcp-config', '--disable-slash-commands',
+      '--system-prompt', LEAN_GENERIC_SYSTEM,
+      '--tools', '',
+    ]);
+    assert.ok(!c.args.includes('--allowedTools'), '通用補全照樣不放行工具');
+  });
+});
+
+test('不帶行李：兩段系統提示是導出的常數（A/B 報告要引用原文）', () => {
+  assert.match(LEAN_WORKER_SYSTEM, /^你是剝繭流程裡的一名工人。/);
+  assert.ok(LEAN_WORKER_SYSTEM.includes('訊息沒要求的不要做'));
+  // A／B 第二回合：輕裝工人每一步都自報資料不全、還編了沒有依據的數字，工人提示補三條規則
+  assert.ok(LEAN_WORKER_SYSTEM.includes('就用手上的資料判斷'), '被要求判斷／評分／排序時要自己判斷');
+  assert.ok(LEAN_WORKER_SYSTEM.includes('不要因為資料不完整就停下'), '只有必要原始資料真的沒給才回報資料不全');
+  assert.ok(LEAN_WORKER_SYSTEM.includes('不准編'), '沒有的數字要寫未知，不准編');
+  assert.match(LEAN_GENERIC_SYSTEM, /^只照接下來訊息裡的指示做事/);
+  assert.ok(LEAN_GENERIC_SYSTEM.includes('只輸出訊息要求的格式'));
+});
+
+test('不帶行李：每筆用量帳都帶 lean 欄位（A/B 才分得出哪些呼叫是輕裝）', async () => {
+  await withLeanEnv(undefined, async () => {
+    for (const lean of [false, true]) {
+      const a = capture();
+      const adapter = createHostAdapter({ spawnFn: a.spawnFn, lean });
+      const entries = [];
+      adapter.setUsageSink((u) => entries.push(u));
+      await adapter.executeNode({ ...NODE_ARGS, meta: { kind: 'step', run: 'r-1' } });
+      await adapter.complete({ prompt: '測', meta: { kind: 'checker' } });
+      assert.equal(entries.length, 2);
+      for (const u of entries) assert.equal(u.lean, lean, `lean=${lean} 的帳目要標 lean`);
+      assert.equal(entries[0].kind, 'step', '其他欄位照舊');
+      assert.equal(entries[0].input_tokens, 10);
+    }
+  });
+});
+
+test('解析順序：option 明寫優先，其次環境變數 BOJIAN_LEAN，都沒有才落到預設輕裝', async () => {
+  await withLeanEnv('1', async () => {
+    const a = capture();
+    const adapter = createHostAdapter({ spawnFn: a.spawnFn });
+    assert.equal(adapter.isLean(), true);
+    await adapter.executeNode(NODE_ARGS);
+    assert.ok(a.args.includes('--strict-mcp-config') && a.args.includes('--tools'));
+    assert.equal(createHostAdapter({ spawnFn: capture().spawnFn, lean: false }).isLean(), false, 'option 明寫 false 要蓋過環境變數');
+    assert.equal(createHostAdapter({ spawnFn: capture().spawnFn, lean: true }).isLean(), true, 'option 明寫 true 也蓋過環境變數');
+  });
+  for (const legacyVal of ['0', 'false', 'off']) {
+    await withLeanEnv(legacyVal, async () => {
+      assert.equal(createHostAdapter({ spawnFn: capture().spawnFn }).isLean(), false, `BOJIAN_LEAN=${legacyVal} 要退回帶行李`);
+    });
+  }
+});
+
+test('BOJIAN_LEAN=0：退回帶行李——spawn 參數與帶行李版本逐字相同', async () => {
+  await withLeanEnv('0', async () => {
+    const a = capture();
+    const adapter = createHostAdapter({ spawnFn: a.spawnFn });
+    assert.equal(adapter.isLean(), false);
+    await adapter.executeNode(NODE_ARGS);
+    assert.deepEqual(a.args, ['-p', '--output-format', 'json', '--allowedTools', 'WebSearch', 'WebFetch', 'Read']);
+  });
 });

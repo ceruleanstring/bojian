@@ -132,8 +132,9 @@ test('D20：waiting_time 到點喚醒＋kick；未到點不動', async () => {
 test('D20：提醒升級——提前量到點發通知（含卡住描述）、離線補發、去重', async () => {
   const def = structuredClone(DEF);
   def.nodes = [
-    { id: 'a', title: '審簡報', executor: 'ai', stop_point: 'always', instruction: '審', next: ['b'] },
+    { id: 'a', title: '審簡報', executor: 'ai', stop_point: 'always', instruction: '審', next: ['b', 'c'] },
     { id: 'b', title: '開會', executor: 'human', stop_point: 'never', instruction: '出席', next: [], wait_until: '2026-08-27T14:00', remind_leads: ['1h', '30m'] },
+    { id: 'c', title: '算業績', executor: 'ai', stop_point: 'never', instruction: '算', next: [] },
   ];
   const { store, runner, scheduler, clock } = setup('2026-08-27T10:00');
   store.writeWorkflow('工作', 'meet', def);
@@ -143,12 +144,14 @@ test('D20：提醒升級——提前量到點發通知（含卡住描述）、�
   const r0 = store.readRun('工作', 'meet', run.run_id);
   r0.steps.b.status = 'waiting_time';
   r0.steps.b.wake_at = new Date('2026-08-27T14:00').toISOString();
+  r0.steps.c.status = 'waiting_check'; // 查核攔下也是「卡著等人」，提醒要講得出來
   store.writeRun('工作', 'meet', run.run_id, r0);
   clock.t = new Date('2026-08-27T13:45').getTime(); // 1h 與 30m 兩檔都已逾（離線補發）
   scheduler.tickOnce();
   const rem = store.readNotices().filter((n) => n.type === 'reminder');
   assert.equal(rem.length, 2, '兩檔一次補發');
   assert.ok(rem[0].desc.includes('審簡報'), '卡住的步驟寫進描述');
+  assert.ok(rem[0].desc.includes('算業績'), '查核攔下的步驟也要算卡住');
   scheduler.tickOnce();
   assert.equal(store.readNotices().filter((n) => n.type === 'reminder').length, 2, '去重不重發');
 });
