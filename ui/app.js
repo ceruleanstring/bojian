@@ -55,6 +55,7 @@ const state = {
   // ---- 資料通道輪（T5）----
   startCheck: null,    // 開跑前健檢卡 {key:定義JSON, level:'block'|'warn', issues}；定義一變就作廢
   dataSupplyOpen: null, // 資料不全卡「我補給你」展開中的節點 id
+  editRulesOpen: null,  // 「後面每步會守」清單改寫中的節點 id（交貨查核輪）
   keep: {},            // 打字中的多行內容（run_id:元素id → 文字）——整頁重繪後放回，不被輪詢吃掉
   runJson: null,       // 上次抓到的 run 原文——輪詢只在真的變了才重繪
   // ---- 產檔輪（T5）----
@@ -294,7 +295,7 @@ function workHeadHtml() {
       <span class="btn iconb" data-act="export-wf" title="匯出成單一檔案"><i class="ph ph-export"></i></span>
       <span class="btn iconb btn-danger" data-act="delete-wf" title="移到垃圾桶，30 天內可復原"><i class="ph ph-trash"></i></span>` : '';
   return `<div class="tophead"><h3>${esc(title)}</h3>${draftChip}${verChip}</div>
-    <div class="headrow">${modeSeg()}<span class="right">${wfCtrls}</span></div>${permRowHtml()}`;
+    <div class="headrow">${modeSeg()}<span class="right">${wfCtrls}</span></div>${permRowHtml()}${checkRowHtml()}`;
 }
 
 // 產檔權限列（產檔輪）：已存流程才有，草稿不顯示；開關即 PUT 定義（permissions.files）。健檢「修這裡」會捲到這列並亮 1.5 秒
@@ -307,6 +308,17 @@ function permRowHtml() {
     <span class="permtxt"><b>允許這條流程產出檔案</b>
       <span class="permnote">開了會讓 AI 工人在這趟的產出資料夾裡寫檔與執行程式；匯入別人的流程預設關。</span>
       ${state.permErr ? `<span class="permerr"><i class="ph-fill ph-warning"></i>${esc(state.permErr)}</span>` : ''}</span>
+  </div>`;
+}
+
+// 交貨查核開關（交貨查核輪）：已存流程才有，草稿不顯示；缺省＝開。切換即 PUT 定義（def.check.enabled）
+function checkRowHtml() {
+  if (subjectIsDraft() || !state.wf) return '';
+  const on = state.wf.def.check?.enabled !== false;
+  return `<div class="permrow checkrow ${on ? 'on' : ''}" id="check-delivery">
+    <label class="switch" title="${on ? '點一下關掉' : '點一下打開'}"><input type="checkbox" data-act="check-toggle" ${on ? 'checked' : ''} aria-label="每步交貨先查"><span class="knob"></span></label>
+    <span class="permtxt"><b>每步交貨先查</b>
+      <span class="permnote">每個 AI 步驟做完先對照原始資料與你的要求；攔到會自動重做一次，還錯才停下問你。關掉就不查、也不多花 token。</span></span>
   </div>`;
 }
 
@@ -840,6 +852,31 @@ function stepPill(step) {
   }
 }
 
+// 查核結果 chip（交貨查核輪）：missing 由資料不全卡呈現、off／skipped 不標；usage＝這一步的查核用量 {input,output}
+const CHECK_CHIP = {
+  pass: ['green', 'ph-fill ph-shield-check', '查過'],
+  'redo-pass': ['green', 'ph-fill ph-arrows-clockwise', '重做過一次'],
+  blocked: ['red', 'ph-fill ph-hand-palm', '查核攔下'],
+  incomplete: ['amber', 'ph-fill ph-warning', '未完成查核'],
+  accepted: ['', 'ph ph-check', '你說就這樣過'],
+};
+function checkChip(step, usage) {
+  const hit = CHECK_CHIP[step?.check?.status];
+  if (!hit) return '';
+  const [tone, icon, txt] = hit;
+  const n = (usage?.input ?? 0) + (usage?.output ?? 0);
+  return `<span class="chip ${tone}"><i class="${icon}"></i>${txt}${n ? ` · 查核 ${fmtInt(n)} token` : ''}</span>`;
+}
+
+// 標黃行（交貨查核輪）：查核沒攔下、但值得你看一眼的兩種情形
+const FLAG_TXT = { 'conclusion-changed': '這一步把結論或排序改了', format: '格式跟要求不同' };
+function flagsHtml(step) {
+  return (step?.check?.flags ?? [])
+    .filter((f) => FLAG_TXT[f.kind])
+    .map((f) => `<div class="flagline"><i class="ph-fill ph-flag"></i><span>${esc(FLAG_TXT[f.kind])}：${esc(f.detail)}</span></div>`)
+    .join('');
+}
+
 // ---------- 文字成品真排版（產檔輪）：POST /api/render 按內容雜湊快取；拿到前先顯示原文，回來只補該區塊不整頁重繪 ----------
 const mdHash = (s) => { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0; return `${h.toString(36)}-${s.length}`; };
 const mdTextByKey = new Map(); // 「看原文／看排版」切換時要拿得到原文
@@ -1057,6 +1094,58 @@ function dataCardHtml(node, step) {
   </div>`;
 }
 
+// 查核卡（交貨查核輪）：重做一次仍被攔下——把原始資料那句與成品那句並排，三個出口＋先放著
+function checkCardHtml(node, step) {
+  if (state.editingNode === node.id) return stopCardHtml(node, step); // 「我改一下」沿用停點卡的編輯框
+  const key = `check:${node.id}`;
+  const blocks = (step.check?.blocks ?? []).map((b) => {
+    // must／stop-edit 這兩種攔的是「你的要求」，沒有原始資料可並排——並排只給對得上原文的那兩種
+    const body = ['must', 'stop-edit'].includes(b.kind)
+      ? `<div class="rulehit"><span class="lb">你的要求：</span>${esc(b.claim)}</div>`
+      : `<div class="pair">
+          <div class="col"><div class="lb">原始資料（相關原文）</div><div class="tx">${b.source ? esc(b.source) : '—'}</div></div>
+          <div class="col"><div class="lb">成品（那句話）</div><div class="tx">${b.claim ? esc(b.claim) : '—'}</div></div>
+        </div>`;
+    return `<div class="blk"><div class="bd"><span class="lb">錯在哪：</span>${esc(b.detail)}</div>${body}</div>`;
+  }).join('');
+  // 查核員自己那句話：實走發現只有「錯在哪：算式」時看不懂為什麼被攔（例：成品寫 14、錯在哪也寫 6+3+4+1=14）
+  const summary = step.check?.summary ? `<div class="cksum">${esc(step.check.summary)}</div>` : '';
+  return `<div class="card err checkcard" style="margin:10px 0">
+    <b><i class="ph-fill ph-hand-palm"></i> 查核攔下：成品跟原始資料對不上，重做一次還是不對</b>
+    ${summary}
+    ${blocks}
+    <div class="outbar">${mdToggleHtml(key)}</div>
+    ${mdBlock(step.output, key)}
+    <textarea id="check-note-${esc(node.id)}" class="feedbackin autogrow" data-keep placeholder="跟它講哪裡不對、要怎麼改；留空就是照查核結果重做">${esc(kept(`check-note-${node.id}`) ?? '')}</textarea>
+    <div class="btns" style="margin-top:8px">
+      <button class="btn btn-primary" data-act="check-retry" data-node="${esc(node.id)}"><i class="ph ph-arrows-clockwise"></i>回話重做</button>
+      <button class="btn btn-secondary" data-act="check-accept" data-node="${esc(node.id)}">就這樣過</button>
+      <button class="btn btn-secondary" data-act="start-edit" data-node="${esc(node.id)}">我改一下</button>
+      <button class="btn btn-ghost" data-act="back">先放著，晚點回來</button>
+    </div>
+  </div>`;
+}
+
+// 停點修改後擬出的規則（交貨查核輪）：後面每一步都會帶著它跑，查核也把它當必守；使用者可以自己改
+function editRulesHtml(node, step) {
+  const rules = step.edit_rules ?? [];
+  if (!rules.length) return '';
+  if (state.editRulesOpen === node.id) {
+    return `<div class="rules editing">
+      <div class="flabel">後面每步會守：（一行一條）</div>
+      <textarea id="edit-rules-text" class="feedbackin autogrow" data-keep>${esc(kept('edit-rules-text') ?? rules.map((r) => r.text).join('\n'))}</textarea>
+      <div class="btns" style="margin-top:6px">
+        <button class="btn btn-primary" data-act="edit-rules-save" data-node="${esc(node.id)}">存起來</button>
+        <button class="btn btn-ghost" data-act="edit-rules-cancel">取消</button>
+      </div>
+    </div>`;
+  }
+  const items = rules.map((r) => `<li>${esc(r.text)}${r.scope === 'this-step' ? '<span class="chip">只有這一步</span>' : ''}</li>`).join('');
+  return `<div class="rules"><div class="rhead"><b>後面每步會守：</b>
+      <span class="pbtn" data-act="edit-rules-open" data-node="${esc(node.id)}"><i class="ph ph-pencil-simple"></i>改一下</span></div>
+    <ul>${items}</ul></div>`;
+}
+
 function failCardHtml(node, step) {
   return `<div class="alert red">
     <b><i class="ph-fill ph-warning"></i> 這一步出狀況，先停在這裡</b>
@@ -1102,12 +1191,15 @@ function runHtml() {
     const fileChip = step.file ? fileChipHtml(run.workflow.category, run.workflow.id, run.run_id, step.file, step.file_note) : '';
     rows += `<div class="step ${cls}" ${dim}><span class="n">${step.status === 'done' ? '<i class="ph ph-check"></i>' : step.status === 'skipped' ? '—' : seq}</span><b>${esc(node.title)}</b>
       <span class="chip ${node.executor === 'human' ? 'violet' : 'blue'}">${node.executor === 'human' ? '你來' : 'AI'}</span>
-      <span class="pillslot">${fileChip}${stepPill(step)}</span></div>`;
+      <span class="pillslot">${fileChip}${checkChip(step, run.usage_by_node?.[node.id]?.check)}${stepPill(step)}</span></div>`;
     if (step.file_note && step.file) rows += `<p class="note" style="margin:2px 0 6px 20px">${esc(step.file_note)}</p>`;
+    rows += flagsHtml(step);
     if (step.status === 'waiting_review') rows += stopCardHtml(node, step);
+    if (step.status === 'waiting_check') rows += checkCardHtml(node, step);
     if (step.status === 'waiting_human') rows += humanCardHtml(node);
     if (step.status === 'waiting_data') rows += dataCardHtml(node, step);
     if (step.status === 'failed') rows += failCardHtml(node, step);
+    if (step.status === 'done') rows += editRulesHtml(node, step);
   }
 
   let tail = '';
@@ -1232,7 +1324,8 @@ function dashRunCard(r) {
       : r.steps.failed > 0 ? '<span class="chip red"><i class="ph ph-warning-circle"></i>有步驟失敗</span>'
         : '<span class="chip amber"><i class="ph ph-hand-palm"></i>等你處理</span>';
   const src = `${r.source === 'schedule' ? '排程自動' : '手動開跑'}${r.makeup ? '・補跑' : ''}`;
-  const usage = r.usage ? `<span class="chip" title="輸入 ${fmtInt(r.usage.input)}／輸出 ${fmtInt(r.usage.output)} tokens">${fmtInt(r.usage.input + r.usage.output)} tokens</span>` : '';
+  const checkTok = (r.usage?.check?.input ?? 0) + (r.usage?.check?.output ?? 0);
+  const usage = r.usage ? `<span class="chip" title="輸入 ${fmtInt(r.usage.input)}／輸出 ${fmtInt(r.usage.output)} tokens">${fmtInt(r.usage.input + r.usage.output)} tokens</span>${checkTok ? `<span class="chip" title="其中交貨查核花掉的">查核 ${fmtInt(checkTok)} token</span>` : ''}` : '';
   // 成品預覽走排版（產檔輪）；檔案 chip 點開預覽浮窗
   const finals = r.finals.map((f, i) => `<div class="final"><span class="ftitle"><i class="ph-fill ph-flag-checkered"></i> 成品・${esc(f.title)}${f.file ? `　${fileChipHtml(r.category, r.id, r.run_id, f.file)}` : ''}</span>
     ${mdBlock(`${f.preview}${f.preview.length >= 400 ? '⋯' : ''}`, `dash:${key}:${f.node ?? i}`, 'fprev')}</div>`).join('');
@@ -1255,6 +1348,7 @@ function dashStepRows(key) {
     done: ['green', '完成'], failed: ['red', '失敗'], skipped: ['', '略過'], pending: ['', '還沒跑'], running: ['blue', '進行中'],
     waiting_review: ['amber', '等你過目'], waiting_human: ['amber', '等你做'], waiting_branch: ['amber', '等你選路'],
     waiting_data: ['amber', '等補資料'], waiting_time: ['blue', '等時間到'], time_pending: ['amber', '時間未定'],
+    waiting_check: ['red', '查核攔下'],
   };
   const rows = topoNodes(o.run.def).filter((n) => !['fork', 'join'].includes(kindOf(n))).map((n) => {
     const s = o.run.steps?.[n.id] ?? {};
@@ -1262,7 +1356,7 @@ function dashStepRows(key) {
     const text = String(s.edited_output ?? s.output ?? s.error ?? '');
     const pname = (o.prompts ?? []).find((p) => p === `${n.id}.txt` || p === `${n.id}-判路.txt`);
     const pbtn = pname ? `<button class="btn sm2" data-act="dash-prompt" data-cat="${esc(o.cat)}" data-id="${esc(o.id)}" data-rid="${esc(o.rid)}" data-pname="${esc(pname)}" data-ptitle="${esc(n.title)}">當時指示</button>` : '';
-    return `<div class="stepline"><span class="st ${tone}">${txt}</span><div style="flex:1;min-width:0"><b>${esc(n.title)}</b>
+    return `<div class="stepline"><span class="st ${tone}">${txt}</span><div style="flex:1;min-width:0"><b>${esc(n.title)}</b>${checkChip(s, o.run.usage_by_node?.[n.id]?.check)}
       ${text ? mdBlock(`${text.slice(0, 200)}${text.length > 200 ? '⋯' : ''}`, `dashstep:${key}:${n.id}`, 'sprev') : ''}</div>${pbtn}</div>`;
   }).join('');
   return `<div style="margin-top:var(--s2)">${rows}</div>`;
@@ -2251,6 +2345,52 @@ app.addEventListener('click', async (e) => {
       if (state.cvWork) state.cvWork.permissions = def.permissions; // 畫布工作本同步，之後存檔不會把開關蓋回去
       render();
     }
+    // ===== 交貨查核（交貨查核輪）=====
+    else if (act === 'check-toggle') {
+      // 每步交貨先查：切換即 PUT 定義；沒存成就講一句並把開關撥回原樣（重繪照定義畫）
+      const def = structuredClone(state.wf.def);
+      def.check = { enabled: el.checked };
+      try {
+        await api('PUT', wfPath(state.wf), { def });
+      } catch (err) {
+        window.alert(`沒存成：${err.message}`);
+        render();
+        return;
+      }
+      state.wf.def = def;
+      if (state.cvWork) state.cvWork.check = def.check; // 畫布工作本同步，之後存檔不會把開關蓋回去
+      render();
+    } else if (act === 'check-retry') {
+      const node = el.dataset.node;
+      const note = document.getElementById(`check-note-${node}`)?.value.trim() ?? '';
+      await api('POST', `${wfPath(state.run.workflow)}/runs/${state.run.run_id}/check-retry`, { node, note: note || null });
+      delete state.keep[keepKey(`check-note-${node}`)];
+      await refreshRun();
+    } else if (act === 'check-accept') {
+      const node = el.dataset.node;
+      await api('POST', `${wfPath(state.run.workflow)}/runs/${state.run.run_id}/check-accept`, { node });
+      delete state.keep[keepKey(`check-note-${node}`)];
+      await refreshRun();
+    } else if (act === 'edit-rules-open') {
+      delete state.keep[keepKey('edit-rules-text')]; // 別的步驟沒送出的草稿不准帶進這一步
+      state.editRulesOpen = el.dataset.node;
+      render();
+    } else if (act === 'edit-rules-cancel') {
+      state.editRulesOpen = null;
+      delete state.keep[keepKey('edit-rules-text')];
+      render();
+    } else if (act === 'edit-rules-save') {
+      const node = el.dataset.node;
+      const was = state.run.steps[node]?.edit_rules ?? [];
+      const scopeOf = new Map(was.map((r) => [r.text.trim(), r.scope])); // 沒改動的那幾條保住原本的範圍，新寫的一律往下游帶
+      const rules = (document.getElementById('edit-rules-text')?.value ?? '')
+        .split('\n').map((s) => s.trim()).filter(Boolean)
+        .map((text) => ({ text, scope: scopeOf.get(text) ?? 'all' }));
+      await api('POST', `${wfPath(state.run.workflow)}/runs/${state.run.run_id}/edit-rules`, { node, rules });
+      state.editRulesOpen = null;
+      delete state.keep[keepKey('edit-rules-text')];
+      await refreshRun();
+    }
     // ===== 行事曆（D20）=====
     else if (act === 'open-calendar') {
       if (canvasLeaveBlocked()) return;
@@ -2424,6 +2564,7 @@ app.addEventListener('click', async (e) => {
       state.wf = { category: cat, id, def: await api('GET', `/api/workflows/${encodeURIComponent(cat)}/${encodeURIComponent(id)}`), runs: [] };
       state.run = { ...(await api('GET', `/api/workflows/${encodeURIComponent(cat)}/${encodeURIComponent(id)}/runs/${rid}`)), workflow: { category: cat, id } };
       state.dataSupplyOpen = null;
+      state.editRulesOpen = null;
       render();
       schedulePoll();
     } else if (act === 'todo-open-wf') {
@@ -2591,6 +2732,7 @@ app.addEventListener('click', async (e) => {
       state.run.workflow = { category: state.wf.category, id: state.wf.id };
       state.editingNode = null;
       state.dataSupplyOpen = null;
+      state.editRulesOpen = null;
       render();
       schedulePoll();
     } else if (act === 'start' || act === 'start-force') {
@@ -2624,6 +2766,7 @@ app.addEventListener('click', async (e) => {
       state.runJson = null;
       state.keep = {};
       state.dataSupplyOpen = null;
+      state.editRulesOpen = null;
       state.feedbackSent = false;
       render();
       schedulePoll();
@@ -2654,6 +2797,7 @@ app.addEventListener('click', async (e) => {
       state.run = null;
       state.editingNode = null;
       state.dataSupplyOpen = null;
+      state.editRulesOpen = null;
       if (state.wf) state.wf.runs = await api('GET', `${wfPath(state.wf)}/runs`);
       render();
     } else if (act === 'data-fix-node') {

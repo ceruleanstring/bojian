@@ -493,6 +493,28 @@ svg.wire .ghost{stroke:var(--accent);stroke-width:1.8;fill:none;stroke-dasharray
 .switch input:checked+.knob{background:var(--accent)}
 .switch input:checked+.knob::after{transform:translateX(16px)}
 .switch input:focus-visible+.knob{outline:2px solid rgb(var(--accent-rgb) / .35);outline-offset:2px}
+/* ===== 交貨查核輪：開關列（貼在權限列下）／查核卡兩欄／標黃行／後面每步會守 ===== */
+.checkrow{margin-top:-8px}
+.checkcard .cksum{font-size:12.5px;line-height:1.65;color:var(--ink-700);margin-top:4px}
+.checkcard .blk{border-top:.5px solid var(--hairline);padding-top:8px;margin-top:8px}
+.checkcard .bd{font-size:12.5px;line-height:1.6;color:var(--ink-700);white-space:pre-wrap}
+.checkcard .lb{font-weight:800;color:var(--ink-900)}
+.checkcard .pair{display:flex;gap:var(--s2);margin-top:6px;flex-wrap:wrap}
+.checkcard .pair .col{flex:1 1 240px;min-width:0;border:.5px solid var(--hairline);border-radius:9px;background:var(--fill-inner);padding:7px 9px}
+.checkcard .pair .col .lb{display:block;font-size:11px;font-weight:800;color:var(--ink-500);margin-bottom:3px}
+.checkcard .pair .col .tx{font-size:12.5px;line-height:1.6;white-space:pre-wrap;word-break:break-word;max-height:160px;overflow:auto}
+.checkcard .rulehit{font-size:12.5px;line-height:1.6;margin-top:6px;background:var(--fill-inner);border:.5px solid var(--hairline);border-radius:9px;padding:7px 9px}
+.checkcard .feedbackin{min-height:64px;margin-top:8px}
+.flagline{display:flex;gap:6px;align-items:flex-start;font-size:12px;line-height:1.6;color:var(--amber-text);
+  background:rgb(var(--amber-rgb) / .10);border:.5px solid rgb(var(--amber-rgb) / .35);border-radius:9px;padding:6px 10px;margin:2px 0 6px 20px}
+.flagline>i{flex:none;font-size:13px;margin-top:2px}
+.rules{margin:2px 0 8px 20px;border-left:3px solid rgb(var(--accent-rgb) / .35);background:var(--fill-soft);border-radius:0 9px 9px 0;padding:7px 10px;font-size:12.5px}
+.rules .rhead{display:flex;align-items:center;gap:8px}
+.rules .rhead b{font-weight:800}
+.rules ul{margin:4px 0 0;padding-left:18px;display:flex;flex-direction:column;gap:3px;color:var(--ink-700);line-height:1.6}
+.rules li .chip{margin-left:5px;font-size:10px;padding:1px 7px}
+.rules .flabel{margin-top:0}
+.rules.editing .feedbackin{min-height:64px}
 /* 參考檔清單：Word／Excel 檔標「範本」 */
 .tplchip{display:inline-block;margin-left:5px;font-size:10px;font-weight:700;color:var(--violet-text);background:rgb(var(--violet-rgb) / .12);border-radius:100px;padding:0 6px;vertical-align:1px}
 /* 成品檔 chip＋停點卡的檔案／切換列 */
