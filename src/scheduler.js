@@ -243,7 +243,7 @@ export function createScheduler({ store, runner, kick = () => {}, now = () => Da
           } else {
             const node = r.def.nodes.find((n) => n.id === nodeId);
             const blocked = Object.entries(r.steps)
-              .filter(([, s]) => ['waiting_review', 'waiting_human', 'waiting_branch', 'waiting_data', 'time_pending'].includes(s.status))
+              .filter(([, s]) => ['waiting_review', 'waiting_human', 'waiting_branch', 'waiting_data', 'waiting_check', 'time_pending'].includes(s.status))
               .map(([bid]) => r.def.nodes.find((n) => n.id === bid)?.title ?? bid);
             timed.push({
               ms: wakeMs, label: `${node?.title ?? nodeId}（${r.workflow.name}）`,

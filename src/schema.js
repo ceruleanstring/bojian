@@ -38,6 +38,12 @@ export function validateWorkflow(def, { allowFloating = false } = {}) {
     if (!pm || typeof pm !== 'object' || Array.isArray(pm)) problems.push('permissions 要是物件');
     else if (pm.files !== undefined && typeof pm.files !== 'boolean') problems.push('permissions.files 要是開或關');
   }
+  // 交貨查核輪：流程層一個開關；缺省＝開（enabled !== false 即開）
+  if (def.check !== undefined) {
+    const ck = def.check;
+    if (!ck || typeof ck !== 'object' || Array.isArray(ck)) problems.push('check 要是物件');
+    else if (ck.enabled !== undefined && typeof ck.enabled !== 'boolean') problems.push('check.enabled 要是開或關');
+  }
 
   const params = Array.isArray(def.params) ? def.params : (problems.push('params 必須是陣列'), []);
   const paramKeys = new Set();

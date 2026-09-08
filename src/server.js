@@ -87,6 +87,23 @@ export async function previewArtifact(buf, name) {
   return { kind: 'text', text };
 }
 
+// 交貨查核輪：run 詳情頁的用量彙總——依 node＋kind 彙總這個 run 的帳；擬規則（edit-rules）兩邊都不算，
+// 它不是工人的一步也不是查核的一次，只在儀表板／帳本總量裡算（既有邏輯不動）。沒有任何紀錄的節點不出現在結果裡。
+function usageByNode(allUsage, runId) {
+  const out = {};
+  for (const u of allUsage) {
+    if (u.run !== runId || !u.node) continue;
+    const bucket = u.kind === 'check' ? 'check' : u.kind === 'step' ? 'step' : null;
+    if (!bucket) continue;
+    const n = (out[u.node] ??= { step: { input: 0, output: 0, calls: 0 }, check: { input: 0, output: 0, calls: 0 } });
+    const b = n[bucket];
+    b.input += (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0);
+    b.output += u.output_tokens ?? 0;
+    b.calls += 1;
+  }
+  return out;
+}
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let data = '';
@@ -154,6 +171,7 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
       waiting_branch: ['hold', 'AI 判不出走哪條路，等你選'],
       waiting_data: ['hold', '資料不全——重抓／續跑／擱置'],
       time_pending: ['hold', '時間未定——等你定時刻'],
+      waiting_check: ['hold', '查核攔下——看原始資料 vs 成品再決定'],
     };
     for (const { category, id } of store.listWorkflows()) {
       for (const rid of store.listRuns(category, id)) {
@@ -167,7 +185,10 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
           items.push({
             kind: step.status, tone: km[0],
             title: `${node?.title ?? nodeId}（${r.workflow.name}）`,
-            desc: step.status === 'time_pending' ? (step.time_note ?? km[1]) : (step.status === 'waiting_data' ? (step.data_note ?? km[1]) : km[1]),
+            desc: step.status === 'time_pending' ? (step.time_note ?? km[1])
+              : step.status === 'waiting_data' ? (step.data_note ?? km[1])
+              : step.status === 'waiting_check' ? (step.check?.blocks?.[0]?.detail ?? km[1])
+              : km[1],
             run: { category, id, run_id: rid, node: nodeId },
           });
         }
@@ -491,12 +512,18 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
         const days = Math.min(365, Number(q.get('days')) || 30);
         const allUsage = store.readUsage();
         const byRun = {};
+        const byRunCheck = {}; // 交貨查核輪：run 卡片附「查核 N token」，只算 kind==='check' 那幾筆
         for (const u of allUsage) {
           if (!u.run) continue;
           const b = (byRun[u.run] ??= { input: 0, output: 0, cost: 0 });
           b.input += (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0);
           b.output += u.output_tokens ?? 0;
           b.cost += u.cost_usd ?? 0;
+          if (u.kind === 'check') {
+            const c = (byRunCheck[u.run] ??= { input: 0, output: 0 });
+            c.input += (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0);
+            c.output += u.output_tokens ?? 0;
+          }
         }
         const recent = store.listRecentRuns(limit).map((r) => {
           let run;
@@ -525,11 +552,12 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
             (a, s) => ({ total: a.total + 1, done: a.done + (s.status === 'done' ? 1 : 0), failed: a.failed + (s.status === 'failed' ? 1 : 0) }),
             { total: 0, done: 0, failed: 0 },
           );
+          const usage = byRun[r.runId] ? { ...byRun[r.runId], check: byRunCheck[r.runId] ?? { input: 0, output: 0 } } : null;
           return {
             category: r.category, id: r.id, name: run.workflow?.name ?? r.name, run_id: r.runId,
             status: run.status, source: run.source ?? 'manual', makeup: run.makeup === true,
             started_at: run.started_at, finished_at: run.finished_at, finals, steps,
-            usage: byRun[r.runId] ?? null,
+            usage,
           };
         }).filter(Boolean);
         const sinceMs = now() - days * 86_400_000;
@@ -544,6 +572,8 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
           const body = await readBody(req);
           // 產檔輪：親手建的流程預設開產檔權限（匯入走 /api/import/confirm，那邊一律關）
           if (body.def && typeof body.def === 'object' && body.def.permissions === undefined) body.def.permissions = { files: true };
+          // 交貨查核輪：新建流程預設開查核（匯入不動，沿用缺省＝開）
+          if (body.def && typeof body.def === 'object' && body.def.check === undefined) body.def.check = { enabled: true };
           validateWorkflow(body.def, { allowFloating: true });
           const id = `wf-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
           store.writeWorkflow(body.category, id, body.def); // 分類名過 store 護欄，`../x` 這類直接 400
@@ -673,6 +703,7 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
         if (segs.length === 6 && req.method === 'GET') {
           const run = store.readRun(category, id, runId);
           if (run.status === 'running') kick(category, id, runId);
+          run.usage_by_node = usageByNode(store.readUsage(), runId); // 交貨查核輪：這一步花了多少（工人／查核分開）
           return json(200, run);
         }
         // 產檔輪：/runs/:rid/files/:name/preview（頁內預覽形態）與 /inline（以正確 content-type 內嵌回檔，給 pdf iframe）
@@ -717,7 +748,12 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
         if (req.method === 'POST' && action && segs.length === 7) {
           const body = await readBody(req);
           if (action === 'approve') runner.approve(category, id, runId, body.node);
-          else if (action === 'edit') runner.edit(category, id, runId, body.node, body.output, body.note ?? null);
+          else if (action === 'edit') {
+            runner.edit(category, id, runId, body.node, body.output, body.note ?? null); // 這一步標完成，但 run 還停著
+            // 交貨查核輪：停點改過就順手擬「後面每步要守的規則」；擬不出來 deriveEditRules 自己退成預設，這裡只防萬一丟錯，不擋這次修改
+            try { await runner.deriveEditRules(category, id, runId, body.node); } catch (e) { console.error('[bojian] 擬規則失敗（不擋修改）：', e.message); }
+            runner.resume(category, id, runId); // 規則寫進檔案了才放行（裁定 28）——在這之前 GET run 看到的是 paused，不會把下游先放出去
+          }
           else if (action === 'human-done') runner.completeHuman(category, id, runId, body.node, body.feedback ?? null, body.content ?? null); // content＝交給下一步的內容（資料通道輪）
           else if (action === 'retry') runner.retry(category, id, runId, body.node);
           else if (action === 'choose-branch') runner.chooseBranch(category, id, runId, body.node, body.target);
@@ -725,6 +761,9 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
           else if (action === 'data-accept') runner.dataAccept(category, id, runId, body.node);
           else if (action === 'data-supply') runner.dataSupply(category, id, runId, body.node, body.text); // 我補給你（資料通道輪）
           else if (action === 'resume-time') runner.resumeTime(category, id, runId, body.node, body.at ?? null); // 等時刻：現在就繼續／改排時刻（D20）
+          else if (action === 'check-retry') runner.checkRetry(category, id, runId, body.node, body.note ?? null); // 查核攔下：回話重做（查核輪）
+          else if (action === 'check-accept') runner.checkAccept(category, id, runId, body.node); // 查核攔下：就這樣過（查核輪）
+          else if (action === 'edit-rules') runner.setEditRules(category, id, runId, body.node, body.rules); // 查核卡上使用者自己改規則（查核輪）
           else if (action === 'run-feedback') {
             const run = store.readRun(category, id, runId);
             run.feedback = body.text;

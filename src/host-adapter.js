@@ -17,6 +17,16 @@ export class HostError extends Error {
 
 const UNAVAILABLE_MSG = '連不上 Claude——請確認 Claude Code 已安裝、指令列打 claude 打得開。你的流程庫都在，不會不見。';
 
+// 不帶行李模式（BOJIAN_LEAN，2026-09-08 起預設開，A／B 測試後定案）：宿主每次呼叫都會自帶一整包
+// 預設脈絡（系統提示、外掛、斜線指令、全部工具定義），一句話的 prompt 也要送近六萬 token。輕裝＝自己給
+// 系統提示、不載外掛與斜線指令、--tools 只送這一步用得到的工具定義。--allowedTools（權限閘）不動，兩種
+// 模式一樣嚴。要退回帶行李：環境變數 BOJIAN_LEAN 設成 `0`／`false`／`off`，或呼叫端明寫 `lean: false`。
+// 工人提示要自帶「怎麼做事」的規矩：預設脈絡拿掉之後，工人不會自己補——A／B 第一回合輕裝五步喊了四次
+// 資料不全（帶行李零次），還寫出沒有輸入依據的「約 14 件」。所以判斷該做、資料不全的門檻、數字不准編，全寫進來。
+export const LEAN_WORKER_SYSTEM = '你是剝繭流程裡的一名工人。只照接下來訊息裡的指示與規則做事，訊息沒要求的不要做；全篇語言跟指示一致。被要求做判斷、評分、排序或建議時，就用手上的資料判斷，估計的地方標明「估計」；只有這一步必要的原始資料真的沒給才回報資料不全，不要因為資料不完整就停下。數字只寫原始資料或上一步裡有的，沒有的寫「未知」，不准編。';
+export const LEAN_GENERIC_SYSTEM = '只照接下來訊息裡的指示做事，不做別的；只輸出訊息要求的格式；語言跟訊息一致。';
+const LEAN_FLAGS = ['--strict-mcp-config', '--disable-slash-commands'];
+
 function defaultSpawn(args, extra = {}) {
   // 工人在中立目錄開工（2026-09-02 定案）：繼承伺服器 cwd 會吃到使用者本地的專案
   // CLAUDE.md 與 hooks——實案：工作區的收工門禁把步驟最後一句換成「本次無入庫項」，成品被調包。
@@ -49,7 +59,34 @@ function fileRulesSection(fileMode) {
   ];
 }
 
-function buildPrompt({ title, instruction, roleContext, background, constraints, examples, outputFormat, creativity, reviewFocus, attachments, upstream, fileMode }) {
+// 查核輪：停點修改後 AI 擬的規則，往下游每一步的指示都要守
+function editRulesSection(editRules) {
+  if (!editRules?.length) return [];
+  return ['', '# 使用者在停點改過的要求（後面每一步都要守）', ...editRules.map((r) => `- ${r}`)];
+}
+
+// 查核輪：查核攔下重做——把上次錯在哪、原始資料寫什麼逐條列給工人修
+function redoSection(redo) {
+  if (!redo || (!redo.blocks?.length && !redo.missing?.length)) return [];
+  const lines = [
+    ...(redo.blocks ?? []).map((b) => `- 錯在哪：${b.detail}｜成品寫：${b.claim}｜原始資料：${b.source}`),
+    ...(redo.missing ?? []).map((m) => `- 原始資料沒有「${m.claim}」，明寫未知或估計，不准編`),
+  ];
+  return ['', '# 上一次交貨被查核退回（必須逐條修正，其餘保持）', ...lines];
+}
+
+// 查核輪：使用者「回話重做」留的話，緊接在查核退回段之後（沒有 redo 也照樣出現在這個位置）
+function checkNoteSection(checkNote) {
+  return checkNote ? ['', '# 使用者的回話（這次必須照做）', checkNote] : [];
+}
+
+// 查核輪：長欄位值不代進句子——原文另存這一段，指示裡只留一句指向它的提示（見 runner injectParams）
+function paramBlocksSection(paramBlocks) {
+  if (!paramBlocks?.length) return [];
+  return ['', '# 欄位內容（原文）', ...paramBlocks.flatMap(({ label, value }) => [`【欄位：${label}】`, value])];
+}
+
+function buildPrompt({ title, instruction, roleContext, background, constraints, examples, outputFormat, creativity, reviewFocus, attachments, upstream, fileMode, paramBlocks, editRules, redo, checkNote }) {
   return [
     '你是「剝繭」流程裡的一個步驟執行者。只輸出這一步的產出內容本身——不要開場白、不要收尾語、不要解釋你做了什麼。',
     '這不是對話：沒有人會回覆你，你的產出會直接交給下一步（或給使用者過目，他只能核可或動手修改）。不要反問、不要邀請回覆、不要用「要哪個再說」收尾。任務要你提供多個選項時，自己選定一個推薦，讓產出以推薦版本為主體、備選附在後面標明。',
@@ -65,12 +102,16 @@ function buildPrompt({ title, instruction, roleContext, background, constraints,
     instruction,
     ...(background ? ['', '# 背景資料', background] : []),
     ...(constraints ? ['', '# 限制條件（不可違反）', constraints] : []),
+    ...editRulesSection(editRules),
     ...(examples ? ['', '# 範例（照這個樣子）', examples] : []),
     ...(attachments?.length ? ['', '# 參考檔案（先用你的檔案讀取能力逐一打開看，照裡面的規格與風格做）', ...attachments.map((p) => `- ${p}`)] : []),
     ...(outputFormat ? ['', '# 產出格式要求（嚴格遵守）', outputFormat] : []),
     ...(creativity && CREATIVITY_TEXT[creativity] ? ['', '# 風格', CREATIVITY_TEXT[creativity]] : []),
     ...(reviewFocus ? ['', '# 交件前自我檢查（使用者也會用同一標準驗收）', reviewFocus] : []),
+    ...redoSection(redo),
+    ...checkNoteSection(checkNote),
     ...fileRulesSection(fileMode),
+    ...paramBlocksSection(paramBlocks),
     '',
     '# 上一步的產出（你的輸入）',
     upstream || '（這是第一步，沒有上游輸入）',
@@ -101,7 +142,19 @@ function parseHostResult(raw) {
   return { text: String(raw).trim(), isError: false, usage: null };
 }
 
-export function createHostAdapter({ timeoutMs = 300_000, spawnFn = defaultSpawn } = {}) {
+// 輕裝與否解析：option 明寫優先；其次環境變數 BOJIAN_LEAN（`0`/`false`/`off` 退回帶行李，設別的值算輕裝）；
+// 都沒給就預設輕裝。
+const LEGACY_ENV_VALUES = new Set(['0', 'false', 'off']);
+function resolveLean(explicit) {
+  if (explicit !== undefined) return explicit;
+  const envVal = process.env.BOJIAN_LEAN;
+  if (envVal === undefined) return true;
+  return !LEGACY_ENV_VALUES.has(envVal);
+}
+
+export function createHostAdapter({ timeoutMs = 300_000, spawnFn = defaultSpawn, lean } = {}) {
+  // 輕裝與否開工時定一次
+  const leanMode = resolveLean(lean);
   let usageSink = null; // 每次宿主呼叫的用量帳（儀表板輪）——server 接進 usage ledger
   function collect(child, timeout, onDone, onFail) {
     let out = '';
@@ -149,6 +202,7 @@ export function createHostAdapter({ timeoutMs = 300_000, spawnFn = defaultSpawn 
           cache_creation_input_tokens: u.cache_creation_input_tokens,
           cache_read_input_tokens: u.cache_read_input_tokens,
           cost_usd: u.cost_usd,
+          lean: leanMode, // A/B 才分得出這筆是不是輕裝呼叫
         });
       } catch { /* 記帳失敗不擋執行 */ }
     }
@@ -162,13 +216,22 @@ export function createHostAdapter({ timeoutMs = 300_000, spawnFn = defaultSpawn 
 
     setUsageSink(fn) { usageSink = fn; },
 
+    isLean: () => leanMode,
+
     async executeNode({ model, meta, ...fields }) {
       return new Promise((resolve, reject) => {
-        // 步驟要能自己抓資料：headless 預設不授權工具，蒐集類步驟會空手而回（2026-09-02 實測踩到）。
-        // 只放行讀類工具（搜尋／抓網頁／讀檔=附件功能要用）；寫檔與執行指令不放行——匯入的流程指示不可信任。
-        const args = ['-p', '--output-format', 'json', '--allowedTools', 'WebSearch', 'WebFetch', 'Read'];
         // 產檔模式（產檔輪定案）：只在流程開了產檔權限時，加放行寫檔與 node 執行，工作目錄鎖在這趟的產出資料夾
         const fm = fields.fileMode;
+        const args = ['-p', '--output-format', 'json'];
+        // 輕裝：自己給系統提示、不載外掛與斜線指令、工具定義只送這一步用得到的
+        // （放行了卻沒送定義＝工人根本看不到那個工具，所以產檔模式要把寫檔三件補進 --tools）
+        if (leanMode) {
+          args.push(...LEAN_FLAGS, '--system-prompt', LEAN_WORKER_SYSTEM,
+            '--tools', fm ? 'WebSearch,WebFetch,Read,Write,Edit,Bash' : 'WebSearch,WebFetch,Read');
+        }
+        // 步驟要能自己抓資料：headless 預設不授權工具，蒐集類步驟會空手而回（2026-09-02 實測踩到）。
+        // 只放行讀類工具（搜尋／抓網頁／讀檔=附件功能要用）；寫檔與執行指令不放行——匯入的流程指示不可信任。
+        args.push('--allowedTools', 'WebSearch', 'WebFetch', 'Read');
         if (fm) args.push('Write', 'Edit', 'Bash(node *)');
         if (model) args.push('--model', model);
         const child = spawnFn(args, fm ? { cwd: fm.cwd, env: { ...process.env, NODE_PATH: fm.nodePath ?? BUNDLED_NODE_PATH } } : {});
@@ -181,7 +244,10 @@ export function createHostAdapter({ timeoutMs = 300_000, spawnFn = defaultSpawn 
     // 通用補全：原文 prompt 直送宿主（業務 prompt 由呼叫端組，本殼不加料）
     async complete({ prompt, timeoutMs: t, meta } = {}) {
       return new Promise((resolve, reject) => {
-        const child = spawnFn(['-p', '--output-format', 'json']);
+        // 查核、停點改規則等通用補全都不用工具，輕裝時工具定義一個都不送
+        const args = ['-p', '--output-format', 'json'];
+        if (leanMode) args.push(...LEAN_FLAGS, '--system-prompt', LEAN_GENERIC_SYSTEM, '--tools', '');
+        const child = spawnFn(args);
         collect(child, t ?? timeoutMs, (raw) => settleParsed(raw, meta, null, resolve, reject), reject);
         child.stdin.write(prompt);
         child.stdin.end();

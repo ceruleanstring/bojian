@@ -300,6 +300,13 @@ export function createStore(dataDir) {
     artifactExists(category, id, runId, name) {
       return fs.existsSync(path.join(outDir(category, id, runId), safeFileName(name)));
     },
+    // 查核輪：這一輪有沒有真的重寫成品檔——比對 {size, mtimeMs}；檔不在（或檔名不合法）回 null
+    artifactStat(category, id, runId, name) {
+      try {
+        const st = fs.statSync(path.join(outDir(category, id, runId), safeFileName(name)));
+        return { size: st.size, mtimeMs: st.mtimeMs };
+      } catch { return null; }
+    },
     readArtifact(category, id, runId, name) {
       const p = path.join(outDir(category, id, runId), safeFileName(name));
       if (!fs.existsSync(p)) throw new StoreError(`產出檔「${name}」不見了`, 'NOT_FOUND');
