@@ -8,21 +8,27 @@ import { Document, Packer, Paragraph, TextRun } from 'docx';
 import { createStore } from '../src/store.js';
 import { createRunner, parseWhen } from '../src/runner.js';
 import { createHostAdapter } from '../src/host-adapter.js';
+import { createMemory, makeCard, parseGroupText } from '../src/memory.js';
 
-// 假 adapter：回錄呼叫、可注入失敗／延遲／分岔答案／查核答案
+// 假 adapter：回錄呼叫、可注入失敗／延遲／監工答案／查核答案
 function fakeAdapter() {
   const calls = [];
   const spans = []; // {nodeId, start, end} 併發驗證用
   let failOn = null;
   let delay = 0;
-  let branchAnswer = null;
   let seq = 0;
   let failTimes = Infinity;
   const outputs = {}; // 指定某步下一次的回覆（資料通道輪：模擬【資料不全】，用一次即清）
   let fileWriter = null;
   let checkReply = null; // 查核輪：kind='check' 的回覆（字串，或 (第幾次查, meta)=>字串／丟錯）
   let editRulesReply = null; // 查核輪：kind='edit-rules' 的回覆
+  // 監工輪：kind='supervisor' 依 meta.phase 分三種回覆，缺省都是合法 JSON（監工缺省是開，每趟都會被問到）
+  let briefReply = '{"note":"（測試）開場備註"}';
+  let handoffReply = '{"note":"（測試）交接","tier":null,"web":null,"route":null}';
+  let recordReply = '{"text":"（測試）這趟的紀錄","suggestions":[]}';
+  let routeReply = '{"cards":[]}'; // 記憶輪 M2：kind='memory'（三問路由）的回覆
   const checkSeq = {}; // nodeId → 這一步查到第幾次
+  const reply = (x, meta, prompt) => (typeof x === 'function' ? x(meta, prompt) : x);
   return {
     calls,
     spans,
@@ -30,23 +36,32 @@ function fakeAdapter() {
     setOutput(nodeId, text) { outputs[nodeId] = text; },
     setFileWriter(fn) { fileWriter = fn; }, // 產檔輪：模擬工人在 fileMode.cwd 寫出檔案（回 true＝寫預設文字、回內容＝寫那份內容）
     setDelay(ms) { delay = ms; },
-    setBranchAnswer(a) { branchAnswer = a; },
+    setBriefReply(x) { briefReply = x; }, // 字串，或 (meta, prompt)=>字串／丟錯
+    setHandoffReply(x) { handoffReply = x; },
+    setRecordReply(x) { recordReply = x; },
+    setRouteReply(x) { routeReply = x; },
     setCheckResponse(x) { checkReply = x; },
     setEditRulesResponse(x) { editRulesReply = x; },
     renderPrompt: (f) => `PROMPT:${f.nodeId}`, // 卷宗協定：runner 存的全文＝這個函式的輸出
     async complete({ prompt, meta }) {
       const kind = meta?.kind;
-      calls.push({ prompt, meta, ...(kind === 'branch' ? { branchPrompt: prompt } : {}), ...(kind === 'check' ? { checkPrompt: prompt } : {}) });
+      calls.push({ prompt, meta, ...(kind === 'check' ? { checkPrompt: prompt } : {}) });
       if (kind === 'check') {
         const n = (checkSeq[meta.node] = (checkSeq[meta.node] ?? 0) + 1);
         return typeof checkReply === 'function' ? checkReply(n, meta, prompt) : (checkReply ?? '');
       }
       if (kind === 'edit-rules') return typeof editRulesReply === 'function' ? editRulesReply(meta) : (editRulesReply ?? '');
-      return branchAnswer ?? '';
+      if (kind === 'supervisor') {
+        if (meta.phase === 'brief') return reply(briefReply, meta, prompt);
+        if (meta.phase === 'record') return reply(recordReply, meta, prompt);
+        return reply(handoffReply, meta, prompt);
+      }
+      if (kind === 'memory') return reply(routeReply, meta, prompt);
+      return '';
     },
-    async executeNode({ nodeId, title, instruction, outputFormat, upstream, model, roleContext, background, constraints, examples, creativity, reviewFocus, meta, fileMode, paramBlocks, editRules, redo, checkNote }) {
+    async executeNode({ nodeId, title, instruction, outputFormat, upstream, model, web, supervisorNotes, roleContext, background, constraints, examples, creativity, reviewFocus, meta, fileMode, paramBlocks, editRules, redo, checkNote, coreNotes, groupRules, groupName, companyRules, deptRules, attachments }) {
       const start = seq++;
-      calls.push({ nodeId, title, instruction, outputFormat, upstream, model, roleContext, background, constraints, examples, creativity, reviewFocus, meta, fileMode, paramBlocks, editRules, redo, checkNote });
+      calls.push({ nodeId, title, instruction, outputFormat, upstream, model, web, supervisorNotes, roleContext, background, constraints, examples, creativity, reviewFocus, meta, fileMode, paramBlocks, editRules, redo, checkNote, coreNotes, groupRules, groupName, companyRules, deptRules, attachments });
       if (fileMode && fileWriter) {
         const written = fileWriter(fileMode);
         if (written) fs.writeFileSync(path.join(fileMode.cwd, fileMode.fileName), written === true ? `FILE:${fileMode.fileName}` : written);
@@ -311,9 +326,10 @@ test('平行段：兩支同時執行、join 匯流兩支產出、收尾吃 join 
   assert.ok(finalCall.upstream.includes('產出:t-a') && finalCall.upstream.includes('產出:t-b'), 'join 匯流要含兩支產出');
 });
 
+// 監工輪遷移：判路併進監工的交接——分岔節點的選路由 handoff 的 route 欄（選項編號字串）決定
 test('分岔：AI 依條件選路→未選支跳過；選到人做步驟則停等', async () => {
   const { adapter, runner } = setup(DAG_DEF);
-  adapter.setBranchAnswer('五千以下');
+  adapter.setHandoffReply('{"route":"2"}'); // 2＝五千以下
   const run = runner.startRun('測試', 'wf', {});
   const done = await runner.runUntilPause('測試', 'wf', run.run_id);
   assert.equal(done.steps['boss-sign'].status, 'skipped', '未選的簽核路要跳過');
@@ -322,7 +338,7 @@ test('分岔：AI 依條件選路→未選支跳過；選到人做步驟則停�
   assert.equal(done.status, 'done');
   // 走簽核路：人做步驟停等
   const { adapter: ad2, runner: r2 } = setup(DAG_DEF);
-  ad2.setBranchAnswer('金額五千以上');
+  ad2.setHandoffReply('{"route":"1"}'); // 1＝金額五千以上
   const run2 = r2.startRun('測試', 'wf', {});
   const paused = await r2.runUntilPause('測試', 'wf', run2.run_id);
   assert.equal(paused.status, 'paused');
@@ -334,7 +350,7 @@ test('分岔：AI 依條件選路→未選支跳過；選到人做步驟則停�
 
 test('分岔：AI 答不清 → 停下問人；chooseBranch 續跑並記 choice_by=user', async () => {
   const { adapter, runner } = setup(DAG_DEF);
-  adapter.setBranchAnswer('這要看情況耶');
+  adapter.setHandoffReply('{"route":null}'); // 監工判斷不了
   const run = runner.startRun('測試', 'wf', {});
   const paused = await runner.runUntilPause('測試', 'wf', run.run_id);
   assert.equal(paused.status, 'paused');
@@ -550,13 +566,19 @@ test('儀表板輪：每步執行前存卷宗（renderPrompt 全文）；execute
   const run = runner.startRun('測試', 'wf', {});
   await runner.runUntilPause('測試', 'wf', run.run_id);
   // 查核輪：查核員的指示也進卷宗（每步一份 checkN），所以清單裡工人與查核員各一份
-  assert.deepEqual(store.listPromptRecords('測試', 'wf', run.run_id), ['a.check1.txt', 'a.txt', 'b.check1.txt', 'b.txt', 'c.check1.txt', 'c.txt']);
+  // 監工輪：再加開場（_brief）、收尾（_record）與每個非第一層步驟的交接，各存指示與回覆原文兩份
+  assert.deepEqual(store.listPromptRecords('測試', 'wf', run.run_id), [
+    '_brief.reply.txt', '_brief.txt', '_record.reply.txt', '_record.txt',
+    'a.check1.txt', 'a.txt',
+    'b.check1.txt', 'b.handoff.reply.txt', 'b.handoff.txt', 'b.txt',
+    'c.check1.txt', 'c.handoff.reply.txt', 'c.handoff.txt', 'c.txt',
+  ]);
   assert.equal(store.readPromptRecord('測試', 'wf', run.run_id, 'a.txt'), 'PROMPT:a');
   const a = adapter.calls.find((c) => c.nodeId === 'a');
   assert.deepEqual(a.meta, { kind: 'step', category: '測試', workflow: 'wf', run: run.run_id, node: 'a' });
 });
 
-test('儀表板輪：分岔判路的 prompt 也入卷宗（-判路.txt），meta kind=branch', async () => {
+test('儀表板輪：分岔判路的 prompt 也入卷宗（.handoff.txt），meta kind=supervisor', async () => {
   const def = {
     format: 1,
     name: '分岔卷宗',
@@ -569,14 +591,15 @@ test('儀表板輪：分岔判路的 prompt 也入卷宗（-判路.txt），meta
     ],
   };
   const { runner, adapter, store } = setup(def);
-  adapter.setBranchAnswer('1. 高');
+  adapter.setHandoffReply('{"route":"1"}');
   const run = runner.startRun('測試', 'wf', {});
   await runner.runUntilPause('測試', 'wf', run.run_id);
   const records = store.listPromptRecords('測試', 'wf', run.run_id);
-  assert.ok(records.includes('j-判路.txt'), `卷宗要含判路 prompt：${records}`);
-  assert.ok(store.readPromptRecord('測試', 'wf', run.run_id, 'j-判路.txt').includes('超過五千走高'));
-  const bc = adapter.calls.find((c) => c.branchPrompt);
-  assert.equal(bc.meta.kind, 'branch');
+  assert.ok(records.includes('j.handoff.txt'), `卷宗要含判路 prompt：${records}`);
+  assert.ok(store.readPromptRecord('測試', 'wf', run.run_id, 'j.handoff.txt').includes('超過五千走高'));
+  const bc = adapter.calls.find((c) => c.meta?.phase === 'handoff' && c.meta.node === 'j');
+  assert.ok(bc.prompt.includes('# 判路題'), '分岔節點的交接要帶判路題');
+  assert.equal(bc.meta.kind, 'supervisor');
   assert.equal(bc.meta.node, 'j');
   assert.equal(bc.meta.run, run.run_id);
 });
@@ -968,6 +991,47 @@ test('查核輪：查核看到的原始資料含全部欄位、所有祖先步�
   assert.ok(p.includes('# 成品'), '成品也在查核指示裡');
 });
 
+// ===== 監工輪：facts 開關與監工備註進查核 =====
+
+test('監工輪：流程關掉「數字對原始資料」→ 查核指示講明沒開、一份原始資料都不組', async () => {
+  const def = structuredClone(LINEAR3);
+  def.check = { enabled: true, facts: false };
+  const { runner, adapter } = setup(def);
+  adapter.setCheckResponse(CHECK_PASS);
+  const run = runner.startRun('測試', 'wf', {});
+  const r = await runner.runUntilPause('測試', 'wf', run.run_id);
+  assert.equal(r.status, 'done');
+  const p = checkCalls(adapter, 'a')[0].checkPrompt;
+  assert.ok(p.includes('沒開數字對原始資料'), `要講明沒開：${p}`);
+  assert.ok(!p.includes('【欄位：'), `關掉就不組原始資料：${p}`);
+  assert.ok(p.includes('成品裡的事實不對照原始資料'), '判定規則換成只對必守與格式');
+});
+
+test('監工輪：facts 缺省 → 照舊把欄位當原始資料組給查核員', async () => {
+  const { runner, adapter } = setup();
+  adapter.setCheckResponse(CHECK_PASS);
+  const run = runner.startRun('測試', 'wf', {});
+  await runner.runUntilPause('測試', 'wf', run.run_id);
+  const p = checkCalls(adapter, 'a')[0].checkPrompt;
+  assert.ok(p.includes('【欄位：範圍】\n本季'), `缺省要照舊組原始資料：${p}`);
+  assert.ok(!p.includes('沒開數字對原始資料'));
+});
+
+test('監工輪：有交接的步驟 → 查核指示帶「# 監工備註」，內容就是工人收到的那幾條', async () => {
+  const { runner, adapter } = setup();
+  adapter.setCheckResponse(CHECK_PASS);
+  adapter.setHandoffReply('{"note":"按三類分節","tier":null,"web":null,"route":null}');
+  const run = runner.startRun('測試', 'wf', {});
+  await runner.runUntilPause('測試', 'wf', run.run_id);
+  const worker = workerCalls(adapter, 'b')[0];
+  assert.ok(worker.supervisorNotes.includes('交接：按三類分節'), `工人先收到交接：${JSON.stringify(worker.supervisorNotes)}`);
+  const p = checkCalls(adapter, 'b')[0].checkPrompt;
+  assert.ok(p.includes('# 監工備註（參考，不是必守）'), `查核員也要看到同一份：${p}`);
+  assert.ok(p.includes('- 交接：按三類分節'));
+  const musts = p.slice(p.indexOf('# 必守（逐條對）'), p.indexOf('# 格式要求'));
+  assert.ok(!musts.includes('按三類分節'), '監工備註不進必守');
+});
+
 test('查核輪：停點改過 → 擬成規則寫進 edit_rules，下游每一步（含隔兩步）都帶 scope=all 的那條，查核的必守也含它', async () => {
   const def = structuredClone(LINEAR3);
   def.nodes[0].stop_point = 'always';
@@ -1127,7 +1191,8 @@ test('查核輪：查核沒查成時回覆原文另存 check1.reply.txt；查成
   const run2 = clean.runner.startRun('測試', 'wf', {});
   await clean.runner.runUntilPause('測試', 'wf', run2.run_id);
   const kept = clean.store.listPromptRecords('測試', 'wf', run2.run_id);
-  assert.ok(!kept.some((x) => x.endsWith('.reply.txt')), `查成了就沒有回覆原文檔：${kept}`);
+  // 監工輪：監工的回覆原文一律留（_brief／_record／*.handoff），這裡只管查核員那幾份
+  assert.ok(!kept.some((x) => x.includes('.check') && x.endsWith('.reply.txt')), `查成了就沒有查核回覆原文檔：${kept}`);
 });
 
 test('查核輪：擬規則的指示進卷宗（edit-rules.txt），全文＝送出的那份', async () => {
@@ -1151,7 +1216,7 @@ test('查核輪：擬規則的指示進卷宗（edit-rules.txt），全文＝送
 test('查核輪：並行點、會合、分岔、人做步驟一律不查（記 skipped）；並行支上的 AI 步驟照查', async () => {
   const { runner, adapter } = setup(MIXED_CHECK);
   adapter.setCheckResponse(CHECK_PASS);
-  adapter.setBranchAnswer('1. 高');
+  adapter.setHandoffReply('{"route":"1"}');
   const run = runner.startRun('測試', 'wf', {});
   const r = await runner.runUntilPause('測試', 'wf', run.run_id);
   assert.equal(r.steps.man.status, 'waiting_human');
@@ -1173,4 +1238,749 @@ test('查核輪：setEditRules 整份覆寫——丟掉空文字、scope 看不�
   ]);
   assert.throws(() => runner.setEditRules('測試', 'wf', run.run_id, 'a', '不是陣列'), /格式不對/);
   assert.throws(() => runner.setEditRules('測試', 'wf', run.run_id, '沒這步', []), /找不到步驟/);
+});
+
+// ===== 監工輪 K2：三個接線點（開場、交接、收尾）＋派工覆寫＋插話 =====
+
+const supCalls = (adapter, phase, nodeId) =>
+  adapter.calls.filter((c) => c.meta?.kind === 'supervisor' && c.meta.phase === phase && (!nodeId || c.meta.node === nodeId));
+
+test('監工開場：開跑前先寫開場備註，卷宗存指示與回覆兩份，用量歸戶 _brief', async () => {
+  const { runner, adapter, store } = setup();
+  adapter.setBriefReply('{"note":"總表 14 件"}');
+  const run = runner.startRun('測試', 'wf', {});
+  await runner.runUntilPause('測試', 'wf', run.run_id);
+  const r = store.readRun('測試', 'wf', run.run_id);
+  assert.equal(r.brief.text, '總表 14 件');
+  assert.ok(r.brief.at, '開場備註要記時間');
+  const records = store.listPromptRecords('測試', 'wf', run.run_id);
+  assert.ok(records.includes('_brief.txt') && records.includes('_brief.reply.txt'), `${records}`);
+  const bc = supCalls(adapter, 'brief')[0];
+  assert.equal(bc.meta.node, '_brief');
+  assert.equal(bc.meta.run, run.run_id);
+  assert.equal(store.readPromptRecord('測試', 'wf', run.run_id, '_brief.txt'), bc.prompt, '卷宗存的全文＝送出的全文');
+  assert.equal(store.readPromptRecord('測試', 'wf', run.run_id, '_brief.reply.txt'), '{"note":"總表 14 件"}');
+});
+
+test('監工開場：流程把監工關掉 → 沒有開場備註、一次都不問監工', async () => {
+  const def = structuredClone(LINEAR3);
+  def.supervisor = { enabled: false };
+  const { runner, adapter, store } = setup(def);
+  const run = runner.startRun('測試', 'wf', {});
+  await runner.runUntilPause('測試', 'wf', run.run_id);
+  assert.equal(store.readRun('測試', 'wf', run.run_id).brief, undefined);
+  assert.equal(supCalls(adapter, 'brief').length, 0);
+});
+
+test('監工開場：監工沒寫成 → 備註留空、原因講人話，流程照跑到停點', async () => {
+  const def = structuredClone(LINEAR3);
+  def.nodes[0].stop_point = 'always';
+  const { runner, adapter, store } = setup(def);
+  adapter.setBriefReply(() => { throw new Error('連不上 Claude（測試注入）'); });
+  const run = runner.startRun('測試', 'wf', {});
+  const paused = await runner.runUntilPause('測試', 'wf', run.run_id);
+  const r = store.readRun('測試', 'wf', run.run_id);
+  assert.equal(r.brief.text, '');
+  assert.ok(r.brief.fail_note.includes('監工這次沒寫成'), r.brief.fail_note);
+  assert.equal(paused.status, 'paused');
+  assert.equal(r.steps.a.status, 'waiting_review', '監工掛掉不擋流程');
+});
+
+test('監工開場：已經跑完的 run 被再推一次，不會補問一次開場備註', async () => {
+  const { runner, adapter, store } = setup();
+  const run = runner.startRun('測試', 'wf', {});
+  await runner.runUntilPause('測試', 'wf', run.run_id);
+  // 本功能上線前跑完的舊 run：狀態是 done、身上沒有開場備註。
+  // 被 resume 或 GET 的自癒路徑再 kick 一次時，不該白問監工一次、多寫一份 _brief 卷宗
+  const done = store.readRun('測試', 'wf', run.run_id);
+  assert.equal(done.status, 'done');
+  delete done.brief;
+  store.writeRun('測試', 'wf', run.run_id, done);
+  const before = supCalls(adapter, 'brief').length;
+  const again = await runner.runUntilPause('測試', 'wf', run.run_id);
+  assert.equal(again.brief, undefined, '已完成的 run 不補寫開場備註');
+  assert.equal(store.readRun('測試', 'wf', run.run_id).brief, undefined);
+  assert.equal(supCalls(adapter, 'brief').length, before, '不會多問監工一次');
+});
+
+test('監工交接：第一層步驟不問、後面每步問一次；工人拿到開場＋交接兩條', async () => {
+  const { runner, adapter, store } = setup();
+  adapter.setBriefReply('{"note":"總表 14 件"}');
+  adapter.setHandoffReply('{"note":"按三類分節","tier":null,"web":null,"route":null}');
+  const run = runner.startRun('測試', 'wf', {});
+  await runner.runUntilPause('測試', 'wf', run.run_id);
+  assert.equal(supCalls(adapter, 'handoff', 'a').length, 0, '第一步沒有上游，只帶開場備註');
+  assert.deepEqual(workerCalls(adapter, 'a')[0].supervisorNotes, ['開場：總表 14 件']);
+  assert.deepEqual(workerCalls(adapter, 'b')[0].supervisorNotes, ['開場：總表 14 件', '交接：按三類分節']);
+  const r = store.readRun('測試', 'wf', run.run_id);
+  assert.equal(r.steps.b.handoff.text, '按三類分節');
+  assert.equal(r.steps.b.handoff.route, null, 'task 節點不吃 route');
+  const records = store.listPromptRecords('測試', 'wf', run.run_id);
+  assert.ok(records.includes('b.handoff.txt') && records.includes('b.handoff.reply.txt'), `${records}`);
+});
+
+test('監工交接：三個勾全關的步驟不問監工，工人只拿到開場備註', async () => {
+  const def = structuredClone(LINEAR3);
+  def.nodes[1].supervisor = { note: false, tier: false, tools: false };
+  const { runner, adapter, store } = setup(def);
+  adapter.setBriefReply('{"note":"總表 14 件"}');
+  const run = runner.startRun('測試', 'wf', {});
+  await runner.runUntilPause('測試', 'wf', run.run_id);
+  assert.equal(supCalls(adapter, 'handoff', 'b').length, 0);
+  assert.deepEqual(workerCalls(adapter, 'b')[0].supervisorNotes, ['開場：總表 14 件']);
+  assert.equal(store.readRun('測試', 'wf', run.run_id).steps.b.handoff, undefined);
+});
+
+test('監工交接：上游停點擬出來的規則原文進「生效的規矩」段', async () => {
+  const def = structuredClone(LINEAR3);
+  def.nodes[0].stop_point = 'always';
+  const { runner, adapter } = setup(def);
+  adapter.setCheckResponse(CHECK_PASS);
+  adapter.setEditRulesResponse(JSON.stringify({ rules: [{ text: '金額一律用千元', scope: 'all' }] }));
+  const run = runner.startRun('測試', 'wf', {});
+  await runner.runUntilPause('測試', 'wf', run.run_id);
+  runner.edit('測試', 'wf', run.run_id, 'a', '改過的彙總', '金額改千元');
+  await runner.deriveEditRules('測試', 'wf', run.run_id, 'a');
+  runner.resume('測試', 'wf', run.run_id);
+  await runner.runUntilPause('測試', 'wf', run.run_id);
+  const hb = supCalls(adapter, 'handoff', 'b')[0];
+  assert.ok(hb.prompt.includes('# 生效的規矩'), hb.prompt);
+  assert.ok(hb.prompt.includes('- 金額一律用千元'), hb.prompt);
+});
+
+test('監工派工：勾了才算數——調檔位換模型、關查網；沒勾的照節點原設定，交接欄位強制留空', async () => {
+  const withFlags = async (supervisor) => {
+    const def = structuredClone(LINEAR3);
+    def.nodes[1].model_tier = 'fast';
+    def.nodes[1].supervisor = supervisor;
+    const { runner, adapter, store } = setup(def);
+    adapter.setHandoffReply('{"note":"x","tier":"deep","web":false,"route":null}');
+    const run = runner.startRun('測試', 'wf', {});
+    await runner.runUntilPause('測試', 'wf', run.run_id);
+    return { call: workerCalls(adapter, 'b')[0], run: store.readRun('測試', 'wf', run.run_id) };
+  };
+  const on = await withFlags({ tier: true, tools: true });
+  assert.equal(on.call.model, 'opus', '勾了調檔位＝聽監工的');
+  assert.equal(on.call.web, false);
+  assert.equal(on.run.steps.b.handoff.tier, 'deep');
+  assert.equal(on.run.steps.b.handoff.web, false);
+
+  const off = await withFlags({ tier: false, tools: false });
+  assert.equal(off.call.model, 'haiku', '沒勾＝照節點自己的檔位');
+  assert.equal(off.call.web, true);
+  assert.equal(off.run.steps.b.handoff.tier, null);
+  assert.equal(off.run.steps.b.handoff.web, null);
+});
+
+test('監工關掉：分岔照樣判路（判路不歸監工開關管），選不出來仍停下問人', async () => {
+  const def = {
+    format: 1,
+    name: '關監工的分岔',
+    params: [],
+    supervisor: { enabled: false },
+    nodes: [
+      { id: 's', title: '起步', executor: 'ai', stop_point: 'never', instruction: '算金額', next: ['br'] },
+      { id: 'br', title: '判金額', kind: 'branch', instruction: '超過五千走高', branches: [{ label: '高', next: 'h' }, { label: '低', next: 'l' }], next: [] },
+      { id: 'h', title: '高路', executor: 'ai', stop_point: 'never', instruction: '走高', next: [] },
+      { id: 'l', title: '低路', executor: 'ai', stop_point: 'never', instruction: '走低', next: [] },
+    ],
+  };
+  const { runner, adapter, store } = setup(def);
+  adapter.setHandoffReply('{"route":"2"}');
+  const done = await (async () => {
+    const run = runner.startRun('測試', 'wf', {});
+    const d = await runner.runUntilPause('測試', 'wf', run.run_id);
+    return { d, r: store.readRun('測試', 'wf', run.run_id) };
+  })();
+  assert.equal(done.d.steps.br.choice, 'l', 'route 2＝第二條路');
+  assert.equal(done.d.steps.br.choice_by, 'ai');
+  assert.equal(done.r.steps.br.handoff.route, '2');
+  assert.equal(done.r.steps.br.handoff.only_route, true, '監工關掉時分岔只寫 route');
+  assert.equal(done.r.brief, undefined);
+  assert.equal(done.r.record, undefined);
+
+  const s2 = setup(def);
+  s2.adapter.setHandoffReply('{"route":null}');
+  const run2 = s2.runner.startRun('測試', 'wf', {});
+  const paused = await s2.runner.runUntilPause('測試', 'wf', run2.run_id);
+  assert.equal(paused.steps.br.status, 'waiting_branch');
+  s2.runner.chooseBranch('測試', 'wf', run2.run_id, 'br', 'h');
+  const done2 = await s2.runner.runUntilPause('測試', 'wf', run2.run_id);
+  assert.equal(done2.status, 'done');
+  assert.equal(done2.steps.br.choice_by, 'user');
+});
+
+test('監工插話：停點交代的話進下一步的交接，消化後標 consumed；空話擋下', async () => {
+  const def = structuredClone(LINEAR3);
+  def.nodes[0].stop_point = 'always';
+  const { runner, adapter, store } = setup(def);
+  adapter.setCheckResponse(CHECK_PASS);
+  const run = runner.startRun('測試', 'wf', {});
+  await runner.runUntilPause('測試', 'wf', run.run_id);
+  const after = runner.interject('測試', 'wf', run.run_id, 'a', '報告也要提退貨');
+  assert.equal(after.interjections[0].consumed, false);
+  assert.equal(after.interjections[0].node, 'a');
+  assert.throws(() => runner.interject('測試', 'wf', run.run_id, 'a', '   '), /要先寫一句要交代的話/);
+  runner.approve('測試', 'wf', run.run_id, 'a');
+  await runner.runUntilPause('測試', 'wf', run.run_id);
+  const hb = supCalls(adapter, 'handoff', 'b')[0];
+  assert.ok(hb.prompt.includes('# 使用者剛交代的話'), hb.prompt);
+  assert.ok(hb.prompt.includes('報告也要提退貨'), hb.prompt);
+  assert.equal(store.readRun('測試', 'wf', run.run_id).interjections[0].consumed, true);
+});
+
+test('監工插話：中間卡著分岔也不會被吃掉——分岔看得到但不算消化，真正做事的下一步才收', async () => {
+  const def = {
+    format: 1,
+    name: '停點後接分岔',
+    params: [],
+    nodes: [
+      { id: 'a', title: '整理', executor: 'ai', stop_point: 'always', instruction: '整理', next: ['br'] },
+      { id: 'br', title: '判量', kind: 'branch', instruction: '超過十件走詳版', branches: [{ label: '詳版', next: 'b' }, { label: '簡版', next: 'c' }], next: [] },
+      { id: 'b', title: '詳版', executor: 'ai', stop_point: 'never', instruction: '寫詳版', next: [] },
+      { id: 'c', title: '簡版', executor: 'ai', stop_point: 'never', instruction: '寫簡版', next: [] },
+    ],
+  };
+  const { runner, adapter, store } = setup(def);
+  adapter.setCheckResponse(CHECK_PASS);
+  adapter.setHandoffReply('{"note":"照三類分節","tier":null,"web":null,"route":"1"}');
+  const run = runner.startRun('測試', 'wf', {});
+  await runner.runUntilPause('測試', 'wf', run.run_id);
+  runner.interject('測試', 'wf', run.run_id, 'a', '報告也要提退貨');
+  runner.approve('測試', 'wf', run.run_id, 'a');
+  await runner.runUntilPause('測試', 'wf', run.run_id);
+  assert.ok(supCalls(adapter, 'handoff', 'br')[0].prompt.includes('報告也要提退貨'), '分岔選路時看得到');
+  assert.ok(supCalls(adapter, 'handoff', 'b')[0].prompt.includes('報告也要提退貨'), '真正做事的下一步才是要收到的人');
+  assert.equal(store.readRun('測試', 'wf', run.run_id).interjections[0].consumed, true);
+});
+
+test('監工收尾：跑完寫執行紀錄——對應表、用量、建議都在；回傳值就是寫完紀錄的那份', async () => {
+  const { runner, adapter, store } = setup();
+  const run = runner.startRun('測試', 'wf', {});
+  adapter.setHandoffReply('{"note":"按三類分節","tier":null,"web":null,"route":null}');
+  const at = new Date().toISOString();
+  const row = { at, category: '測試', workflow: 'wf', run: run.run_id };
+  // 真 adapter 的用量 sink 在 complete() resolve 之前就同步把這一筆 append 進帳本，假的照做
+  adapter.setRecordReply(() => {
+    store.appendUsage({ ...row, kind: 'supervisor', node: '_record', input_tokens: 7, output_tokens: 3 });
+    return JSON.stringify({
+      text: '三步都跑完了',
+      suggestions: [{ node: 'b', where: 'instruction', text: '把分節寫進指示' }],
+    });
+  });
+  store.appendUsage({ ...row, kind: 'supervisor', node: '_brief', input_tokens: 30, output_tokens: 3 });
+  store.appendUsage({ ...row, kind: 'step', node: 'b', input_tokens: 100, output_tokens: 10 });
+  store.appendUsage({ ...row, kind: 'check', node: 'b', input_tokens: 50, output_tokens: 5 });
+  const final = await runner.runUntilPause('測試', 'wf', run.run_id);
+  assert.ok(final.record, 'runUntilPause 要回傳寫完紀錄的那份');
+  const r = store.readRun('測試', 'wf', run.run_id);
+  assert.equal(r.record.table.length, 3);
+  assert.deepEqual(r.record.table[1].upstream, ['a']);
+  assert.equal(r.record.table[1].handoff, '按三類分節');
+  assert.equal(r.record.table[1].usage.calls, 2, '這一步的工人＋查核兩筆');
+  assert.deepEqual(r.record.usage.brief, { input: 30, output: 3, calls: 1 });
+  // 收尾這次呼叫自己的用量也要算進去——先算後問會漏掉整趟最貴的一筆，使用者看到的數字就偏低
+  assert.deepEqual(r.record.usage.record, { input: 7, output: 3, calls: 1 });
+  assert.deepEqual(r.record.usage.total, { input: 187, output: 21, calls: 4 }, '總計含收尾自己那筆');
+  assert.equal(r.record.text, '三步都跑完了');
+  assert.equal(r.record.suggestions[0].where, 'instruction');
+  const sc = supCalls(adapter, 'record')[0];
+  assert.equal(sc.meta.node, '_record');
+  const records = store.listPromptRecords('測試', 'wf', run.run_id);
+  assert.ok(records.includes('_record.txt') && records.includes('_record.reply.txt'), `${records}`);
+});
+
+test('監工收尾：跑到停點時還沒有紀錄；監工關掉時永遠不寫紀錄', async () => {
+  const def = structuredClone(LINEAR3);
+  def.nodes[0].stop_point = 'always';
+  const { runner, store } = setup(def);
+  const run = runner.startRun('測試', 'wf', {});
+  const paused = await runner.runUntilPause('測試', 'wf', run.run_id);
+  assert.equal(paused.status, 'paused');
+  assert.equal(paused.record, undefined, '停點不寫紀錄');
+  assert.equal(store.readRun('測試', 'wf', run.run_id).record, undefined);
+
+  const def2 = structuredClone(LINEAR3);
+  def2.supervisor = { enabled: false };
+  const s2 = setup(def2);
+  const run2 = s2.runner.startRun('測試', 'wf', {});
+  const done = await s2.runner.runUntilPause('測試', 'wf', run2.run_id);
+  assert.equal(done.status, 'done');
+  assert.equal(s2.store.readRun('測試', 'wf', run2.run_id).record, undefined);
+});
+
+test('監工收尾：監工沒寫成 → 紀錄講人話原因，對應表與用量照樣留著', async () => {
+  const { runner, adapter, store } = setup();
+  const run = runner.startRun('測試', 'wf', {});
+  const row = { at: new Date().toISOString(), category: '測試', workflow: 'wf', run: run.run_id };
+  store.appendUsage({ ...row, kind: 'step', node: 'b', input_tokens: 100, output_tokens: 10 });
+  // 回覆解析不出來也是一次真的呼叫，token 照花——帳照記，紀錄格的數字要含它
+  adapter.setRecordReply(() => {
+    store.appendUsage({ ...row, kind: 'supervisor', node: '_record', input_tokens: 7, output_tokens: 3 });
+    return '我不知道要寫什麼';
+  });
+  await runner.runUntilPause('測試', 'wf', run.run_id);
+  const r = store.readRun('測試', 'wf', run.run_id);
+  assert.ok(r.record.text.includes('監工這次沒寫成'), r.record.text);
+  assert.ok(r.record.fail_note.includes('監工這次沒寫成'));
+  assert.deepEqual(r.record.suggestions, []);
+  assert.equal(r.record.table.length, 3);
+  assert.deepEqual(r.record.usage.record, { input: 7, output: 3, calls: 1 });
+  assert.deepEqual(r.record.usage.total, { input: 107, output: 13, calls: 2 });
+});
+
+test('監工交接一步只問一次：被查核退回、回話重做都沿用同一份交接', async () => {
+  const { runner, adapter, store } = setup();
+  adapter.setCheckResponse((n, meta) => (meta.node === 'b' ? CHECK_BLOCKED : CHECK_PASS));
+  const run = runner.startRun('測試', 'wf', {});
+  const paused = await runner.runUntilPause('測試', 'wf', run.run_id);
+  assert.equal(paused.steps.b.status, 'waiting_check');
+  assert.equal(supCalls(adapter, 'handoff', 'b').length, 1);
+  runner.checkRetry('測試', 'wf', run.run_id, 'b', '這次要照三類分');
+  adapter.setCheckResponse(CHECK_PASS);
+  await runner.runUntilPause('測試', 'wf', run.run_id);
+  assert.equal(store.readRun('測試', 'wf', run.run_id).status, 'done');
+  assert.equal(supCalls(adapter, 'handoff', 'b').length, 1, '重做不重問監工');
+});
+
+// ---- 記憶輪 M2：開跑收三個記憶欄位寫 run.memory；記路①（開跑同值連兩趟）在 startRun 後由門面判 ----
+
+test('M2 startRun：memoryPicks／memoryChanged／memoryIdentity 寫進 run.memory；沒給＝空殼；memory 省略照舊', () => {
+  const { runner, store } = setup();
+  const run = runner.startRun('測試', 'wf', {}, { memoryPicks: { range: 'h-1' }, memoryChanged: ['h-2'], memoryIdentity: 'i-1' });
+  assert.equal(run.memory.picks.range, 'h-1');
+  assert.equal(run.memory.identity, 'i-1');
+  assert.deepEqual(run.memory.changed, ['h-2']);
+  assert.deepEqual(run.memory.notices, []);
+  assert.deepEqual(store.readRun('測試', 'wf', run.run_id).memory, run.memory, '落地的跟回傳的一樣');
+  assert.equal(run.memory.prev_run, null, '第一趟沒有前一趟');
+  const bare = runner.startRun('測試', 'wf', {});
+  assert.deepEqual(bare.memory, { identity: null, picks: {}, changed: [], prev_run: run.run_id, notices: [] });
+});
+
+test('M2 記路①：同一個值非預設連兩趟開跑→一張習慣卡（用在這條流程、出處 run-params）＋通知 card；第一趟、等於預設、已有同卡都不記', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bojian-runner-'));
+  const store = createStore(dir);
+  store.writeWorkflow('測試', 'wf', LINEAR3);
+  const adapter = fakeAdapter();
+  const memory = createMemory({ store, adapter });
+  const runner = createRunner({ store, adapter, memory });
+  const r1 = runner.startRun('測試', 'wf', { range: '今年' });
+  assert.deepEqual(store.listCards('habit'), [], '第一趟沒有前一趟可比');
+  assert.deepEqual(r1.memory.notices, []);
+  const r2 = runner.startRun('測試', 'wf', { range: '今年' });
+  const cards = store.listCards('habit');
+  assert.equal(cards.length, 1, '連兩趟同值→一張');
+  const c = cards[0];
+  assert.equal(c.field, '範圍');
+  assert.equal(c.text, '今年');
+  assert.deepEqual(c.scope, { level: 'workflow', category: '測試', workflow: 'wf' });
+  assert.equal(c.source.kind, 'run-params');
+  assert.equal(c.source.run, r2.run_id);
+  assert.equal(c.source.quote, '（開跑表單）範圍：今年');
+  assert.ok(c.route_reason, '程式判的寫固定句');
+  assert.ok(store.readDict().fields.some((f) => f.name === '範圍'), '欄位不在詞典就先長出來');
+  assert.equal(r2.memory.notices.length, 1);
+  assert.equal(r2.memory.notices[0].kind, 'card');
+  assert.equal(r2.memory.notices[0].card, c.id);
+  assert.equal(r2.memory.notices[0].undone, false);
+  assert.ok(r2.memory.notices[0].text.includes('今年'));
+  assert.deepEqual(store.readRun('測試', 'wf', r2.run_id).memory.notices, r2.memory.notices, '回傳的 run 含門面剛寫的通知');
+  // 第三趟：已有同欄位同內容的卡→不再記
+  const r3 = runner.startRun('測試', 'wf', { range: '今年' });
+  assert.equal(store.listCards('habit').length, 1);
+  assert.deepEqual(r3.memory.notices, []);
+  // 等於預設的值不記（兩趟都退回預設「本季」）
+  runner.startRun('測試', 'wf', {});
+  runner.startRun('測試', 'wf', {});
+  assert.equal(store.listCards('habit').length, 1);
+  // 這趟從卡點來的（picks）不記
+  runner.startRun('測試', 'wf', { range: '去年' });
+  runner.startRun('測試', 'wf', { range: '去年' }, { memoryPicks: { range: 'h-x' } });
+  assert.equal(store.listCards('habit').length, 1);
+});
+
+test('M2 startRun：前一趟依 started_at 判——同秒兩趟 id 字典序與開跑時間相反，prev_run 取開跑較晚那筆；壞掉的 run.yaml 跳過', () => {
+  const { dir, runner, store } = setup();
+  // 同一秒兩趟（放在過去，讓真時鐘開的第三趟一定比它們晚）：id 亂數尾碼 aaaa < zzzz，但 aaaa 開得比較晚（清單尾端 .at(-1) 會選錯成 zzzz）
+  const early = { run_id: 'r-20260101-120000-zzzz', status: 'done', params: { range: '去年' }, started_at: '2026-01-01T04:00:00.100Z', steps: {} };
+  const late = { run_id: 'r-20260101-120000-aaaa', status: 'done', params: { range: '今年' }, started_at: '2026-01-01T04:00:00.900Z', steps: {} };
+  store.writeRun('測試', 'wf', early.run_id, early);
+  store.writeRun('測試', 'wf', late.run_id, late);
+  const r3 = runner.startRun('測試', 'wf', {});
+  assert.equal(r3.memory.prev_run, 'r-20260101-120000-aaaa', '選 started_at 最大的，不是 id 字典序最後的');
+  // 清單尾端有讀不出來的 run.yaml（壞檔、id 排最後）→跳過，取其餘裡開跑最晚的（＝第三趟）
+  const badDir = path.join(dir, 'workflows', '測試', 'wf', 'runs', 'r-99999999-000000-bad');
+  fs.mkdirSync(badDir, { recursive: true });
+  fs.writeFileSync(path.join(badDir, 'run.yaml'), ':\n  - [broken', 'utf8');
+  const r4 = runner.startRun('測試', 'wf', {});
+  assert.equal(r4.memory.prev_run, r3.run_id, '第四趟的前一趟＝第三趟，壞檔不算');
+});
+
+test('M2 startRun：memory.onRunStart 丟錯→run 照樣建立、照樣回傳', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bojian-runner-'));
+  const store = createStore(dir);
+  store.writeWorkflow('測試', 'wf', LINEAR3);
+  const runner = createRunner({ store, adapter: fakeAdapter(), memory: { onRunStart() { throw new Error('記憶炸了（測試注入）'); } } });
+  const run = runner.startRun('測試', 'wf', { range: '今年' });
+  assert.ok(run.run_id);
+  assert.equal(store.readRun('測試', 'wf', run.run_id).status, 'running');
+  assert.deepEqual(run.memory.notices, []);
+});
+
+// ---- 記憶輪 M3a：每步工作單帶「關於你」與群組規矩、查核必守含群組規矩、steps[n].memory、設定缺省接線 ----
+
+function setupMemory(def = LINEAR3) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bojian-runner-'));
+  const store = createStore(dir);
+  store.writeWorkflow('測試', 'wf', def);
+  const adapter = fakeAdapter();
+  const memory = createMemory({ store, adapter });
+  const runner = createRunner({ store, adapter, memory });
+  return { dir, store, adapter, memory, runner };
+}
+const PROFILE = (over) => makeCard({ bucket: 'profile', text: 'x', layer: 'expression', scope: { level: 'all' }, source: { kind: 'manual', quote: 'x' }, ...over });
+const HABIT = (over) => makeCard({ bucket: 'habit', text: 'x', field: '範圍', scope: { level: 'workflow', category: '測試', workflow: 'wf' }, source: { kind: 'manual', quote: 'x' }, ...over });
+// 塞兩張認識卡（一表達、一內容 scope=分類）＋群組檔一條
+function seedMemory(store) {
+  store.writeCard(PROFILE({ text: '不要恭維' }));
+  store.writeCard(PROFILE({ text: '我是這家公司的負責人', layer: 'content', scope: { level: 'category', category: '測試' } }));
+  store.writeGroup('測試', { text: '不提競品', rules: parseGroupText('不提競品', store.readDict()) });
+}
+const mustsOf = (p) => p.slice(p.indexOf('# 必守（逐條對）'), p.indexOf('# 格式要求'));
+
+test('M3a 注入：兩張認識卡＋群組一條→工人收到 coreNotes 兩句、groupRules 一條、groupName＝分類；steps.a.memory 三張、overridden 空；查核必守含群組規矩；分岔不寫 memory', async () => {
+  const def = {
+    format: 1,
+    name: '帶分岔',
+    params: [],
+    nodes: [
+      { id: 'a', title: '起步', executor: 'ai', stop_point: 'never', instruction: '算金額', role_context: '你是分析師', next: ['br'] },
+      { id: 'br', title: '判金額', kind: 'branch', instruction: '超過五千走高', branches: [{ label: '高', next: 'h' }, { label: '低', next: 'l' }], next: [] },
+      { id: 'h', title: '高路', executor: 'ai', stop_point: 'never', instruction: '走高', next: [] },
+      { id: 'l', title: '低路', executor: 'human', stop_point: 'never', instruction: '你來走低', next: [] },
+    ],
+  };
+  const { runner, adapter, store } = setupMemory(def);
+  seedMemory(store);
+  adapter.setHandoffReply('{"note":"x","tier":null,"web":null,"route":"1"}');
+  const run = runner.startRun('測試', 'wf', {});
+  await runner.runUntilPause('測試', 'wf', run.run_id);
+  const a = workerCalls(adapter, 'a')[0];
+  assert.deepEqual(a.coreNotes, ['不要恭維', '我是這家公司的負責人']);
+  assert.deepEqual(a.groupRules, ['不提競品']);
+  assert.equal(a.groupName, '測試');
+  const h = workerCalls(adapter, 'h')[0];
+  assert.deepEqual(h.coreNotes, ['不要恭維', '我是這家公司的負責人'], '每一步都帶');
+  assert.deepEqual(h.groupRules, ['不提競品']);
+  const r = store.readRun('測試', 'wf', run.run_id);
+  const m = r.steps.a.memory;
+  assert.ok(m.at && !Number.isNaN(Date.parse(m.at)));
+  assert.equal(m.cards.length, 3);
+  assert.deepEqual(m.cards.map((c) => c.bucket), ['profile', 'profile', 'group']);
+  assert.deepEqual(m.cards.map((c) => c.text), ['不要恭維', '我是這家公司的負責人', '不提競品']);
+  assert.deepEqual(m.cards.map((c) => c.level), ['all', 'category', 'category']);
+  assert.equal(m.cards[0].layer, 'expression');
+  assert.equal(m.cards[1].layer, 'content');
+  assert.equal(m.cards[2].field, null);
+  assert.deepEqual(m.overridden, []);
+  assert.equal(m.paused, false);
+  assert.equal(r.steps.h.memory.cards.length, 3);
+  assert.equal(r.steps.br.memory, undefined, '分岔節點不寫 memory');
+  assert.equal(r.steps.l.memory, undefined, '人做步驟不寫 memory（沒跑到也沒有）');
+  // 查核員：必守含群組規矩，不帶「關於你」
+  const ck = checkCalls(adapter, 'a')[0].checkPrompt;
+  assert.ok(mustsOf(ck).includes('- 不提競品'), mustsOf(ck));
+  assert.ok(!ck.includes('不要恭維') && !ck.includes('關於你'), '查核員不帶關於你');
+});
+
+test('M3a 蓋掉：核心的有名字卡被群組蓋、群組條被流程欄位值蓋→工作單不帶、steps[n].memory.overridden 記誰蓋的；被選的習慣卡只進引用它的那一步的 cards', async () => {
+  const def = structuredClone(LINEAR3);
+  def.params.push({ key: 'tone', label: '語氣', default: '' });
+  def.nodes[1].instruction = '做B，語氣 {{tone}}';
+  const { runner, adapter, store } = setupMemory(def);
+  const namedCore = PROFILE({ text: '講話直接', field: '語氣' });
+  store.writeCard(namedCore);
+  store.writeCard(PROFILE({ text: '不要恭維' }));
+  store.writeGroup('測試', { text: '語氣：輕鬆\n不提競品', rules: parseGroupText('語氣：輕鬆\n不提競品', store.readDict()) });
+  const habit = HABIT({ text: '今年' });
+  store.writeCard(habit);
+  // 沒填 tone：群組的「語氣：輕鬆」蓋掉核心的「講話直接」
+  const r1 = runner.startRun('測試', 'wf', { range: '今年' }, { memoryPicks: { range: habit.id } });
+  await runner.runUntilPause('測試', 'wf', r1.run_id);
+  const a = workerCalls(adapter, 'a')[0];
+  assert.deepEqual(a.coreNotes, ['不要恭維']);
+  assert.deepEqual(a.groupRules, ['語氣：輕鬆', '不提競品']);
+  const s1 = store.readRun('測試', 'wf', r1.run_id).steps;
+  assert.deepEqual(s1.a.memory.overridden, [{ id: namedCore.id, text: '講話直接', by: 'group', by_text: '輕鬆' }]);
+  assert.deepEqual(s1.a.memory.cards.map((c) => c.id).includes(habit.id), true, 'a 引用 {{range}}：被選的習慣卡算進這一步');
+  const pick = s1.a.memory.cards.find((c) => c.id === habit.id);
+  assert.deepEqual(pick, { id: habit.id, bucket: 'habit', text: '今年', field: '範圍', level: 'workflow' });
+  assert.equal(s1.b.memory.cards.some((c) => c.id === habit.id), false, 'b 沒引用 {{range}}：不算');
+  assert.equal(s1.b.memory.cards.length, 3, '兩條群組＋一張自由核心');
+  // 這一次填了 tone：流程這一圈的值蓋掉群組的「語氣：輕鬆」與核心的「講話直接」
+  const r2 = runner.startRun('測試', 'wf', { tone: '正式' });
+  await runner.runUntilPause('測試', 'wf', r2.run_id);
+  const a2 = workerCalls(adapter, 'a')[1];
+  assert.deepEqual(a2.groupRules, ['不提競品']);
+  assert.deepEqual(a2.coreNotes, ['不要恭維']);
+  const m2 = store.readRun('測試', 'wf', r2.run_id).steps.a.memory;
+  assert.deepEqual(m2.overridden.map((o) => [o.text, o.by, o.by_text]), [['講話直接', 'run', '正式'], ['語氣：輕鬆', 'run', '正式']]);
+  assert.equal(m2.cards.length, 2);
+});
+
+test('M3a 整層暫停：settings.memory.paused → coreNotes 空、steps.a.memory.paused=true、群組規矩照帶', async () => {
+  const { runner, adapter, store } = setupMemory();
+  seedMemory(store);
+  store.writeSettings({ memory: { paused: true } });
+  const run = runner.startRun('測試', 'wf', {});
+  await runner.runUntilPause('測試', 'wf', run.run_id);
+  const a = workerCalls(adapter, 'a')[0];
+  assert.deepEqual(a.coreNotes, []);
+  assert.deepEqual(a.groupRules, ['不提競品']);
+  const m = store.readRun('測試', 'wf', run.run_id).steps.a.memory;
+  assert.equal(m.paused, true);
+  assert.deepEqual(m.cards.map((c) => c.bucket), ['group'], '暫停只擋關於你，群組條照記');
+});
+
+test('M3a 身分：run.memory.identity 指到的身分→只帶它列的認識卡；找不到的身分＝不限縮', async () => {
+  const { runner, adapter, store } = setupMemory();
+  const p1 = PROFILE({ text: '不要恭維' });
+  const p2 = PROFILE({ text: '用詞白話' });
+  store.writeCard(p1);
+  store.writeCard(p2);
+  store.writeIdentities([{ id: 'i-1', name: '工作的我', cards: [p2.id], categories: [], created_at: '2026-09-09T00:00:00.000Z' }]);
+  const r1 = runner.startRun('測試', 'wf', {}, { memoryIdentity: 'i-1' });
+  await runner.runUntilPause('測試', 'wf', r1.run_id);
+  assert.deepEqual(workerCalls(adapter, 'a')[0].coreNotes, ['用詞白話']);
+  const r2 = runner.startRun('測試', 'wf', {}, { memoryIdentity: 'i-nope' });
+  await runner.runUntilPause('測試', 'wf', r2.run_id);
+  assert.deepEqual(workerCalls(adapter, 'a')[1].coreNotes, ['不要恭維', '用詞白話']);
+});
+
+test('M3a 記憶失敗不擋流程：contextFor 丟錯→工人照跑、兩段空、不寫 steps[n].memory；memory 省略→coreNotes／groupRules 是空清單', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bojian-runner-'));
+  const store = createStore(dir);
+  store.writeWorkflow('測試', 'wf', LINEAR3);
+  const adapter = fakeAdapter();
+  const runner = createRunner({ store, adapter, memory: { onRunStart() {}, contextFor() { throw new Error('卡讀不到（測試注入）'); } } });
+  const run = runner.startRun('測試', 'wf', {});
+  const r = await runner.runUntilPause('測試', 'wf', run.run_id);
+  assert.equal(r.status, 'done');
+  assert.deepEqual(workerCalls(adapter, 'a')[0].coreNotes, []);
+  assert.deepEqual(workerCalls(adapter, 'a')[0].groupRules, []);
+  assert.equal(r.steps.a.memory, undefined);
+  const plain = setup();
+  const run2 = plain.runner.startRun('測試', 'wf', {});
+  await plain.runner.runUntilPause('測試', 'wf', run2.run_id);
+  assert.deepEqual(workerCalls(plain.adapter, 'a')[0].coreNotes, []);
+  assert.deepEqual(workerCalls(plain.adapter, 'a')[0].groupRules, []);
+  assert.equal(plain.store.readRun('測試', 'wf', run2.run_id).steps.a.memory, undefined);
+});
+
+test('M3a 修正輪：真門面 contextFor 讀認識卡失敗→不 throw、coreNotes 空、群組規矩照帶、console.error 一句人話；接上 runner 工人只收群組條、steps.a.memory 只記群組條', async () => {
+  const { store, adapter } = setupMemory();
+  seedMemory(store);
+  // 只有認識卡那本帳讀不到（習慣卡照舊，讓 onRunStart 的記路①不受影響）
+  const broken = Object.assign(Object.create(store), {
+    listCards(bucket, ...rest) { if (bucket === 'profile') throw new Error('磁碟炸了（測試注入）'); return store.listCards(bucket, ...rest); },
+  });
+  const memory = createMemory({ store: broken, adapter });
+  const logs = [];
+  const orig = console.error;
+  console.error = (...a) => logs.push(a.join(' '));
+  let ctx;
+  try { ctx = memory.contextFor({ category: '測試', id: 'wf', def: LINEAR3, params: {} }); } finally { console.error = orig; }
+  assert.deepEqual(ctx.coreNotes, []);
+  assert.deepEqual(ctx.groupRules, ['不提競品']);
+  assert.deepEqual(ctx.cards.map((c) => c.bucket), ['group']);
+  assert.equal(ctx.paused, false, '不是暫停，是讀不到');
+  assert.equal(logs.length, 1);
+  assert.ok(logs[0].includes('記憶卡讀不到') && logs[0].includes('磁碟炸了'), logs[0]);
+  // 接上 runner（runner 用好的 store、記憶用壞的）：流程照跑、工人只收群組條
+  const r2 = createRunner({ store, adapter, memory });
+  const run = r2.startRun('測試', 'wf', {});
+  await r2.runUntilPause('測試', 'wf', run.run_id);
+  assert.deepEqual(workerCalls(adapter, 'a')[0].coreNotes, []);
+  assert.deepEqual(workerCalls(adapter, 'a')[0].groupRules, ['不提競品']);
+  const m = store.readRun('測試', 'wf', run.run_id).steps.a.memory;
+  assert.deepEqual(m.cards.map((c) => c.bucket), ['group'], '群組條照記，關於你一張都沒有');
+  assert.equal(m.paused, false);
+});
+
+test('M3a 設定缺省：節點沒設檔位→用 settings.defaults.model_tier；exec.web=false→工人不查網；defaults.retry 補節點沒設的重試；節點自己設的優先', async () => {
+  const def = structuredClone(LINEAR3);
+  def.nodes[1].model_tier = 'fast';
+  def.nodes[2].retry = 0;
+  const { runner, adapter, store } = setup(def);
+  store.writeSettings({ defaults: { model_tier: 'deep', retry: 1 }, exec: { web: false } });
+  adapter.setFailOn('a', 1); // a 壞一次：靠設定的 retry 自動重來
+  const run = runner.startRun('測試', 'wf', {});
+  await runner.runUntilPause('測試', 'wf', run.run_id);
+  const aCalls = workerCalls(adapter, 'a');
+  assert.equal(aCalls.length, 2, '節點沒設 retry → 用設定的 1');
+  assert.equal(aCalls[0].model, 'opus', '節點沒設檔位 → 用設定的 deep');
+  assert.equal(aCalls[0].web, false, '設定關查網 → 工人不查網');
+  assert.equal(workerCalls(adapter, 'b')[0].model, 'haiku', '節點自己的檔位優先');
+  assert.equal(workerCalls(adapter, 'b')[0].web, false);
+  const r = store.readRun('測試', 'wf', run.run_id);
+  assert.equal(r.status, 'done');
+  // 節點明寫 retry: 0 → 不吃設定的 1
+  const s2 = setup(def);
+  s2.store.writeSettings({ defaults: { retry: 1 } });
+  s2.adapter.setFailOn('c');
+  const run2 = s2.runner.startRun('測試', 'wf', {});
+  await s2.runner.runUntilPause('測試', 'wf', run2.run_id);
+  assert.equal(workerCalls(s2.adapter, 'c').length, 1, 'retry: 0 是節點自己寫的，不補');
+  assert.equal(s2.store.readRun('測試', 'wf', run2.run_id).steps.c.status, 'failed');
+  // 設定全缺省：行為同現況（沒 --model、查網開、不重試）
+  const s3 = setup();
+  s3.adapter.setFailOn('a');
+  const run3 = s3.runner.startRun('測試', 'wf', {});
+  await s3.runner.runUntilPause('測試', 'wf', run3.run_id);
+  assert.equal(workerCalls(s3.adapter, 'a').length, 1);
+  assert.equal(workerCalls(s3.adapter, 'a')[0].model, '');
+  assert.equal(workerCalls(s3.adapter, 'a')[0].web, true);
+});
+
+// ---- 移植合併輪 U1b：規範開跑鎖版本（run.shared）、參考檔跨層（attachments 混型）、查核第四路、舊 run 相容 ----
+
+const seedShared = (store) => {
+  store.addShared('_company', { name: '手冊.md', kind: 'rule', buf: Buffer.from('語氣要親切。'), text: '語氣要親切。' });
+  store.addShared('測試', { name: '部門.md', kind: 'rule', buf: Buffer.from('報價含稅。'), text: '報價含稅。' });
+};
+
+test('U1b ③：開跑鎖版本——startRun 把兩層規範全文快照進 run.shared；硬碟上的規範換了，續跑仍用開跑那份；steps[n].memory.shared 記份數與字數；查核員收到第四路', async () => {
+  const def = structuredClone(LINEAR3);
+  def.nodes[0].stop_point = 'always';
+  const { runner, adapter, store } = setup(def);
+  seedShared(store);
+  const run = runner.startRun('測試', 'wf', {});
+  assert.ok(run.shared.at && !Number.isNaN(Date.parse(run.shared.at)));
+  assert.deepEqual(run.shared.company, [{ name: '手冊.md', chars: 6, text: '語氣要親切。' }]);
+  assert.deepEqual(run.shared.dept, [{ name: '部門.md', chars: 5, text: '報價含稅。' }]);
+  assert.deepEqual(store.readRun('測試', 'wf', run.run_id).shared, run.shared, '落地的跟回傳的一樣');
+  let r = await runner.runUntilPause('測試', 'wf', run.run_id);
+  assert.equal(r.steps.a.status, 'waiting_review');
+  const a = workerCalls(adapter, 'a')[0];
+  assert.deepEqual(a.companyRules, [{ name: '手冊.md', text: '語氣要親切。' }]);
+  assert.deepEqual(a.deptRules, [{ name: '部門.md', text: '報價含稅。' }]);
+  assert.deepEqual(r.steps.a.memory.shared, { company: [{ name: '手冊.md', chars: 6 }], dept: [{ name: '部門.md', chars: 5 }], refs: [] });
+  assert.deepEqual(r.steps.a.memory.cards, [], '沒接記憶門面：卡空、只有 shared');
+  const ck = checkCalls(adapter, 'a')[0].checkPrompt;
+  assert.ok(ck.includes('# 公司／部門規範（一定要守）') && ck.includes('## 公司規範：手冊.md\n語氣要親切。') && ck.includes('## 部門規範：部門.md\n報價含稅。'), ck);
+  // 換掉硬碟上的手冊、多放一份部門規範，再續跑 → 下一步仍是開跑那份
+  store.deleteShared('_company', '手冊.md');
+  store.addShared('_company', { name: '手冊.md', kind: 'rule', buf: Buffer.from('改版：語氣要嚴肅。'), text: '改版：語氣要嚴肅。' });
+  store.addShared('測試', { name: '新增.md', kind: 'rule', buf: Buffer.from('新規'), text: '新規' });
+  runner.approve('測試', 'wf', run.run_id, 'a');
+  r = await runner.runUntilPause('測試', 'wf', run.run_id);
+  assert.equal(r.status, 'done');
+  const b = workerCalls(adapter, 'b')[0];
+  assert.deepEqual(b.companyRules, [{ name: '手冊.md', text: '語氣要親切。' }], '鎖版本：續跑不重讀硬碟');
+  assert.deepEqual(b.deptRules, [{ name: '部門.md', text: '報價含稅。' }], '鎖版本：續跑後新增的不帶');
+  assert.equal(r.shared.company[0].text, '語氣要親切。');
+  assert.deepEqual(r.steps.c.memory.shared.dept, [{ name: '部門.md', chars: 5 }]);
+});
+
+test('U1b ③：舊 run（run.yaml 沒有 shared）續跑不炸、工人不帶規範、查核無規範段、不寫 memory；沒有共用檔的新流程照舊（run.shared 兩層空、steps.a.memory 仍 undefined）', async () => {
+  const def = structuredClone(LINEAR3);
+  def.nodes[0].stop_point = 'always';
+  const { runner, adapter, store } = setup(def);
+  seedShared(store);
+  const run = runner.startRun('測試', 'wf', {});
+  await runner.runUntilPause('測試', 'wf', run.run_id);
+  const raw = store.readRun('測試', 'wf', run.run_id);
+  delete raw.shared; // 模擬本功能上線前的舊 run
+  store.writeRun('測試', 'wf', run.run_id, raw);
+  runner.approve('測試', 'wf', run.run_id, 'a');
+  const r = await runner.runUntilPause('測試', 'wf', run.run_id);
+  assert.equal(r.status, 'done');
+  const b = workerCalls(adapter, 'b')[0];
+  assert.deepEqual(b.companyRules, []);
+  assert.deepEqual(b.deptRules, []);
+  assert.equal(r.steps.b.memory, undefined, '舊 run 不寫 memory.shared');
+  assert.equal((checkCalls(adapter, 'b')[0].checkPrompt.match(/規範/g) ?? []).length, 0);
+  // 沒有共用檔（連 data/shared/ 都沒有）的流程
+  const plain = setup();
+  const run2 = plain.runner.startRun('測試', 'wf', {});
+  assert.deepEqual([run2.shared.company, run2.shared.dept], [[], []]);
+  const r2 = await plain.runner.runUntilPause('測試', 'wf', run2.run_id);
+  assert.equal(r2.status, 'done');
+  assert.deepEqual(workerCalls(plain.adapter, 'a')[0].companyRules, []);
+  assert.equal(r2.steps.a.memory, undefined, '沒有規範沒有共用參考＝不多寫 memory（舊行為）');
+});
+
+test('U1b ④：attachments 混型——字串走流程參考檔、{scope} 走公司／部門共用夾：工作單路徑各對各層、查核原始資料與監工開場用「名稱（公司）」當鍵、memory.shared.refs 記層與字數', async () => {
+  const def = structuredClone(LINEAR3);
+  def.nodes[0].attachments = ['a.txt', { scope: 'company', name: 'b.md' }, { scope: 'category', name: 'c.md' }, { scope: 'company', name: '沒有的.md' }];
+  const { runner, adapter, store } = setup(def);
+  store.writeRefFile('測試', 'wf', 'a.txt', Buffer.from('流程層內容'));
+  store.addShared('_company', { name: 'b.md', kind: 'ref', buf: Buffer.from('公司層內容') });
+  store.addShared('測試', { name: 'c.md', kind: 'ref', buf: Buffer.from('部門層內容') });
+  const run = runner.startRun('測試', 'wf', {});
+  const r = await runner.runUntilPause('測試', 'wf', run.run_id);
+  assert.equal(r.status, 'done');
+  const a = workerCalls(adapter, 'a')[0];
+  const tail = (p) => p.replace(/\\/g, '/').split('/').slice(-4).join('/');
+  assert.deepEqual(a.attachments.map(tail), ['測試/wf/files/a.txt', 'shared/_company/files/b.md', 'shared/測試/files/c.md'], '各對各層；不存在的不列');
+  const ck = checkCalls(adapter, 'a')[0].checkPrompt;
+  assert.ok(ck.includes('【參考檔：a.txt】\n流程層內容') && ck.includes('【參考檔：b.md（公司）】\n公司層內容') && ck.includes('【參考檔：c.md（部門）】\n部門層內容'), ck);
+  assert.ok(!ck.includes('[object Object]'));
+  const brief = adapter.calls.find((c) => c.meta?.kind === 'supervisor' && c.meta.phase === 'brief').prompt;
+  assert.ok(brief.includes('【參考檔：a.txt】\n流程層內容') && brief.includes('【參考檔：b.md（公司）】\n公司層內容') && brief.includes('【參考檔：c.md（部門）】\n部門層內容'), brief);
+  assert.ok(brief.includes('【參考檔：沒有的.md（公司）】') && !brief.includes('[object Object]'), '讀不到的只列名字');
+  assert.deepEqual(r.steps.a.memory.shared, {
+    company: [], dept: [],
+    refs: [{ scope: 'company', name: 'b.md', chars: '公司層內容'.length }, { scope: 'category', name: 'c.md', chars: '部門層內容'.length }], // U1a 修正輪：md／txt 參考的 chars＝字元數（5），不是位元組
+  });
+  assert.equal(r.steps.b.memory, undefined, '沒勾共用檔、沒規範的步驟不多寫');
+});
+
+test('U1b ⑧：settings.memory.paused 不影響規範——關於你空、companyRules 照帶、memory.shared 照記', async () => {
+  const { runner, adapter, store } = setupMemory();
+  seedMemory(store);
+  seedShared(store);
+  store.writeSettings({ memory: { paused: true } });
+  const run = runner.startRun('測試', 'wf', {});
+  await runner.runUntilPause('測試', 'wf', run.run_id);
+  const a = workerCalls(adapter, 'a')[0];
+  assert.deepEqual(a.coreNotes, []);
+  assert.deepEqual(a.groupRules, ['不提競品']);
+  assert.deepEqual(a.companyRules, [{ name: '手冊.md', text: '語氣要親切。' }]);
+  assert.deepEqual(a.deptRules, [{ name: '部門.md', text: '報價含稅。' }]);
+  const m = store.readRun('測試', 'wf', run.run_id).steps.a.memory;
+  assert.equal(m.paused, true);
+  assert.deepEqual(m.cards.map((c) => c.bucket), ['group']);
+  assert.deepEqual(m.shared, { company: [{ name: '手冊.md', chars: 6 }], dept: [{ name: '部門.md', chars: 5 }], refs: [] });
+});
+
+test('U1b 卷宗：真 host-adapter → prompts/a.txt 有「# 公司規範」「# 部門規範」段（含全文）、在「# 分類守則」之前；a.check1.txt 有第四路段', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bojian-runner-'));
+  const store = createStore(dir);
+  store.writeWorkflow('測試', 'wf', LINEAR3);
+  seedShared(store);
+  const spawnFn = () => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.stdin = { write() {}, end() {} };
+    child.kill = () => {};
+    setImmediate(() => {
+      child.stdout.emit('data', '產出文字');
+      child.emit('close', 0);
+    });
+    return child;
+  };
+  const memory = { onRunStart() {}, contextFor: () => ({ coreNotes: ['不要恭維'], groupRules: ['不提競品'], groupName: '測試', cards: [], overridden: [], picks: {}, paused: false }) };
+  const runner = createRunner({ store, adapter: createHostAdapter({ spawnFn }), memory });
+  const run = runner.startRun('測試', 'wf', {});
+  await runner.runUntilPause('測試', 'wf', run.run_id);
+  const p = store.readPromptRecord('測試', 'wf', run.run_id, 'a.txt');
+  const at = (h) => p.indexOf(h);
+  assert.ok(p.includes('# 公司規範（每一步都照做；查核員也會對）\n## 手冊.md\n語氣要親切。'), p);
+  assert.ok(p.includes('# 部門規範（分類「測試」，同上）\n## 部門.md\n報價含稅。'), p);
+  assert.ok(at('# 關於你') < at('# 公司規範') && at('# 公司規範') < at('# 部門規範') && at('# 部門規範') < at('# 分類守則（分類「測試」，一定要守）'), '順序：關於你→…→公司→部門→分類守則');
+  const ck = store.readPromptRecord('測試', 'wf', run.run_id, 'a.check1.txt');
+  assert.ok(ck.includes('# 公司／部門規範（一定要守）\n## 公司規範：手冊.md\n語氣要親切。') && ck.includes('違反規範歸 must'), ck);
 });

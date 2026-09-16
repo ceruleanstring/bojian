@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { createHostAdapter, HostError, LEAN_WORKER_SYSTEM, LEAN_GENERIC_SYSTEM } from '../src/host-adapter.js';
+import { createHostAdapter, HostError, LEAN_WORKER_SYSTEM, LEAN_GENERIC_SYSTEM, CALENDAR_TOOLS } from '../src/host-adapter.js';
 
 // 假子行程：可控 stdout／stderr／結束碼／不結束
 function fakeChild() {
@@ -296,6 +296,86 @@ test('buildPrompt：四個新段都不給 → 輸出與現況逐字相同（固�
   assert.equal(adapter.renderPrompt(SAMPLE_ARGS), FIXED_SAMPLE);
 });
 
+// ===== 記憶輪 M3a：工作單的「關於你」與「分類守則」兩段 =====
+
+test('buildPrompt：coreNotes → 「# 關於你」段在「# 角色與情境」之前；groupRules → 「# 分類守則」段在「# 限制條件」之後、「# 使用者在停點改過的要求」之前；逐條列點', () => {
+  const adapter = createHostAdapter({});
+  const prompt = adapter.renderPrompt({
+    ...NODE_ARGS,
+    roleContext: '你是客服主管',
+    constraints: '不承諾賠償金額',
+    editRules: ['每段不超過三句'],
+    coreNotes: ['不要恭維', '數字附來源'],
+    groupRules: ['不提競品', '語氣：輕鬆'],
+    groupName: '旅遊',
+  });
+  assert.ok(prompt.includes('# 關於你（每一步都照這些做；跟「要求」衝突時以「要求」為準）'));
+  assert.ok(prompt.includes('- 不要恭維') && prompt.includes('- 數字附來源'));
+  assert.ok(prompt.indexOf('# 關於你') < prompt.indexOf('# 角色與情境'), '關於你要在角色與情境之前');
+  assert.ok(prompt.indexOf('# 關於你') > prompt.indexOf('不夾雜其他語言'), '關於你在開場五句之後');
+  assert.ok(prompt.includes('# 分類守則（分類「旅遊」，一定要守）'));
+  assert.ok(prompt.includes('- 不提競品') && prompt.includes('- 語氣：輕鬆'), '有名字的條原樣列');
+  assert.ok(prompt.indexOf('# 限制條件') < prompt.indexOf('# 分類守則'), '群組段要在限制條件之後');
+  assert.ok(prompt.indexOf('# 分類守則') < prompt.indexOf('# 使用者在停點改過的要求'), '群組段要在停點改過的要求之前');
+  // 沒有角色與情境時，關於你段仍在「# 這一步」之前
+  const noRole = adapter.renderPrompt({ ...NODE_ARGS, coreNotes: ['不要恭維'] });
+  assert.ok(noRole.indexOf('# 關於你') < noRole.indexOf('# 這一步'));
+});
+
+test('buildPrompt：coreNotes／groupRules 空或沒給 → 兩段都不出現，輸出與現況逐字相同', () => {
+  const adapter = createHostAdapter({});
+  const base = adapter.renderPrompt({ ...NODE_ARGS, roleContext: '你是客服主管', constraints: '不承諾賠償金額' });
+  assert.ok(!base.includes('# 關於你') && !base.includes('# 分類守則'));
+  assert.equal(adapter.renderPrompt({ ...NODE_ARGS, roleContext: '你是客服主管', constraints: '不承諾賠償金額', coreNotes: [], groupRules: [], groupName: '旅遊' }), base);
+});
+
+test('卷宗協定：帶兩新段的 renderPrompt 與實際送進 stdin 的 prompt 一字不差', async () => {
+  let child;
+  const adapter = createHostAdapter({ spawnFn: () => (child = fakeChild()) });
+  const args = { ...NODE_ARGS, roleContext: '你是客服主管', coreNotes: ['不要恭維'], groupRules: ['不提競品'], groupName: '旅遊', meta: { kind: 'step' } };
+  const p = adapter.executeNode(args);
+  child.stdout.emit('data', jsonReply());
+  child.emit('close', 0);
+  await p;
+  assert.equal(adapter.renderPrompt(args), child.stdin.written);
+  assert.ok(child.stdin.written.includes('# 關於你') && child.stdin.written.includes('# 分類守則'));
+});
+
+// ===== 監工輪 K2：工作單的監工交接段＋查網開關 =====
+
+test('buildPrompt：supervisorNotes → 「# 監工交接」段出現在「# 上一步的產出」之前，逐條列點；空清單不出現', () => {
+  const adapter = createHostAdapter({});
+  const prompt = adapter.renderPrompt({ ...NODE_ARGS, supervisorNotes: ['開場：總表 14 件', '交接：按三類分節'] });
+  assert.ok(prompt.includes('# 監工交接（這趟的備註，照做；跟「要求」衝突時以「要求」為準）'));
+  assert.ok(prompt.includes('- 開場：總表 14 件'));
+  assert.ok(prompt.includes('- 交接：按三類分節'));
+  assert.ok(prompt.indexOf('# 監工交接') < prompt.indexOf('# 上一步的產出'), '要在上一步的產出之前');
+  assert.ok(!adapter.renderPrompt({ ...NODE_ARGS, supervisorNotes: [] }).includes('# 監工交接'));
+  assert.ok(!adapter.renderPrompt(NODE_ARGS).includes('# 監工交接'));
+});
+
+test('監工輪：web=false → --tools 與 --allowedTools 都不放行查網；缺省照舊放行', async () => {
+  const spawnFor = async (args) => {
+    let child;
+    let spawnArgs;
+    const adapter = createHostAdapter({ spawnFn: (a) => { spawnArgs = a; return (child = fakeChild()); } });
+    const p = adapter.executeNode(args);
+    child.stdout.emit('data', 'ok');
+    child.emit('close', 0);
+    await p;
+    return spawnArgs;
+  };
+  const off = await spawnFor({ ...NODE_ARGS, web: false });
+  assert.equal(off[off.indexOf('--tools') + 1], 'Read');
+  assert.ok(!off.includes('WebSearch') && !off.includes('WebFetch'), `關了查網就一個都不准出現：${off}`);
+  const on = await spawnFor(NODE_ARGS);
+  assert.equal(on[on.indexOf('--tools') + 1], 'WebSearch,WebFetch,Read');
+  assert.deepEqual(on.slice(on.indexOf('--allowedTools')), ['--allowedTools', 'WebSearch', 'WebFetch', 'Read']);
+  const offFile = await spawnFor({ ...NODE_ARGS, web: false, fileMode: { cwd: 'C:/tmp/o', fileName: '報告.docx', templatePath: null } });
+  assert.equal(offFile[offFile.indexOf('--tools') + 1], 'Read,Write,Edit,Bash', '產檔工具照放，只拿掉查網');
+  assert.deepEqual(offFile.slice(offFile.indexOf('--allowedTools')), ['--allowedTools', 'Read', 'Write', 'Edit', 'Bash(node *)']);
+});
+
 test('checkAvailable：結束碼 0 → true；spawn error → false', async () => {
   let child;
   const adapter = createHostAdapter({ spawnFn: () => (child = fakeChild()) });
@@ -471,4 +551,92 @@ test('BOJIAN_LEAN=0：退回帶行李——spawn 參數與帶行李版本逐字�
     await adapter.executeNode(NODE_ARGS);
     assert.deepEqual(a.args, ['-p', '--output-format', 'json', '--allowedTools', 'WebSearch', 'WebFetch', 'Read']);
   });
+});
+
+// 監工輪 K5：連接器例外——探針（reviews/監工輪-實走-2026-09-09/連接器探針.md）判定停在第一層，
+// 兇手是 --strict-mcp-config：不推它連接器就回來了，其餘輕裝旗標照推。
+test('連接器例外：meta.mcp 的呼叫不推 --strict-mcp-config、--allowedTools 加行事曆工具；其餘呼叫照舊嚴格', async () => {
+  const a = capture();
+  const adapter = createHostAdapter({ spawnFn: a.spawnFn });
+  await adapter.complete({ prompt: '抓快照', meta: { kind: 'snapshot', mcp: 'calendar' } });
+  assert.ok(!a.args.includes('--strict-mcp-config'), '行事曆呼叫不能推 --strict-mcp-config');
+  assert.ok(a.args.includes('--disable-slash-commands'), '其餘輕裝旗標照推');
+  assert.ok(a.args.includes('--tools'), '--tools 照推（探針證實它不擋連接器）');
+  assert.ok(a.args.includes('--allowedTools') && a.args.includes(CALENDAR_TOOLS), '權限閘要放行行事曆工具');
+
+  const b = capture();
+  await createHostAdapter({ spawnFn: b.spawnFn }).complete({ prompt: '查核', meta: { kind: 'check' } });
+  assert.ok(b.args.includes('--strict-mcp-config'), '一般通用補全照舊嚴格');
+  assert.ok(!b.args.includes(CALENDAR_TOOLS), '一般呼叫不放行行事曆工具');
+
+  const c = capture();
+  await createHostAdapter({ spawnFn: c.spawnFn }).executeNode({ ...NODE_ARGS, meta: { kind: 'step', mcp: 'calendar' } });
+  assert.ok(!c.args.includes('--strict-mcp-config'));
+  assert.ok(c.args.includes(CALENDAR_TOOLS) && c.args.includes('Read') && c.args.includes('WebSearch'), '行事曆工具是加上去的，讀類工具照舊');
+
+  const d = capture();
+  await createHostAdapter({ spawnFn: d.spawnFn }).executeNode({ ...NODE_ARGS, meta: { kind: 'step' } });
+  assert.ok(d.args.includes('--strict-mcp-config') && !d.args.includes(CALENDAR_TOOLS), '沒有 mcp 的步驟照舊輕裝');
+});
+
+// ===== 移植合併輪 U1b：工作單的「公司規範」與「部門規範」兩段（規範類每步都帶、全文貼進去；外圈在前：公司→部門→分類守則） =====
+
+test('U1b ①：companyRules／deptRules → 「# 公司規範」「# 部門規範」在「# 限制條件」之後、「# 分類守則」之前；每檔「## 檔名」＋全文；空層不印段', () => {
+  const adapter = createHostAdapter({});
+  const prompt = adapter.renderPrompt({
+    ...NODE_ARGS,
+    roleContext: '你是客服主管',
+    constraints: '不承諾賠償金額',
+    editRules: ['每段不超過三句'],
+    coreNotes: ['不要恭維'],
+    groupRules: ['不提競品'],
+    groupName: '旅遊',
+    companyRules: [{ name: '員工手冊.md', text: '語氣要親切，不用敬語堆疊。' }, { name: '品牌語氣.txt', text: '不說「尊榮」。' }],
+    deptRules: [{ name: '部門規範.docx', text: '報價一律含稅。' }],
+  });
+  assert.ok(prompt.includes('# 公司規範（每一步都照做；查核員也會對）'), prompt);
+  assert.ok(prompt.includes('## 員工手冊.md\n語氣要親切，不用敬語堆疊。'));
+  assert.ok(prompt.includes('## 品牌語氣.txt\n不說「尊榮」。'));
+  assert.ok(prompt.includes('# 部門規範（分類「旅遊」，同上）'), prompt);
+  assert.ok(prompt.includes('## 部門規範.docx\n報價一律含稅。'));
+  const at = (h) => prompt.indexOf(h);
+  assert.ok(at('# 關於你') < at('# 限制條件') && at('# 限制條件') < at('# 公司規範'), '公司規範在限制條件之後');
+  assert.ok(at('# 公司規範') < at('# 部門規範') && at('# 部門規範') < at('# 分類守則'), '外圈在前：公司→部門→分類守則');
+  assert.ok(at('# 分類守則') < at('# 使用者在停點改過的要求'), '分類守則仍在停點改過的要求之前');
+  const onlyDept = adapter.renderPrompt({ ...NODE_ARGS, groupName: '旅遊', companyRules: [], deptRules: [{ name: 'd.md', text: 'x' }] });
+  assert.ok(!onlyDept.includes('# 公司規範') && onlyDept.includes('# 部門規範（分類「旅遊」，同上）\n## d.md\nx'), '空層不印段');
+});
+
+test('U1b ①：兩層皆空或沒給 → 「規範」零命中，輸出與現況逐字相同', () => {
+  const adapter = createHostAdapter({});
+  const args = { ...NODE_ARGS, roleContext: '你是客服主管', constraints: '不承諾賠償金額', groupRules: ['不提競品'], groupName: '旅遊' };
+  const base = adapter.renderPrompt(args);
+  assert.equal((base.match(/規範/g) ?? []).length, 0);
+  assert.equal(adapter.renderPrompt({ ...args, companyRules: [], deptRules: [] }), base);
+});
+
+test('U1b 卷宗協定：帶規範兩段的 renderPrompt 與實際送進 stdin 的 prompt 一字不差', async () => {
+  let child;
+  const adapter = createHostAdapter({ spawnFn: () => (child = fakeChild()) });
+  const args = { ...NODE_ARGS, companyRules: [{ name: '手冊.md', text: '語氣要親切。' }], deptRules: [{ name: '部門.md', text: '含稅。' }], groupName: '旅遊', meta: { kind: 'step' } };
+  const p = adapter.executeNode(args);
+  child.stdout.emit('data', jsonReply());
+  child.emit('close', 0);
+  await p;
+  assert.equal(adapter.renderPrompt(args), child.stdin.written);
+  assert.ok(child.stdin.written.includes('## 手冊.md\n語氣要親切。'));
+});
+
+test('U1b 覆核該修：規範內文行首 # 全部降一級（# → ##、###### 封頂）——全文 ^# 開頭的行只剩系統段標題', () => {
+  const adapter = createHostAdapter({});
+  const prompt = adapter.renderPrompt({
+    ...NODE_ARGS,
+    groupName: '旅遊',
+    companyRules: [{ name: '員工手冊.md', text: '# 員工手冊\n語氣要親切。\n## 請假\n前一天說。\n###### 六級\n#不是標題\n  # 縮排不算' }],
+    deptRules: [{ name: '部門.md', text: '# 部門規範\n含稅。' }],
+  });
+  assert.ok(prompt.includes('## 員工手冊.md\n## 員工手冊\n語氣要親切。\n### 請假\n前一天說。\n###### 六級\n#不是標題\n  # 縮排不算'), prompt);
+  assert.ok(prompt.includes('## 部門.md\n## 部門規範\n含稅。'));
+  const h1 = prompt.split('\n').filter((l) => /^# /.test(l));
+  assert.deepEqual(h1, ['# 這一步：整理歸納', '# 要求', '# 公司規範（每一步都照做；查核員也會對）', '# 部門規範（分類「旅遊」，同上）', '# 上一步的產出（你的輸入）'], '一級標題只剩系統段');
 });

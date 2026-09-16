@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { predecessors, layers, computeSkipped } from '../src/graph.js';
+import { predecessors, layers, computeSkipped, ancestorIds } from '../src/graph.js';
 import { DAG_DEF } from './fixtures.js';
 
 test('predecessors：join 收得到兩個前驅', () => {
@@ -8,6 +8,12 @@ test('predecessors：join 收得到兩個前驅', () => {
   assert.deepEqual(preds.get('merge').sort(), ['amount-check', 'boss-sign']);
   assert.deepEqual(preds.get('done-join').sort(), ['mail', 'scan']);
   assert.deepEqual(preds.get('fill'), []);
+});
+
+test('ancestorIds：全部祖先，祖先排在自己前面；前驅表可外帶', () => {
+  assert.deepEqual(ancestorIds({ def: DAG_DEF }, 'merge'), ['fill', 'amount-check', 'boss-sign']);
+  assert.deepEqual(ancestorIds({ def: DAG_DEF }, 'fill'), [], '第一層沒有祖先');
+  assert.deepEqual(ancestorIds({ def: DAG_DEF }, 'merge', predecessors(DAG_DEF)), ['fill', 'amount-check', 'boss-sign']);
 });
 
 test('layers：拓撲深度（平行兩支同層）', () => {

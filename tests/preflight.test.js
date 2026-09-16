@@ -155,3 +155,26 @@ test('preflight：inputs 回傳每一步的來源清單（給抽屜預覽用）'
   assert.equal(r.inputs.classify[0].kind, 'human');
   assert.ok(r.inputs.classify[0].label.includes('貼上客戶來信'));
 });
+
+// ---- 移植合併輪 U1b：attachments 混型——共用層的 {scope,name} 也算 attachment（健檢標籤標層、不誤判） ----
+
+test('U1b ⑤：inputSources attachments 混型 → 字串與 {scope,name} 各一條 attachment，id 用 scope:名稱、label 標「（公司）」「（部門）」、無 [object Object]；只掛共用層參考檔的 AI 步驟不被健檢擋', () => {
+  const def = structuredClone(HUMAN_THEN_AI);
+  def.nodes[2].attachments = ['品牌手冊.txt', { scope: 'company', name: '範本.docx' }, { scope: 'category', name: '往期.md' }];
+  const src = inputSources(def);
+  const atts = src.reply.filter((s) => s.kind === 'attachment');
+  assert.deepEqual(atts.map((s) => [s.id, s.label]), [
+    ['品牌手冊.txt', '參考檔：品牌手冊.txt'],
+    ['company:範本.docx', '參考檔：範本.docx（公司）'],
+    ['category:往期.md', '參考檔：往期.md（部門）'],
+  ]);
+  assert.ok(!JSON.stringify(src).includes('[object Object]'));
+  // 只有共用層參考檔＋指示說要讀輸入 → 有內容來源（跟流程參考檔一樣算 solid），不擋、不警告沒輸入
+  const lone = {
+    format: 1, name: 'x', params: [],
+    nodes: [{ id: 'a', title: 'A', executor: 'ai', stop_point: 'never', instruction: '讀取上一步的範本照做', attachments: [{ scope: 'company', name: '範本.docx' }], next: [] }],
+  };
+  const pf = preflight(lone);
+  assert.deepEqual(pf.issues.filter((i) => i.code === 'no-input' || i.code === 'self-contained'), [], JSON.stringify(pf.issues));
+  assert.deepEqual(pf.inputs.a.map((s) => s.id), ['company:範本.docx']);
+});

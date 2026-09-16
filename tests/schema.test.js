@@ -4,7 +4,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
-import { validateWorkflow, SchemaError } from '../src/schema.js';
+import { validateWorkflow, SchemaError, applyDefaults, validateSettings } from '../src/schema.js';
+import { DEFAULT_SETTINGS } from '../src/store.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const EXAMPLE = path.join(HERE, '..', 'examples', 'quarterly-report.yaml');
@@ -208,4 +209,158 @@ test('健檢 P2-04：多起點會合＝合法；孤島步驟仍算斷鏈；別�
     nodes: [task('a', ['j']), { id: 'y', title: 'Y', kind: 'fork', next: ['x', 'j'] }, task('x', ['y']), { id: 'j', title: '會合', kind: 'join', next: [] }],
   };
   assert.throws(() => validateWorkflow(cycle), (e) => e.message.includes('繞圈'), '圈不在第一顆可達範圍也要抓到');
+});
+
+// —— 監工輪：流程層監工開關、數字對原始資料子開關、步驟三個勾、保留 id ——
+
+const soloDef = (extra = {}, node = {}) => ({
+  format: 1,
+  name: '一步流程',
+  params: [],
+  nodes: [{ id: 'a', title: 'A', executor: 'ai', stop_point: 'never', instruction: '做', next: [], ...node }],
+  ...extra,
+});
+
+test('監工輪：流程層 supervisor 與 check.facts 型別驗證', () => {
+  validateWorkflow(soloDef({ supervisor: { enabled: false } })); // 不丟例外即通過
+  validateWorkflow(soloDef({ supervisor: {} }));
+  assert.throws(() => validateWorkflow(soloDef({ supervisor: 'on' })), (e) => e.message.includes('supervisor 要是物件'));
+  assert.throws(() => validateWorkflow(soloDef({ supervisor: { enabled: '開' } })), (e) => e.message.includes('supervisor.enabled 要是開或關'));
+  validateWorkflow(soloDef({ check: { enabled: true, facts: false } }));
+  assert.throws(() => validateWorkflow(soloDef({ check: { enabled: true, facts: 'yes' } })), (e) => e.message.includes('check.facts 要是開或關'));
+});
+
+test('監工輪：步驟三個勾型別驗證；步驟 id 不能以 _ 開頭（保留給開場／收尾偽節點）', () => {
+  validateWorkflow(soloDef({}, { supervisor: { note: true, tier: false, tools: false } })); // 不丟例外即通過
+  assert.throws(() => validateWorkflow(soloDef({}, { supervisor: 'yes' })), (e) => e.message.includes('supervisor 要是物件'));
+  assert.throws(() => validateWorkflow(soloDef({}, { supervisor: { tier: 'deep' } })), (e) => e.message.includes('supervisor.tier 要是開或關'));
+  assert.throws(() => validateWorkflow(soloDef({}, { supervisor: { note: 1 } })), (e) => e.message.includes('supervisor.note 要是開或關'));
+  assert.throws(() => validateWorkflow(soloDef({}, { supervisor: { tools: 'on' } })), (e) => e.message.includes('supervisor.tools 要是開或關'));
+  assert.throws(() => validateWorkflow(soloDef({}, { id: '_x' })), (e) => e.message.includes('步驟 id 不能以 _ 開頭'));
+});
+
+test('預設補值 create：補監工、補查核，數字對原始資料看有沒有必填欄位', () => {
+  const withRequired = applyDefaults(soloDef({ params: [{ key: 'src', label: '總表', default: '', required: true }] }), { mode: 'create' });
+  assert.equal(withRequired.check.facts, true);
+  assert.equal(withRequired.check.enabled, true);
+  assert.equal(withRequired.supervisor.enabled, true);
+
+  const noRequired = applyDefaults(soloDef({ params: [{ key: 'src', label: '總表', default: '' }] }), { mode: 'create' });
+  assert.equal(noRequired.check.facts, false);
+
+  const bad = applyDefaults(soloDef({ params: 'oops' }), { mode: 'create' }); // 型別錯交給 validateWorkflow 報人話，這裡不 throw
+  assert.equal(bad.check.facts, false);
+
+  const already = applyDefaults(soloDef({ check: { enabled: false, facts: true } }), { mode: 'create' });
+  assert.deepEqual(already.check, { enabled: false, facts: true }, '已經有的值原樣不動');
+});
+
+test('預設補值 save：補監工與查核，但永遠不碰數字對原始資料（不把缺省開靜默翻成關）', () => {
+  const src = soloDef({ check: { enabled: true } });
+  const out = applyDefaults(src, { mode: 'save' });
+  assert.equal(out.supervisor.enabled, true);
+  assert.equal(out.check.facts, undefined);
+  assert.equal(src.supervisor, undefined, '純函式：不改原物件');
+  assert.deepEqual(applyDefaults(soloDef(), { mode: 'save' }).check, { enabled: true });
+});
+
+// —— 記憶輪 M1b：params[].kind 六類、頂層 category 型別、applyDefaults 第三參數 defaults、全域設定逐欄驗證 ——
+
+test('記憶輪：params[].kind 只准六類；頂層 category 只驗型別（存檔時由 server 剝掉）', () => {
+  validateWorkflow(soloDef({ params: [{ key: 'a', label: 'A', default: '', kind: 'time' }] })); // 不丟例外即通過
+  assert.throws(() => validateWorkflow(soloDef({ params: [{ key: 'a', label: 'A', default: '', kind: '色彩' }] })),
+    (e) => e.message.includes('params[0] kind 必須是 appearance/audience/time/range/limits/method'));
+  validateWorkflow(soloDef({ category: '旅遊' }));
+  assert.throws(() => validateWorkflow(soloDef({ category: 3 })), (e) => e.message.includes('category 要是文字'));
+});
+
+test('預設補值 create 帶 defaults：查核、數字對原始資料、監工、產檔權限、每個 task 節點的三個勾都照設定', () => {
+  const defaults = { check_enabled: false, check_facts: 'off', supervisor_enabled: false, supervisor_flags: { note: true, tier: true, tools: false }, permissions_files: false };
+  const def = soloDef({ params: [{ key: 'src', label: '總表', default: '', required: true }] });
+  def.nodes.push(
+    { id: 'b', title: 'B', executor: 'ai', stop_point: 'never', instruction: '做', next: [] },
+    { id: 'br', title: '分', kind: 'branch', instruction: '看', branches: [{ label: '一', next: 'a' }, { label: '二', next: 'b' }], next: [] },
+  );
+  const out = applyDefaults(def, { mode: 'create', defaults });
+  assert.equal(out.check.enabled, false);
+  assert.equal(out.check.facts, false, 'off＝固定關，就算有必填欄位');
+  assert.equal(out.supervisor.enabled, false);
+  assert.deepEqual(out.permissions, { files: false });
+  for (const n of out.nodes.filter((n) => (n.kind ?? 'task') === 'task')) assert.deepEqual(n.supervisor, { note: true, tier: true, tools: false });
+  assert.equal(out.nodes.find((n) => n.id === 'br').supervisor, undefined, '分岔不補三個勾');
+  assert.equal(def.nodes[0].supervisor, undefined, '純函式：不改原物件');
+  assert.equal(def.permissions, undefined);
+  // on＝固定開（沒有必填欄位也開）；auto＝現行規則（看有沒有必填欄位）
+  assert.equal(applyDefaults(soloDef(), { mode: 'create', defaults: { check_facts: 'on' } }).check.facts, true);
+  assert.equal(applyDefaults(soloDef(), { mode: 'create', defaults: { check_facts: 'auto' } }).check.facts, false);
+  // 節點已有三個勾＝不動；三個勾等於程式缺省＝不寫進節點
+  const kept = applyDefaults(soloDef({}, { supervisor: { note: false } }), { mode: 'create', defaults });
+  assert.deepEqual(kept.nodes[0].supervisor, { note: false });
+  const same = applyDefaults(soloDef(), { mode: 'create', defaults: { supervisor_flags: { note: true, tier: false, tools: false } } });
+  assert.equal(same.nodes[0].supervisor, undefined);
+});
+
+test('預設補值：defaults 省略＝程式缺省（產檔權限開、不補節點三個勾）；save 模式不碰 facts、不補節點、不補權限、不吃 defaults', () => {
+  const plain = applyDefaults(soloDef(), { mode: 'create' });
+  assert.deepEqual(plain.permissions, { files: true });
+  assert.equal(plain.nodes[0].supervisor, undefined);
+  const defaults = { check_enabled: false, check_facts: 'on', supervisor_enabled: false, supervisor_flags: { note: true, tier: true, tools: false }, permissions_files: false };
+  const saved = applyDefaults(soloDef(), { mode: 'save', defaults });
+  assert.equal(saved.check.facts, undefined);
+  assert.equal(saved.nodes[0].supervisor, undefined);
+  assert.equal(saved.permissions, undefined);
+  assert.deepEqual(saved.supervisor, { enabled: true }, '既有流程的缺省語意＝開，不吃新流程的預設');
+  assert.deepEqual(saved.check, { enabled: true });
+});
+
+test('全域設定逐欄驗證：合法回空；錯的每欄一句人話', () => {
+  assert.deepEqual(validateSettings(DEFAULT_SETTINGS), []);
+  const withDefaults = (d) => ({ ...DEFAULT_SETTINGS, defaults: { ...DEFAULT_SETTINGS.defaults, ...d } });
+  assert.ok(validateSettings(withDefaults({ check_facts: 'maybe' })).includes('數字對原始資料的預設只能是 auto、on、off'));
+  assert.ok(validateSettings({ ...DEFAULT_SETTINGS, exec: { ...DEFAULT_SETTINGS.exec, web: 'yes' } }).includes('允許查網路要是開或關'));
+  assert.ok(validateSettings({ ...DEFAULT_SETTINGS, memory: { ...DEFAULT_SETTINGS.memory, paused: 'no' } }).includes('記憶整層暫停要是開或關'));
+  assert.ok(validateSettings({ ...DEFAULT_SETTINGS, memory: { ...DEFAULT_SETTINGS.memory, sensitive: { health: 1 } } }).some((m) => m.includes('健康')));
+  assert.ok(validateSettings(withDefaults({ model_tier: 'ultra' })).some((m) => m.includes('fast、balanced、deep')));
+  assert.deepEqual(validateSettings(withDefaults({ model_tier: 'deep', retry: 2 })), []);
+  assert.ok(validateSettings(withDefaults({ retry: 5 })).some((m) => m.includes('0、1、2')));
+  assert.ok(validateSettings(withDefaults({ supervisor_flags: { note: 'y' } })).some((m) => m.includes('監工三個勾')));
+  assert.ok(validateSettings(withDefaults({ permissions_files: 'yes' })).some((m) => m.includes('產檔權限')));
+  assert.ok(validateSettings({ ...DEFAULT_SETTINGS, exec: { ...DEFAULT_SETTINGS.exec, remind_leads: ['9h'] } }).some((m) => m.includes('提前提醒')));
+  assert.deepEqual(validateSettings({ ...DEFAULT_SETTINGS, exec: { ...DEFAULT_SETTINGS.exec, remind_leads: ['30m', { at: '2026-10-01T09:00' }] } }), []);
+  // 區塊整個不是物件：講「格式不對」，不講「物件」這種術語（M1b 修正輪）
+  assert.deepEqual(validateSettings('oops'), ['設定格式不對']);
+  assert.ok(validateSettings({ ...DEFAULT_SETTINGS, memory: 'x' }).includes('設定的記憶格式不對'));
+  assert.ok(validateSettings({ ...DEFAULT_SETTINGS, memory: { ...DEFAULT_SETTINGS.memory, sensitive: [] } }).includes('設定的敏感類別格式不對'));
+  assert.ok(validateSettings({ ...DEFAULT_SETTINGS, defaults: null }).includes('設定的新流程預設格式不對'));
+  assert.ok(validateSettings(withDefaults({ supervisor_flags: 1 })).includes('設定的監工三個勾預設格式不對'));
+  assert.ok(validateSettings({ ...DEFAULT_SETTINGS, exec: 'x' }).includes('設定的執行與排程格式不對'));
+  const allBad = validateSettings({ version: 1, memory: 'x', defaults: 'x', exec: 'x' });
+  assert.ok(allBad.length === 3 && allBad.every((m) => !m.includes('物件')), allBad.join('；'));
+});
+
+// ---- 移植合併輪 U1a：attachments 收 {scope, name}、設定收 company_name ----
+test('U1a ⑤：attachments 元素＝檔名字串或 {scope: company|category, name}；scope 亂給、name 帶路徑符號都拒', () => {
+  validateWorkflow(soloDef({}, { attachments: ['a.txt', { scope: 'company', name: 'b.md' }, { scope: 'category', name: 'c.docx' }] }));
+  validateWorkflow(soloDef({}, { attachments: [] }));
+  const msg = 'attachments 要是檔名清單或 {scope, name}（不含路徑符號）';
+  for (const bad of [
+    [{ scope: 'x', name: 'b.md' }],
+    [{ scope: 'company', name: '../b' }],
+    [{ scope: 'company', name: 'sub/b.md' }],
+    [{ scope: 'company' }],
+    [{ name: 'b.md' }],
+    ['a/b.txt'],
+    [42],
+  ]) {
+    assert.throws(() => validateWorkflow(soloDef({}, { attachments: bad })), (e) => e instanceof SchemaError && e.problems.some((p) => p.includes(msg)), JSON.stringify(bad));
+  }
+});
+
+test('U1a ⑥：company_name 要是文字、60 字內；缺省空字串合法', () => {
+  assert.deepEqual(validateSettings({ ...DEFAULT_SETTINGS, company_name: '範例公司' }), []);
+  assert.deepEqual(validateSettings({ ...DEFAULT_SETTINGS, company_name: '' }), []);
+  assert.deepEqual(validateSettings({ ...DEFAULT_SETTINGS, company_name: '赫'.repeat(60) }), []);
+  assert.ok(validateSettings({ ...DEFAULT_SETTINGS, company_name: '赫'.repeat(61) }).includes('公司名稱要是文字、60 字內'));
+  assert.ok(validateSettings({ ...DEFAULT_SETTINGS, company_name: 12 }).includes('公司名稱要是文字、60 字內'));
+  assert.ok(validateSettings({ ...DEFAULT_SETTINGS, company_name: null }).includes('公司名稱要是文字、60 字內'));
 });

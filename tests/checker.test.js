@@ -464,6 +464,103 @@ test('查核 prompt：段標題齊、必守逐條列、判定規則六條與輸�
   assert.ok(bare.slice(bare.indexOf('# 格式要求'), bare.indexOf('# 判定規則')).includes('（無）'));
 });
 
+// ---- 監工輪：facts 開關與監工備註 ----
+
+test('查核 prompt：流程沒開「數字對原始資料」→ 判定規則換成只對必守與格式四條、原始資料段講明沒開', () => {
+  const p = buildCheckPrompt({
+    title: '寫八月月報',
+    requirements: { ...REQ, factsOff: true },
+    sources: '',
+    product: '八月共 14 件',
+  });
+  const rules = p.slice(p.indexOf('# 判定規則'), p.indexOf('# 輸出格式'));
+  assert.ok(
+    rules.includes('1. 這一步的主要工作是：使用者要求一定要有的東西，成品裡有沒有對應內容——逐條找。成品裡的事實不對照原始資料，items 給空清單。'),
+    `第一條要逐字：${rules}`,
+  );
+  assert.ok(!rules.includes('逐項回到原始資料裡找根據'), '不再逐項對原始資料');
+  assert.equal((rules.match(/^\d\. /gm) ?? []).length, 4, '只剩四條');
+  assert.ok(rules.includes('「必守」逐條檢查') && rules.includes('conclusion-changed') && rules.includes('只輸出一個 JSON 物件'), '原第 4、5、6 條重新編號留著');
+  const src = p.slice(p.indexOf('# 原始資料'), p.indexOf('# 成品'));
+  assert.ok(src.includes('（本流程沒開數字對原始資料，只對必守與格式）'), `原始資料段：${src}`);
+  assert.ok(p.includes('- 數字要對') && p.includes('不超過一頁'), '必守與格式要求照舊');
+});
+
+test('查核 prompt：factsOff 缺省 → 還是原來的六條，照樣對原始資料', () => {
+  const p = buildCheckPrompt({ title: '寫八月月報', requirements: REQ, sources: '【欄位：月份】\n八月', product: '成品' });
+  const rules = p.slice(p.indexOf('# 判定規則'), p.indexOf('# 輸出格式'));
+  assert.equal((rules.match(/^\d\. /gm) ?? []).length, 6, '缺省六條');
+  assert.ok(rules.includes('逐項回到原始資料裡找根據'));
+  assert.ok(!rules.includes('成品裡的事實不對照原始資料'));
+  assert.ok(p.includes('【欄位：月份】\n八月') && !p.includes('沒開數字對原始資料'));
+});
+
+test('查核 prompt：監工備註自成一段（參考，不是必守），不混進必守', () => {
+  const p = buildCheckPrompt({
+    title: '寫八月月報',
+    requirements: { ...REQ, supervisorNotes: ['交接：按三類分節'] },
+    sources: '',
+    product: '成品',
+  });
+  assert.ok(p.includes('# 監工備註（參考，不是必守）'), '要有監工備註段');
+  assert.ok(p.includes('- 交接：按三類分節'), '備註逐條列');
+  const musts = p.slice(p.indexOf('# 必守（逐條對）'), p.indexOf('# 格式要求'));
+  assert.ok(!musts.includes('按三類分節'), `監工備註不准進必守：${musts}`);
+  assert.ok(p.indexOf('# 格式要求') < p.indexOf('# 監工備註'), '監工備註在格式要求之後');
+  assert.ok(p.indexOf('# 監工備註') < p.indexOf('# 判定規則'), '監工備註在判定規則之前');
+
+  const none = buildCheckPrompt({ title: 'x', requirements: REQ, sources: '', product: '成品' });
+  assert.ok(!none.includes('# 監工備註'), '沒備註就不出這一段');
+});
+
+// ---- 記憶輪 M3a：群組規矩併進必守 ----
+
+test('查核 prompt：群組規矩是必守第三路（驗收重點→停點規則→群組規矩）；違反歸既有 must 攔；省略時逐字不變', () => {
+  const p = buildCheckPrompt({
+    title: '寫八月月報',
+    requirements: { ...REQ, groupRules: ['不提競品', '語氣：輕鬆'] },
+    sources: '',
+    product: '成品',
+  });
+  const musts = p.slice(p.indexOf('# 必守（逐條對）'), p.indexOf('# 格式要求'));
+  assert.ok(musts.includes('- 不提競品') && musts.includes('- 語氣：輕鬆'), `群組規矩要進必守：${musts}`);
+  assert.ok(musts.indexOf('- 保留 120 分鐘') < musts.indexOf('- 不提競品'), '排在停點規則之後');
+  assert.ok(!p.includes('關於你'), '查核員不帶「關於你」');
+  // 空白條與空清單都不出現；省略＝現況
+  const same = buildCheckPrompt({ title: '寫八月月報', requirements: { ...REQ, groupRules: ['  ', ''] }, sources: 'x', product: 'y' });
+  assert.equal(same, buildCheckPrompt({ title: '寫八月月報', requirements: REQ, sources: 'x', product: 'y' }));
+  // 查核員說違反了群組規矩→既有的 must 類攔下（不是 stop-edit）
+  const r = classify({ items: [], must_violations: [{ rule: '不提競品', where: '第二段提到對手' }], flags: [], summary: '' }, { editRules: REQ.editRules });
+  assert.equal(r.status, 'blocked');
+  assert.deepEqual(r.blocks.map((b) => b.kind), ['must']);
+});
+
+// factsOff 缺省（未改動前）的完整輸出——快照，鎖住預設路徑一個字都不准變
+const SNAPSHOT_DEFAULT_PROMPT = "你是「剝繭」流程的交貨查核員。這一步的成品已經做好，你的工作是拿原始資料與使用者的要求逐條對它，把對不上的地方挑出來。\n你不改成品、不補內容、不評論好不好——只回報事實對不對、要求有沒有守。原始資料裡沒有的東西，一律不准當成常識自己補。\n全篇使用與「這一步」相同的語言。\n\n# 這一步：寫八月月報\n把明細寫成八月月報\n\n# 必守（逐條對）\n- 數字要對\n- 每段不超過三句\n- 保留 120 分鐘\n\n# 格式要求\n不超過一頁\nMarkdown 表格\n\n# 判定規則\n1. 把成品裡每一個具體主張（數字、事實、引用、排序）列成一項，逐項回到原始資料裡找根據。\n2. verdict 只有四種：ok＝原始資料撐得住；mismatch＝跟原始資料對不上；unsupported＝原始資料裡找不到根據；missing＝指示要這一項但原始資料本來就沒有。unsupported 只用在事實性主張（數字、事件、引用、名稱、時程、規格）；這一步被指示要做的判斷、評分、排序、建議本身不需要出處，但它引用的事實要有。source 抄原始資料的逐字原文，不准改寫或轉述；scope 寫清楚這個數字涵蓋的範圍（期間、類別、對象）；有加總或換算就把算式寫進 calc，calc 只寫數字與 + - * / ( ) =，不要加單位、貨幣符號或文字。百分比寫成 6/14*100=42.9 或 6/14=42.9%，等號右邊寫成品裡出現的數字（可四捨五入或截斷到成品的位數）。\n3. 成品明白標成估計、約略、推測的數字不算 mismatch，除非原始資料有精確值而且差距明顯。\n4. 「必守」逐條檢查，違反的寫進 must_violations：rule 抄那一條原文，where 寫成品哪裡違反。\n5. flags 只有兩種：conclusion-changed＝成品改了上游的結論或排序；format＝格式跟要求不同。其他一律不要寫。\n6. 只輸出一個 JSON 物件，前後不要任何其他文字。\n\n# 輸出格式\n{\"items\":[{\"claim\":\"總數 13 件\",\"source\":\"…原文逐字…\",\"scope\":\"全月、全部類別\",\"calc\":\"6+3+4+1=14\",\"verdict\":\"mismatch\"}],\n \"must_violations\":[{\"rule\":\"每段不超過三句\",\"where\":\"第二段有五句\"}],\n \"flags\":[{\"kind\":\"conclusion-changed\",\"detail\":\"上游排 D 第一，成品改成 C 第一，理由是…\"}],\n \"summary\":\"一句話\"}\n\n# 原始資料\n【欄位：月份】\n八月\n\n# 成品\n八月共 14 件";
+
+test('查核 prompt：factsOff 缺省時逐字不變（回歸快照，鎖住預設路徑）', () => {
+  const p = buildCheckPrompt({
+    title: '寫八月月報',
+    requirements: REQ,
+    sources: '【欄位：月份】\n八月',
+    product: '八月共 14 件',
+  });
+  assert.equal(p, SNAPSHOT_DEFAULT_PROMPT, 'factsOff 缺省時，開場白與輸出範例都不准跟著 factsOff 分支一起被改壞');
+});
+
+test('查核 prompt：factsOff 時開場白與輸出範例不再教查核員對原始資料', () => {
+  const p = buildCheckPrompt({
+    title: '寫八月月報',
+    requirements: { ...REQ, factsOff: true },
+    sources: '',
+    product: '八月共 14 件',
+  });
+  assert.ok(!p.includes('拿原始資料'), `factsOff 時不該再叫查核員拿原始資料：${p.slice(0, 160)}`);
+  assert.ok(!p.includes('一律不准當成常識自己補'), '這句話預設沒有原始資料可查時不成立，factsOff 不該出現');
+  assert.ok(p.includes('"items":[]'), '輸出範例的 items 該換成空清單');
+  assert.ok(!p.includes('"verdict":"mismatch"'), '不該再示範一個填滿的 mismatch item，會誤導模型自己找數字來對');
+});
+
 // ---- 原始資料組裝 ----
 
 test('原始資料組裝：欄位在前、祖先依給定順序、補的資料與參考檔在後、每檔截 perFile', () => {
@@ -733,4 +830,44 @@ test('擬規則：onPrompt 拿到的就是送出去的那份指示；不給也�
     [{ text: '後面每步保留 120 分鐘', scope: 'all' }],
     '卷宗寫不進不准把規則退成預設那一條',
   );
+});
+
+// ---- 移植合併輪 U1b：查核第四路——公司／部門規範另成一段（整份貼，不拆成必守條列）、判定規則加一句「違反規範歸 must」 ----
+
+test('U1b ②：companyRules／deptRules → 「# 公司／部門規範（一定要守）」段在必守清單後、格式要求前；每檔「## 公司規範：檔名」＋全文；判定規則多一句「違反規範歸 must」；factsOff 也一樣', () => {
+  const rules = { companyRules: [{ name: '員工手冊.md', text: '語氣要親切。' }], deptRules: [{ name: '部門規範.docx', text: '報價一律含稅。' }] };
+  const p = buildCheckPrompt({ title: '寫八月月報', requirements: { ...REQ, ...rules }, sources: '', product: '成品' });
+  const at = (h) => p.indexOf(h);
+  assert.ok(p.includes('# 公司／部門規範（一定要守）'), p);
+  assert.ok(p.includes('## 公司規範：員工手冊.md\n語氣要親切。'));
+  assert.ok(p.includes('## 部門規範：部門規範.docx\n報價一律含稅。'));
+  assert.ok(at('# 必守（逐條對）') < at('# 公司／部門規範') && at('# 公司／部門規範') < at('# 格式要求'), '放在必守清單後、格式要求前');
+  assert.ok(p.includes('- 數字要對') && p.includes('- 保留 120 分鐘'), '必守三路照舊');
+  const judge = p.slice(at('# 判定規則'), at('# 輸出格式'));
+  assert.ok(judge.includes('違反規範歸 must'), judge);
+  assert.equal((judge.match(/^\d\. /gm) ?? []).length, 6, '六條編號不動，規範那句不編號');
+  // 只有一層
+  const onlyDept = buildCheckPrompt({ title: 'x', requirements: { ...REQ, deptRules: rules.deptRules }, sources: '', product: '成品' });
+  assert.ok(onlyDept.includes('# 公司／部門規範（一定要守）') && !onlyDept.includes('## 公司規範：') && onlyDept.includes('## 部門規範：部門規範.docx'));
+  // factsOff：段與那句照樣在
+  const off = buildCheckPrompt({ title: 'x', requirements: { ...REQ, ...rules, factsOff: true }, sources: '', product: '成品' });
+  assert.ok(off.includes('# 公司／部門規範（一定要守）') && off.slice(off.indexOf('# 判定規則'), off.indexOf('# 輸出格式')).includes('違反規範歸 must'));
+});
+
+test('U1b ②：requirements 沒給規範（或給空陣列）→ 「規範」零命中，輸出與現況逐字相同', () => {
+  const base = buildCheckPrompt({ title: '寫八月月報', requirements: REQ, sources: '', product: '成品' });
+  assert.equal((base.match(/規範/g) ?? []).length, 0);
+  assert.equal(buildCheckPrompt({ title: '寫八月月報', requirements: { ...REQ, companyRules: [], deptRules: [] }, sources: '', product: '成品' }), base);
+});
+
+test('U1b 覆核該修：查核 prompt 裡規範內文行首 # 降一級（###### 封頂），^# 開頭的行只剩系統段標題', () => {
+  const p = buildCheckPrompt({
+    title: '寫八月月報',
+    requirements: { ...REQ, companyRules: [{ name: '員工手冊.md', text: '# 員工手冊\n語氣要親切。\n## 請假\n前一天說。\n###### 六級' }] },
+    sources: '',
+    product: '成品',
+  });
+  assert.ok(p.includes('## 公司規範：員工手冊.md\n## 員工手冊\n語氣要親切。\n### 請假\n前一天說。\n###### 六級'), p);
+  const h1 = p.split('\n').filter((l) => /^# /.test(l));
+  assert.deepEqual(h1, ['# 這一步：寫八月月報', '# 必守（逐條對）', '# 公司／部門規範（一定要守）', '# 格式要求', '# 判定規則', '# 輸出格式', '# 原始資料', '# 成品']);
 });
