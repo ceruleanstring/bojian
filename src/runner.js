@@ -2,14 +2,28 @@
 // 寫入紀律：所有狀態變更走 update()（讀最新→改→原子存），跨 await 不持有舊物件——平行支不互相蓋寫。
 import fs from 'node:fs';
 import { validateWorkflow, nodeKind, outgoing, OUTPUT_TIER2, OUTPUT_OFFICE } from './schema.js';
-import { predecessors, computeSkipped } from './graph.js';
+import { predecessors, computeSkipped, ancestorIds } from './graph.js';
 import { inputSources } from './preflight.js';
 import { buildSources, extractFileText, runCheck, deriveEditRules as deriveRules } from './checker.js';
+import {
+  supervisorFlags, buildRecordTable,
+  brief as supervisorBrief, handoff as supervisorHandoff, record as supervisorRecord,
+} from './supervisor.js';
+import { scopeKey, attName } from './shared.js';
+
+// 監工開場看得到的參考檔：純文字類讀原文（截字由 prompt 那邊統一做），Word／Excel 這種只列名字——
+// 監工沒有開檔案的工具，給它檔名至少它知道有這份東西存在
+const REF_TEXT_EXTS = ['md', 'txt', 'csv', 'json', 'html'];
+// 分岔節點的交接只做一件事：選路。三個勾對它沒有意義（沒有檔位、沒有查網、備註沒有下一個工人會讀）
+const BRANCH_FLAGS = { note: false, tier: false, tools: false };
+// {{欄位}} 引用；會代入欄位值的節點欄位（記憶輪：這一步引用到的欄位，其被選的習慣卡才算「這步用了」）
+const PARAM_REF = /\{\{\s*([\w-]+)\s*\}\}/g;
+const INJECTED_FIELDS = ['instruction', 'role_context', 'background', 'constraints', 'examples', 'review_focus', 'output_type', 'output_structure', 'output_length', 'output_tone', 'output_format'];
 
 // 查核輪：長欄位值不代進句子——給了 sink 時，換行或超過 200 字的值不直接代入，
 // 改留一句指向「欄位內容」段的提示，原文收進 sink（Map，同一 key 只收一次）；不給 sink＝舊行為。
 function injectParams(instruction, params, { labels, sink } = {}) {
-  return instruction.replace(/\{\{\s*([\w-]+)\s*\}\}/g, (_, key) => {
+  return instruction.replace(PARAM_REF, (_, key) => {
     const value = String(params[key] ?? '');
     if (sink && (value.includes('\n') || value.length > 200)) {
       const label = labels?.[key] ?? key;
@@ -46,7 +60,8 @@ export function parseWhen(text) {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
-export function createRunner({ store, adapter, now = () => Date.now() }) {
+// memory（記憶輪 M2，可省略）＝createMemory 門面：開跑後判「同值連兩趟」記習慣卡。門面炸了只留一句，run 照建
+export function createRunner({ store, adapter, now = () => Date.now(), memory = null }) {
   const load = (c, i, r) => store.readRun(c, i, r);
 
   // D19：步驟輸出存成檔案。TIER2 未接工具鏈→降級 .md 並在 step.file_note 講明；有範本先填範本（{{參數}}＋{{output}}）
@@ -101,22 +116,6 @@ export function createRunner({ store, adapter, now = () => Date.now() }) {
     return parts.map((x) => `【${x.title}】\n${x.text}`).join('\n\n');
   }
 
-  // 這一步的全部祖先（BFS 走前驅），深度優先後序＝拓樸序（祖先排在自己前面）
-  function ancestorIds(run, nodeId, predMap = predecessors(run.def)) {
-    const seen = new Set();
-    const order = [];
-    const walk = (id) => {
-      for (const p of predMap.get(id) ?? []) {
-        if (seen.has(p)) continue;
-        seen.add(p);
-        walk(p);
-        order.push(p);
-      }
-    };
-    walk(nodeId);
-    return order;
-  }
-
   // 查核輪：查核要看的原始資料之一——所有祖先任務步驟的有效產出（拓樸序；結構節點與空產出不列）
   function ancestorsOf(run, nodeId, predMap) {
     const byId = new Map(run.def.nodes.map((n) => [n.id, n]));
@@ -169,28 +168,45 @@ export function createRunner({ store, adapter, now = () => Date.now() }) {
     };
   }
 
-  async function judgeBranch(node, upstream, ctx) {
-    const options = node.branches.map((b, i) => `${i + 1}. ${b.label}`).join('\n');
-    const prompt = [
-      '你是流程分岔的判路員。根據「判斷依據」與「上游內容」，從選項中選一條路。',
-      '只輸出選中的那一條的編號與原文（例如「1. 金額五千以上」），一個字都不要多。判斷不了就輸出「無法判定」。',
-      '',
-      `# 判斷依據`,
-      node.instruction,
-      '',
-      '# 選項',
-      options,
-      '',
-      '# 上游內容',
-      upstream || '（無）',
-    ].join('\n');
-    try { store.writePromptRecord(ctx.category, ctx.id, ctx.runId, `${node.id}-判路.txt`, prompt); } catch { /* 卷宗寫不進不擋執行 */ }
-    const ans = (await adapter.complete({ prompt, meta: { kind: 'branch', category: ctx.category, workflow: ctx.id, run: ctx.runId, node: node.id } })).trim();
-    const hits = node.branches.filter((b) => ans.includes(b.label));
-    if (hits.length === 1) return hits[0];
-    const num = /^(\d+)/.exec(ans);
-    if (num && node.branches[Number(num[1]) - 1]) return node.branches[Number(num[1]) - 1];
-    return null;
+  // 判路（監工輪，原 judgeBranch）：分岔的選路併進監工的交接——route＝選項編號字串，
+  // 對不到或監工判斷不了就回 null，由 launch 轉 waiting_branch 停下問人
+  function routeViaHandoff(node, afterHandoff) {
+    const route = afterHandoff.steps[node.id].handoff?.route ?? null;
+    return route === null ? null : (node.branches[Number(route) - 1] ?? null);
+  }
+
+  // 參考檔（三層共用檔）：attachments 元素＝字串（流程層 files/）｜{scope, name}（公司／部門共用夾 files/）；
+  // 路徑各對各層、顯示名與鍵一律 attName（「名稱（公司）」）——同名檔各層各存各的，鍵不能撞
+  const rawName = (a) => (typeof a === 'string' ? a : String(a?.name ?? ''));
+  const attPath = (category, id, a) => (typeof a === 'string' ? store.refFilePath(category, id, a) : store.sharedFilePath(scopeKey(a.scope, category), a.name));
+
+  // 監工開場要看的參考檔：全部節點 attachments 的聯集，讀得出純文字的給原文，其餘只留檔名
+  function briefRefTexts(category, id, def) {
+    const out = {};
+    const seen = new Set();
+    for (const a of def.nodes.flatMap((n) => n.attachments ?? [])) {
+      const key = attName(a);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (!REF_TEXT_EXTS.includes(rawName(a).split('.').pop()?.toLowerCase())) continue;
+      try {
+        const fp = attPath(category, id, a);
+        if (fp) out[key] = fs.readFileSync(fp, 'utf8');
+      } catch { /* 讀不到就只列名字 */ }
+    }
+    return out;
+  }
+
+  // 移植合併輪（三層共用檔）：開跑時鎖版本——把公司與部門的規範全文快照進 run.shared（每層上傳時已擋 8,000 字），
+  // 整趟每一步都讀這份、續跑不重算；跑到一半有人換了手冊，這一趟仍用開跑那份。某層讀不到＝那層不帶（留一句），run 照建
+  function sharedSnapshot(category) {
+    const read = (scope) => {
+      try { return store.readSharedRuleTexts(scope).map(({ name, chars, text }) => ({ name, chars, text })); } catch (e) {
+        console.error(`[bojian] 共用夾「${scope}」的規範讀不到，這趟不帶：`, e.message);
+        return [];
+      }
+    };
+    return { at: new Date().toISOString(), company: read('_company'), dept: read(category) };
   }
 
   // 等時刻解析：固定字串直接解；{from} 讀上游步驟產出的「WHEN: 時刻」行（動態時刻，D20）
@@ -214,6 +230,18 @@ export function createRunner({ store, adapter, now = () => Date.now() }) {
     return { ok: true, at: d, linkedEventId: ev ? ev[1] : null };
   }
 
+  // 前一趟的 id：清單尾端最多 5 筆逐一讀 started_at，取最晚的（同時刻取 id 字典序較後者）；讀不到的跳過、本趟排除
+  function latestRunId(category, id, selfId) {
+    let best = null;
+    for (const rid of store.listRuns(category, id).slice(-5)) {
+      if (rid === selfId) continue;
+      let at;
+      try { at = String(store.readRun(category, id, rid)?.started_at ?? ''); } catch { continue; }
+      if (!best || at >= best.at) best = { rid, at };
+    }
+    return best?.rid ?? null;
+  }
+
   return {
     startRun(category, id, overrides = {}, opts = {}) {
       const def = store.readWorkflow(category, id);
@@ -223,8 +251,13 @@ export function createRunner({ store, adapter, now = () => Date.now() }) {
         const v = overrides[p.key];
         params[p.key] = v === undefined || v === null || String(v).trim() === '' ? p.default : v;
       }
+      // 前一趟（記憶輪：記路①「開跑同值連兩趟」與記路②「停點連兩趟」都對它比）——不限狀態，依 started_at 判：
+      // run id 同秒只差亂數尾碼，字典序不等於先後（覆核探針：同秒兩趟選錯機率近半），所以尾端幾筆逐一讀開跑時間取最晚的
+      const runId = store.newRunId();
+      const prevId = latestRunId(category, id, runId);
+      const picks = opts.memoryPicks && typeof opts.memoryPicks === 'object' ? opts.memoryPicks : {};
       const run = {
-        run_id: store.newRunId(),
+        run_id: runId,
         workflow: { category, id, name: def.name },
         def, // 定義快照：退版時進行中的 run 用舊版跑完（Error Map）
         status: 'running',
@@ -233,6 +266,15 @@ export function createRunner({ store, adapter, now = () => Date.now() }) {
         params,
         started_at: new Date().toISOString(),
         finished_at: null,
+        shared: sharedSnapshot(category), // 三層共用檔：兩層規範的開跑快照（鎖版本）；舊 run 沒有這欄＝不帶
+        // 記憶輪（M2）：開跑表單點了哪些習慣卡（欄位 key→卡 id）、點了又改掉的、帶哪個身分；通知由門面寫
+        memory: {
+          identity: typeof opts.memoryIdentity === 'string' && opts.memoryIdentity ? opts.memoryIdentity : null,
+          picks: Object.fromEntries(Object.entries(picks).filter(([, v]) => typeof v === 'string' && v)),
+          changed: Array.isArray(opts.memoryChanged) ? opts.memoryChanged.filter((x) => typeof x === 'string' && x) : [],
+          prev_run: prevId,
+          notices: [],
+        },
         steps: Object.fromEntries(
           def.nodes.map((n) => [n.id, {
             status: 'pending', output: null, edited_output: null, edit_note: null,
@@ -242,19 +284,130 @@ export function createRunner({ store, adapter, now = () => Date.now() }) {
         ),
       };
       store.writeRun(category, id, run.run_id, run);
-      return run;
+      if (!memory) return run;
+      // 記路①：門面自己讀寫卡與通知（同步）；炸了只留一句，run 照建。回存好的那份——門面可能剛加了通知
+      try {
+        memory.onRunStart({ category, id, run, prevRun: prevId ? load(category, id, prevId) : null });
+      } catch (e) {
+        console.error('[bojian] 記憶（開跑）沒記成：', e.message);
+      }
+      return load(category, id, run.run_id);
     },
 
     // 推進到「沒有可自動前進的事」為止：全完→done、有等待/失敗→paused
     async runUntilPause(category, id, runId) {
       const inflight = new Map(); // nodeId → promise（本次呼叫內的併發登記）
+      let run = load(category, id, runId);
+      const def = run.def; // 定義快照，整趟不變——labels／predMap／監工開關都只算一次
+      const labels = Object.fromEntries((def.params ?? []).map((p) => [p.key, p.label])); // 查核輪：長欄位提示語要用的欄位標籤
+      const predMap = predecessors(def);
+      const supervisorOn = def.supervisor?.enabled !== false; // 監工缺省＝開（只管備註、派工、紀錄；判路不歸它管）
+      // 全域設定（記憶輪）：節點沒設的檔位／重試／查網用它補；讀不到＝程式缺省
+      let settings = {};
+      try { settings = store.readSettings(); } catch (e) { console.error('[bojian] 設定檔讀不到，用程式缺省：', e.message); }
+      // 記憶輪（M3a）：這趟每一步要帶的關於你、群組規矩、被選的習慣卡——整趟算一次（卡、群組、欄位值都是趟級的）；
+      // 讀不到＝當沒有卡：工作單不多段、不寫 steps[].memory，流程照跑
+      let memoryCtx = null;
+      try {
+        if (memory?.contextFor) memoryCtx = memory.contextFor({ category, id, def, params: run.params, identity: run.memory?.identity ?? null, picks: run.memory?.picks ?? {}, settings });
+      } catch (e) { console.error('[bojian] 記憶（每步要帶的）讀不到，這趟不帶：', e.message); }
+      // 三層共用檔（移植合併輪）：規範只從 run.shared（開跑快照）拿，不從硬碟、不從 memory.contextFor——續跑也鎖在開跑那版；
+      // 舊 run 沒有 shared＝不帶、工作單不多段。給工人與查核員 [{name,text}]，給 steps[].memory.shared 記 [{name,chars}]。
+      // 「關於你」暫停（settings.memory.paused）不影響規範：暫停關的是個人記憶，公司規範照帶
+      const sharedRules = { company: run.shared?.company ?? [], dept: run.shared?.dept ?? [] };
+      const ruleArgs = (list) => list.map(({ name, text }) => ({ name, text: String(text ?? '') }));
+      const ruleMeta = (list) => list.map(({ name, chars }) => ({ name, chars }));
+      // 這一步勾的公司／部門參考檔（讀 index 取字數；不在共用夾的不算帶了）；讀不到＝當沒勾
+      const sharedRefsOf = (node) => (node.attachments ?? []).filter((a) => a && typeof a === 'object').map((a) => {
+        try {
+          const f = store.readSharedIndex(scopeKey(a.scope, category)).files.find((x) => x.name === a.name);
+          return f ? { scope: a.scope, name: a.name, chars: f.chars } : null;
+        } catch { return null; }
+      }).filter(Boolean);
+
+      // 監工的歸戶欄位：kind 由 supervisor 強制成 'supervisor'，phase 與 node 由這裡給（帳本與卷宗都用 node 當鍵）
+      const supMeta = (phase, node) => ({ phase, category, workflow: id, run: runId, node });
+      const supNote = (name) => (text) => store.writePromptRecord(category, id, runId, name, text);
+
+      // 接線點一（開場）：整趟只寫一次，第一步開跑前就位。監工掛掉＝備註留空、原因記人話，流程照跑。
+      // 已經跑完的 run 一律不補寫——本功能上線前的舊 run 被 resume 或自癒路徑再 kick 一次時，
+      // 沒有任何工人還會讀這份備註，白問一次監工、多寫一份卷宗而已
+      if (supervisorOn && run.status !== 'done' && run.brief === undefined
+        && def.nodes.some((n) => nodeKind(n) === 'task' && n.executor === 'ai')) {
+        const res = await supervisorBrief({
+          adapter,
+          meta: supMeta('brief', '_brief'),
+          onPrompt: supNote('_brief.txt'),
+          onReply: supNote('_brief.reply.txt'),
+          def,
+          params: run.params,
+          paramLabels: labels,
+          refTexts: briefRefTexts(category, id, def),
+        });
+        const at = new Date().toISOString();
+        run = update(category, id, runId, (r) => {
+          r.brief = res.ok ? { text: res.text, at } : { text: '', at, fail_note: res.fail_note };
+        });
+      }
+
+      // 接線點二（交接）：這一步開跑前，監工讀上一步成品與這一步設定寫一段交接；分岔節點的判路也走這條。
+      // 一步只問一次——handoff 已經寫過（不管成不成）就沿用：回話重做、自動重試、補資料重跑都不重問。
+      // 回傳「寫完交接的最新 run」：派工覆寫要讀它，讀 started（寫交接之前的快照）會讓覆寫只在重做時生效。
+      const writeHandoff = async (node, kind, started) => {
+        if (started.steps[node.id].handoff !== undefined) return started;
+        const isBranch = kind === 'branch';
+        const flags = isBranch ? BRANCH_FLAGS : supervisorFlags(node);
+        const hasUpstream = (predMap.get(node.id) ?? []).length > 0; // 第一層步驟沒有上一步的成品可交接
+        if (!isBranch && !(supervisorOn && hasUpstream && (flags.note || flags.tier || flags.tools))) return started;
+        // 跨 await 前先取值——await 期間平行支會改寫同一份 run
+        const byId = new Map(def.nodes.map((n) => [n.id, n]));
+        const ups = (predMap.get(node.id) ?? [])
+          .filter((p) => started.steps[p]?.status === 'done')
+          .map((p) => ({ title: byId.get(p)?.title ?? p, text: effectiveOutput(started.steps[p]) }))
+          .filter((u) => u.text);
+        const priors = def.nodes
+          .filter((n) => n.id !== node.id && started.steps[n.id]?.handoff?.text)
+          .map((n) => ({ title: n.title, text: started.steps[n.id].handoff.text }));
+        const pending = []; // 未消化的插話：連位置一起記，寫回時才標得準（await 期間可能又多了新的）
+        (started.interjections ?? []).forEach((x, i) => { if (!x.consumed) pending.push({ i, text: x.text }); });
+        const res = await supervisorHandoff({
+          adapter,
+          meta: supMeta('handoff', node.id),
+          onPrompt: supNote(`${node.id}.handoff.txt`),
+          onReply: supNote(`${node.id}.handoff.reply.txt`),
+          node,
+          flags,
+          routeOptions: isBranch ? node.branches.map((b) => ({ label: b.label })) : [],
+          brief: started.brief?.text ?? '',
+          priorHandoffs: priors,
+          rules: editRulesFor(started, node.id, predMap).map((rule) => rule.text),
+          interjections: pending.map((x) => x.text),
+          upstream: ups,
+        });
+        const at = new Date().toISOString();
+        return update(category, id, runId, (r) => {
+          r.steps[node.id].handoff = {
+            text: res.ok ? res.text : '',
+            tier: res.ok ? res.tier : null,
+            web: res.ok ? res.web : null,
+            route: isBranch && res.ok ? res.route : null, // task 節點沒有路可選，route 一律不收
+            at,
+            ...(res.ok ? {} : { fail_note: res.fail_note }),
+            ...(isBranch && !supervisorOn ? { only_route: true } : {}), // 監工關掉時分岔只剩判路，介面不顯示
+          };
+          // 分岔只選路，沒有工人會讀它的交接——插話給它看（可能影響選路），但不算已經交代出去；
+          // 算掉的話，使用者在停點講的話會被中間的分岔吃掉，真正做事的下一步反而看不到
+          if (!isBranch) for (const x of pending) { if (r.interjections?.[x.i]) r.interjections[x.i].consumed = true; }
+        });
+      };
 
       const launch = (node, kind, upstream, params, labels, needsWhen = false, filePermitted = false) => {
         const p = (async () => {
           const started = update(category, id, runId, (r) => { r.steps[node.id].status = 'running'; r.steps[node.id].error = null; });
           try {
+            const afterHandoff = await writeHandoff(node, kind, started); // 監工交接／判路：一步只問一次
             if (kind === 'branch') {
-              const hit = await judgeBranch(node, upstream, { category, id, runId });
+              const hit = routeViaHandoff(node, afterHandoff);
               update(category, id, runId, (r) => {
                 const s = r.steps[node.id];
                 s.check = noCheck('skipped'); // 分岔只選路、不產內容，沒東西可查
@@ -270,10 +423,14 @@ export function createRunner({ store, adapter, now = () => Date.now() }) {
               });
             } else {
               const TIER_MODEL = { fast: 'haiku', balanced: 'sonnet', deep: 'opus' }; // 檔位→宿主型號別名
+              // 派工覆寫（監工輪）：三個勾是授權——沒勾的欄位監工就算寫了值也不算數，一律回節點自己的設定
+              const flags = supervisorFlags(node);
+              const h = afterHandoff.steps[node.id].handoff ?? {};
               const sink = new Map(); // 查核輪：本次呼叫收集到的長欄位值，交給 buildPrompt 的「欄位內容」段（同一 key 跨欄位共用，只收一次）
               const injLong = (s) => (s ? injectParams(s, params, { labels, sink }) : '');
               const editRules = editRulesFor(started, node.id).map((rule) => rule.text); // 查核輪：上游停點改過後留給後面每一步的要求
               const checkOn = started.def.check?.enabled !== false; // 缺省＝開（跨 await 前先取值，不留著整份 run）
+              const factsOff = started.def.check?.facts === false; // 監工輪：流程關掉「數字對原始資料」→ 不組原始資料，只對必守與格式
               // 輸出規格四面向＋補充＋檔案格式（D19）合成一段格式要求
               const fmtParts = [];
               if (node.output_type) fmtParts.push(`類型：${injLong(node.output_type)}`);
@@ -302,12 +459,25 @@ export function createRunner({ store, adapter, now = () => Date.now() }) {
                 outputFormat: fmtParts.join('\n'),
                 creativity: node.creativity ?? '',
                 reviewFocus: injLong(node.review_focus),
-                model: TIER_MODEL[node.model_tier] ?? '',
-                attachments: (node.attachments ?? []).map((a) => store.refFilePath(category, id, a)).filter(Boolean),
+                model: TIER_MODEL[(flags.tier && h.tier) || node.model_tier || settings.defaults?.model_tier] ?? '', // 節點沒設檔位→全域設定的預設
+                web: settings.exec?.web === false ? false : (flags.tools ? (h.web ?? true) : true), // 設定關了查網＝一律關；否則沒勾開關查網＝照舊開著
+                supervisorNotes: [
+                  started.brief?.text ? `開場：${started.brief.text}` : null,
+                  h.text ? `交接：${h.text}` : null,
+                ].filter(Boolean),
+                // 記憶輪：同心圓的核心圈與群組圈（外圈蓋內圈已算完）；被選的習慣卡不另成段——值已在 run.params 裡代進句子
+                coreNotes: memoryCtx?.coreNotes ?? [],
+                groupRules: memoryCtx?.groupRules ?? [],
+                groupName: memoryCtx?.groupName ?? category,
+                // 三層共用檔：公司／部門規範（開跑快照，每步都帶）；參考檔路徑各對各層（字串＝流程層、{scope}＝共用夾）
+                companyRules: ruleArgs(sharedRules.company),
+                deptRules: ruleArgs(sharedRules.dept),
+                attachments: (node.attachments ?? []).map((a) => attPath(category, id, a)).filter(Boolean),
                 upstream,
                 paramBlocks: [...sink.values()], // 查核輪：長欄位值原文，buildPrompt 另開「欄位內容」段
                 editRules, // 查核輪：上游停點改出來的規則，工人與查核員都當必守
-                meta: { kind: 'step', category, workflow: id, run: runId, node: node.id }, // 用量帳本的歸戶欄位
+                // 用量帳本的歸戶欄位；mcp＝輕裝連接器例外（監工輪）：下游要等這步敲的時間，這步就得看得到行事曆
+                meta: { kind: 'step', category, workflow: id, run: runId, node: node.id, ...(needsWhen ? { mcp: 'calendar' } : {}) },
               };
               // 回話重做（查核輪）：使用者在查核卡寫的話＋上一次的退回清單，一起帶回給工人。
               // 只在「他剛回完話」且「上一次真的被攔下」時生效——check_note 是永久紀錄，
@@ -325,11 +495,29 @@ export function createRunner({ store, adapter, now = () => Date.now() }) {
                   templatePath: node.template_file ? (store.refFilePath(category, id, node.template_file) ?? null) : null,
                 };
               }
+              // 記憶輪（M3a）：這一步實際帶進工作單的＝關於你＋群組條（蓋掉的不算）＋這一步引用到的欄位所選的習慣卡。
+              // 寫在 deliver 之前——停點卡在跑到一半就要顯示「這步用了 N 條」；分岔、人做、並行點不走這裡，天生沒有
+              // 三層共用檔：memory.shared＝這步帶了哪幾份規範與共用參考（執行頁「帶了公司規範 N 份…」）；沒接記憶門面、
+              // 也沒任何規範或共用參考＝不多寫（舊行為、舊 run 原樣）
+              const sharedRefs = sharedRefsOf(node);
+              const hasShared = sharedRules.company.length > 0 || sharedRules.dept.length > 0 || sharedRefs.length > 0;
+              if (memoryCtx || hasShared) {
+                const keys = new Set([...INJECTED_FIELDS.map((f) => String(node[f] ?? '')).join('\n').matchAll(PARAM_REF)].map((m) => m[1]));
+                const picked = memoryCtx ? Object.entries(memoryCtx.picks ?? {}).filter(([k]) => keys.has(k)).map(([, c]) => c) : [];
+                const snap = memoryCtx
+                  ? { at: new Date().toISOString(), cards: [...memoryCtx.cards, ...picked], overridden: memoryCtx.overridden, paused: memoryCtx.paused }
+                  : { at: new Date().toISOString(), cards: [], overridden: [], paused: false };
+                if (run.shared) snap.shared = { company: ruleMeta(sharedRules.company), dept: ruleMeta(sharedRules.dept), refs: sharedRefs };
+                update(category, id, runId, (r) => {
+                  r.steps[node.id].memory = structuredClone(snap);
+                });
+              }
               // 卷宗（儀表板輪）：送出前把指示全文存進本次執行資料夾——renderPrompt 與實際送出走同一函式
               try { if (adapter.renderPrompt) store.writePromptRecord(category, id, runId, `${node.id}.txt`, adapter.renderPrompt(callArgs)); } catch { /* 卷宗寫不進不擋執行 */ }
-              // 單步自動重試（D18）：失敗先自動重來 retry 次，用盡才停下問人
+              // 單步自動重試（D18）：失敗先自動重來 retry 次，用盡才停下問人；節點沒設→全域設定的預設（只認 1、2）
               const deliver = async (args) => {
-                const tries = 1 + (node.retry ?? 0);
+                const extra = node.retry ?? settings.defaults?.retry;
+                const tries = 1 + (Number.isInteger(extra) && extra > 0 ? extra : 0);
                 for (let attempt = 1; ; attempt++) {
                   try {
                     return await adapter.executeNode(args);
@@ -360,12 +548,12 @@ export function createRunner({ store, adapter, now = () => Date.now() }) {
               const attachmentTexts = async () => {
                 if (refTexts) return refTexts;
                 refTexts = [];
-                for (const name of node.attachments ?? []) {
-                  const fp = store.refFilePath(category, id, name);
+                for (const a of node.attachments ?? []) {
+                  const fp = attPath(category, id, a); // 三層共用檔：字串＝流程層、{scope}＝共用夾；鍵標層（「名稱（公司）」）
                   if (!fp) continue;
                   try {
-                    const text = await extractFileText(fs.readFileSync(fp), name);
-                    if (text) refTexts.push({ name, text });
+                    const text = await extractFileText(fs.readFileSync(fp), rawName(a));
+                    if (text) refTexts.push({ name: attName(a), text });
                   } catch { /* 讀不到的參考檔跳過，不擋查核 */ }
                 }
                 return refTexts;
@@ -392,8 +580,14 @@ export function createRunner({ store, adapter, now = () => Date.now() }) {
                     reviewFocus: callArgs.reviewFocus,
                     outputFormat: callArgs.outputFormat,
                     editRules,
+                    groupRules: callArgs.groupRules, // 記憶輪：群組規矩也是必守（同一份，不重組）
+                    companyRules: callArgs.companyRules, // 三層共用檔：必守第四路（同一份開跑快照，不重組）
+                    deptRules: callArgs.deptRules,
+                    supervisorNotes: callArgs.supervisorNotes, // 開場＋交接，查核員當參考不當必守（同一份，不重組）
+                    factsOff,
                   },
-                  sources: buildSources({
+                  // 沒開「數字對原始資料」就整段不組——連參考檔都不讀
+                  sources: factsOff ? '' : buildSources({
                     params,
                     paramLabels: labels,
                     ancestors: ancestorsOf(snap, node.id),
@@ -482,11 +676,8 @@ export function createRunner({ store, adapter, now = () => Date.now() }) {
       };
 
       for (;;) {
-        let run = load(category, id, runId);
+        run = load(category, id, runId);
         if (run.status === 'done') return run;
-        const def = run.def;
-        const labels = Object.fromEntries((def.params ?? []).map((p) => [p.key, p.label])); // 查核輪：長欄位提示語要用的欄位標籤
-        const predMap = predecessors(def);
         const skipped = computeSkipped(def, choicesOf(run));
 
         // 分岔選定後，未選支（含其下游）標 skipped
@@ -510,7 +701,7 @@ export function createRunner({ store, adapter, now = () => Date.now() }) {
             await Promise.race(inflight.values());
             continue;
           }
-          return update(category, id, runId, (r) => {
+          let final = update(category, id, runId, (r) => {
             if (r.status !== 'running') return;
             const allSettled = def.nodes.every((n) => ['done', 'skipped'].includes(r.steps[n.id].status));
             if (allSettled) {
@@ -520,6 +711,37 @@ export function createRunner({ store, adapter, now = () => Date.now() }) {
               r.status = 'paused';
             }
           });
+          // 接線點三（收尾）：整趟跑完才寫執行紀錄，停點出口不碰。
+          // 對應表與用量由程式從 run 與帳本整理（事實由程式給，監工才不會編），監工只負責翻人話＋指建議
+          if (final.status === 'done' && supervisorOn && final.record === undefined) {
+            const { table } = buildRecordTable({ run: final, usageRows: store.readUsage() });
+            const outputs = def.nodes.map((n) => ({ title: n.title, text: effectiveOutput(final.steps[n.id] ?? {}) }));
+            const res = await supervisorRecord({
+              adapter,
+              meta: supMeta('record', '_record'),
+              onPrompt: supNote('_record.txt'),
+              onReply: supNote('_record.reply.txt'),
+              def,
+              table,
+              outputs,
+            });
+            // 用量重算一次：收尾這次呼叫自己的 token 在上面 await resolve 之前就進帳本了
+            // （host-adapter 的 usageSink 在 resolve 前同步 append），先算會漏掉整趟最貴的一筆。
+            // table 沿用送出去的那份——run 早就 done，內容不會變
+            const { usage } = buildRecordTable({ run: final, usageRows: store.readUsage() });
+            const at = new Date().toISOString();
+            final = update(category, id, runId, (r) => {
+              r.record = {
+                at,
+                table,
+                text: res.ok ? res.text : `（${res.fail_note}）`,
+                suggestions: res.ok ? res.suggestions : [],
+                usage,
+                ...(res.ok ? {} : { fail_note: res.fail_note }),
+              };
+            });
+          }
+          return final;
         }
 
         for (const node of ready) {
@@ -600,6 +822,16 @@ export function createRunner({ store, adapter, now = () => Date.now() }) {
     // 停點處理完、該準備的都備妥了才放行（裁定 28）：把「這步做完」跟「可以往下跑」分成兩個動作
     resume(category, id, runId) {
       return update(category, id, runId, (r) => { r.status = 'running'; });
+    },
+
+    // 插話（監工輪）：使用者在停點卡或查核卡交代的一句話，記著等下一次交接時交給監工消化。
+    // 不推進流程——放行照樣走 resume／approve，這裡只負責把話留下來
+    interject(category, id, runId, nodeId, text) {
+      const said = typeof text === 'string' ? text.trim() : '';
+      if (!said) throw new Error('要先寫一句要交代的話');
+      return update(category, id, runId, (r) => {
+        (r.interjections ??= []).push({ at: new Date().toISOString(), node: nodeId, text: said, consumed: false });
+      });
     },
 
     // 人做步驟：標記完成，可附一句心得；content＝交給下一步的內容（資料通道輪）——成為這步的產出往下傳，留空就是 null

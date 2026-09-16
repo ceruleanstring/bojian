@@ -9,6 +9,22 @@ export function predecessors(def) {
   return preds;
 }
 
+// 這一步的全部祖先（BFS 走前驅），深度優先後序＝拓樸序（祖先排在自己前面）
+export function ancestorIds(run, nodeId, predMap = predecessors(run.def)) {
+  const seen = new Set();
+  const order = [];
+  const walk = (id) => {
+    for (const p of predMap.get(id) ?? []) {
+      if (seen.has(p)) continue;
+      seen.add(p);
+      walk(p);
+      order.push(p);
+    }
+  };
+  walk(nodeId);
+  return order;
+}
+
 // 拓撲深度（最長路徑）：畫布排版的欄位、清單排序用
 export function layers(def) {
   const predMap = predecessors(def);

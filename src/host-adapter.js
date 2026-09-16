@@ -27,6 +27,14 @@ export const LEAN_WORKER_SYSTEM = '你是剝繭流程裡的一名工人。只照
 export const LEAN_GENERIC_SYSTEM = '只照接下來訊息裡的指示做事，不做別的；只輸出訊息要求的格式；語言跟訊息一致。';
 const LEAN_FLAGS = ['--strict-mcp-config', '--disable-slash-commands'];
 
+// 輕裝連接器例外（監工輪 K5）：輕裝的 --strict-mcp-config 會把使用者掛在宿主上的連接器整批擋掉——
+// 探針實測（reviews/監工輪-實走-2026-09-09/連接器探針.md）：不推它，行事曆的九個工具就回來了；
+// --tools "" 不是兇手（照推也看得到連接器）。所以 meta.mcp 的呼叫只少推這一個旗標，其餘輕裝照舊，
+// 並把行事曆工具加進權限閘（只送定義不放行＝工人一直撞牆）。代價是那一次呼叫多約 7 萬 token，
+// 所以只給真的要碰行事曆的呼叫（快照抓取、下游要等它敲時間的步驟）。
+export const CALENDAR_TOOLS = 'mcp__claude_ai_Google_Calendar__*';
+const leanFlagsFor = (meta) => (meta?.mcp ? LEAN_FLAGS.filter((f) => f !== '--strict-mcp-config') : LEAN_FLAGS);
+
 function defaultSpawn(args, extra = {}) {
   // 工人在中立目錄開工（2026-09-02 定案）：繼承伺服器 cwd 會吃到使用者本地的專案
   // CLAUDE.md 與 hooks——實案：工作區的收工門禁把步驟最後一句換成「本次無入庫項」，成品被調包。
@@ -86,7 +94,37 @@ function paramBlocksSection(paramBlocks) {
   return ['', '# 欄位內容（原文）', ...paramBlocks.flatMap(({ label, value }) => [`【欄位：${label}】`, value])];
 }
 
-function buildPrompt({ title, instruction, roleContext, background, constraints, examples, outputFormat, creativity, reviewFocus, attachments, upstream, fileMode, paramBlocks, editRules, redo, checkNote }) {
+// 監工輪：這趟的開場備註與這一步的交接。是「加上去的話」不是必守——跟使用者的要求衝突時以要求為準
+function supervisorSection(supervisorNotes) {
+  if (!supervisorNotes?.length) return [];
+  return ['', '# 監工交接（這趟的備註，照做；跟「要求」衝突時以「要求」為準）', ...supervisorNotes.map((t) => `- ${t}`)];
+}
+
+// 記憶輪：同心圓的核心圈「關於你」（認識卡），每一步都帶；插在「角色與情境」之前——紙（開場五句）→核心→流程
+function coreSection(coreNotes) {
+  if (!coreNotes?.length) return [];
+  return ['', '# 關於你（每一步都照這些做；跟「要求」衝突時以「要求」為準）', ...coreNotes.map((t) => `- ${t}`)];
+}
+
+// 記憶輪：群組圈「分類守則」（分類的規矩，查核員也當必守）；插在「限制條件」之後、「停點改過的要求」之前——群組→這一次
+function groupRulesSection(groupRules, groupName) {
+  if (!groupRules?.length) return [];
+  return ['', `# 分類守則（分類「${groupName ?? ''}」，一定要守）`, ...groupRules.map((t) => `- ${t}`)];
+}
+
+// 移植合併輪（三層共用檔）：公司規範與部門規範——規範類每步都帶、全文貼進工作單（不是給路徑），查核員也拿同一份當必守。
+// 插在「限制條件」之後、「分類守則」之前——外圈在前：公司→部門→分類守則；空層不印段。每檔 [{name, text}]
+// 規範內文行首的 #（一到六個）一律降一級、###### 封頂——手冊自己的標題不能跟工作單的段標題同級（U1b 覆核該修）
+const demote = (text) => String(text ?? '').replace(/^(#{1,6})(?=\s)/gm, (m) => (m.length < 6 ? `#${m}` : m));
+function sharedRulesSection(companyRules, deptRules, groupName) {
+  const files = (list) => list.flatMap((f) => [`## ${f.name}`, demote(f.text)]);
+  return [
+    ...(companyRules?.length ? ['', '# 公司規範（每一步都照做；查核員也會對）', ...files(companyRules)] : []),
+    ...(deptRules?.length ? ['', `# 部門規範（分類「${groupName ?? ''}」，同上）`, ...files(deptRules)] : []),
+  ];
+}
+
+function buildPrompt({ title, instruction, roleContext, background, constraints, examples, outputFormat, creativity, reviewFocus, attachments, upstream, fileMode, paramBlocks, editRules, redo, checkNote, supervisorNotes, coreNotes, groupRules, groupName, companyRules, deptRules }) {
   return [
     '你是「剝繭」流程裡的一個步驟執行者。只輸出這一步的產出內容本身——不要開場白、不要收尾語、不要解釋你做了什麼。',
     '這不是對話：沒有人會回覆你，你的產出會直接交給下一步（或給使用者過目，他只能核可或動手修改）。不要反問、不要邀請回覆、不要用「要哪個再說」收尾。任務要你提供多個選項時，自己選定一個推薦，讓產出以推薦版本為主體、備選附在後面標明。',
@@ -94,6 +132,7 @@ function buildPrompt({ title, instruction, roleContext, background, constraints,
     // 排程與健檢輪（新使用者實測）：缺什麼要用使用者的話講、不夾雜他語
     '說明缺什麼時用使用者聽得懂的話講——只講「缺哪些資料、從哪裡拿得到」，不提工具、連線、指令或系統名稱。',
     '全篇使用與「要求」相同的語言，不夾雜其他語言的字詞（專有名詞照原文除外）。',
+    ...coreSection(coreNotes),
     ...(roleContext ? ['', '# 角色與情境', roleContext] : []),
     '',
     `# 這一步：${title}`,
@@ -102,6 +141,8 @@ function buildPrompt({ title, instruction, roleContext, background, constraints,
     instruction,
     ...(background ? ['', '# 背景資料', background] : []),
     ...(constraints ? ['', '# 限制條件（不可違反）', constraints] : []),
+    ...sharedRulesSection(companyRules, deptRules, groupName),
+    ...groupRulesSection(groupRules, groupName),
     ...editRulesSection(editRules),
     ...(examples ? ['', '# 範例（照這個樣子）', examples] : []),
     ...(attachments?.length ? ['', '# 參考檔案（先用你的檔案讀取能力逐一打開看，照裡面的規格與風格做）', ...attachments.map((p) => `- ${p}`)] : []),
@@ -112,6 +153,7 @@ function buildPrompt({ title, instruction, roleContext, background, constraints,
     ...checkNoteSection(checkNote),
     ...fileRulesSection(fileMode),
     ...paramBlocksSection(paramBlocks),
+    ...supervisorSection(supervisorNotes),
     '',
     '# 上一步的產出（你的輸入）',
     upstream || '（這是第一步，沒有上游輸入）',
@@ -218,20 +260,23 @@ export function createHostAdapter({ timeoutMs = 300_000, spawnFn = defaultSpawn,
 
     isLean: () => leanMode,
 
-    async executeNode({ model, meta, ...fields }) {
+    async executeNode({ model, meta, web, ...fields }) {
       return new Promise((resolve, reject) => {
         // 產檔模式（產檔輪定案）：只在流程開了產檔權限時，加放行寫檔與 node 執行，工作目錄鎖在這趟的產出資料夾
         const fm = fields.fileMode;
         const args = ['-p', '--output-format', 'json'];
+        // 監工輪：這一步關掉查網（節點勾了「監工可以開關查網」且監工說不用）→ 工具定義與權限閘兩邊都拿掉，
+        // 只送定義不關權限＝工人還是查得到，只關權限不撤定義＝工人一直撞牆
+        const readTools = web === false ? ['Read'] : ['WebSearch', 'WebFetch', 'Read'];
         // 輕裝：自己給系統提示、不載外掛與斜線指令、工具定義只送這一步用得到的
         // （放行了卻沒送定義＝工人根本看不到那個工具，所以產檔模式要把寫檔三件補進 --tools）
         if (leanMode) {
-          args.push(...LEAN_FLAGS, '--system-prompt', LEAN_WORKER_SYSTEM,
-            '--tools', fm ? 'WebSearch,WebFetch,Read,Write,Edit,Bash' : 'WebSearch,WebFetch,Read');
+          args.push(...leanFlagsFor(meta), '--system-prompt', LEAN_WORKER_SYSTEM,
+            '--tools', [...readTools, ...(fm ? ['Write', 'Edit', 'Bash'] : [])].join(','));
         }
         // 步驟要能自己抓資料：headless 預設不授權工具，蒐集類步驟會空手而回（2026-09-02 實測踩到）。
         // 只放行讀類工具（搜尋／抓網頁／讀檔=附件功能要用）；寫檔與執行指令不放行——匯入的流程指示不可信任。
-        args.push('--allowedTools', 'WebSearch', 'WebFetch', 'Read');
+        args.push('--allowedTools', ...readTools, ...(meta?.mcp ? [CALENDAR_TOOLS] : []));
         if (fm) args.push('Write', 'Edit', 'Bash(node *)');
         if (model) args.push('--model', model);
         const child = spawnFn(args, fm ? { cwd: fm.cwd, env: { ...process.env, NODE_PATH: fm.nodePath ?? BUNDLED_NODE_PATH } } : {});
@@ -246,7 +291,9 @@ export function createHostAdapter({ timeoutMs = 300_000, spawnFn = defaultSpawn,
       return new Promise((resolve, reject) => {
         // 查核、停點改規則等通用補全都不用工具，輕裝時工具定義一個都不送
         const args = ['-p', '--output-format', 'json'];
-        if (leanMode) args.push(...LEAN_FLAGS, '--system-prompt', LEAN_GENERIC_SYSTEM, '--tools', '');
+        if (leanMode) args.push(...leanFlagsFor(meta), '--system-prompt', LEAN_GENERIC_SYSTEM, '--tools', '');
+        // 連接器例外（快照抓取）：要用行事曆就得放行它的工具，帶不帶行李都一樣
+        if (meta?.mcp) args.push('--allowedTools', CALENDAR_TOOLS);
         const child = spawnFn(args);
         collect(child, t ?? timeoutMs, (raw) => settleParsed(raw, meta, null, resolve, reject), reject);
         child.stdin.write(prompt);

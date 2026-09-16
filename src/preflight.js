@@ -3,6 +3,7 @@
 // 其餘一律提醒（可照跑）。前端抽屜預覽與 POST /runs 擋門走同一份結果——單一真相。
 import { nodeKind, outgoing, OUTPUT_OFFICE } from './schema.js';
 import { predecessors } from './graph.js';
+import { attName, attKey } from './shared.js';
 
 const PARAM_RE = /\{\{\s*([\w-]+)\s*\}\}/g;
 // 節點裡會被代入參數、送給執行者的欄位（與 runner 的 inj() 對齊）
@@ -47,7 +48,8 @@ export function inputSources(def) {
         : { kind: 'upstream', id: s.id, label: `上一步《${s.title}》的產出` });
     }
     for (const k of paramsUsedBy(n)) list.push({ kind: 'param', id: k, label: `設定欄位：${labels[k] ?? k}` });
-    for (const a of n.attachments ?? []) list.push({ kind: 'attachment', id: a, label: `參考檔：${a}` });
+    // 參考檔（三層共用檔）：流程層字串與公司／部門層 {scope,name} 都算「這一步有輸入」；規範類不走 attachments，健檢不受影響
+    for (const a of n.attachments ?? []) list.push({ kind: 'attachment', id: attKey(a), label: `參考檔：${attName(a)}` });
     result[n.id] = list;
   }
   return result;

@@ -227,7 +227,8 @@ function selectCandidate(candidates, rank, normalize, ambiguousMessage) {
 }
 
 // 回覆裡挖 JSON：政策 (a)——全文一個池，圍欄不優先
-const extractJson = (text, rank, normalize, ambiguousMessage) => selectCandidate(jsonCandidates(str(text)), rank, normalize, ambiguousMessage);
+// 匯出給監工用（監工輪）：三份監工回覆走同一套候選政策，含糊與挑不出來的行為才會一致
+export const extractJson = (text, rank, normalize, ambiguousMessage) => selectCandidate(jsonCandidates(str(text)), rank, normalize, ambiguousMessage);
 
 // 非空、且每個元素都是物件的陣列＝逐項表。空陣列與 []、[1]、[来源1] 不算——那是正文裡的括號，收了就等於放行。
 const isItemList = (v) => Array.isArray(v) && v.length > 0 && v.every((x) => x && typeof x === 'object' && !Array.isArray(x));
@@ -313,6 +314,15 @@ const JUDGE_RULES = [
   '6. 只輸出一個 JSON 物件，前後不要任何其他文字。',
 ].join('\n');
 
+// 流程沒開「數字對原始資料」（def.check.facts === false）時整段換掉 JUDGE_RULES：
+// 第 1 條改成只找「該有的東西有沒有」，原第 4、5、6 條（必守、flags、只輸出 JSON）重新編號為 2、3、4
+const JUDGE_RULES_MUSTS_ONLY = [
+  '1. 這一步的主要工作是：使用者要求一定要有的東西，成品裡有沒有對應內容——逐條找。成品裡的事實不對照原始資料，items 給空清單。',
+  '2. 「必守」逐條檢查，違反的寫進 must_violations：rule 抄那一條原文，where 寫成品哪裡違反。',
+  '3. flags 只有兩種：conclusion-changed＝成品改了上游的結論或排序；format＝格式跟要求不同。其他一律不要寫。',
+  '4. 只輸出一個 JSON 物件，前後不要任何其他文字。',
+].join('\n');
+
 const OUTPUT_EXAMPLE = [
   '{"items":[{"claim":"總數 13 件","source":"…原文逐字…","scope":"全月、全部類別","calc":"6+3+4+1=14","verdict":"mismatch"}],',
   ' "must_violations":[{"rule":"每段不超過三句","where":"第二段有五句"}],',
@@ -320,16 +330,46 @@ const OUTPUT_EXAMPLE = [
   ' "summary":"一句話"}',
 ].join('\n');
 
+// factsOff 時輸出範例改成 items 給空清單，其餘欄位形狀不變（跟 JUDGE_RULES_MUSTS_ONLY 第 1 條「items 給空清單」一致）
+const OUTPUT_EXAMPLE_MUSTS_ONLY = [
+  '{"items":[],',
+  ' "must_violations":[{"rule":"每段不超過三句","where":"第二段有五句"}],',
+  ' "flags":[{"kind":"conclusion-changed","detail":"上游排 D 第一，成品改成 C 第一，理由是…"}],',
+  ' "summary":"一句話"}',
+].join('\n');
+
+// 開場白：預設版會叫查核員拿原始資料逐條對——factsOff 時「# 原始資料」段是空的，這樣寫會誤導模型自己把成品裡每個數字列成 item 再判 unsupported。
+// factsOff 版不提原始資料，只叫查核員拿使用者的要求對成品。
+const OPENING_LINES = [
+  '你是「剝繭」流程的交貨查核員。這一步的成品已經做好，你的工作是拿原始資料與使用者的要求逐條對它，把對不上的地方挑出來。',
+  '你不改成品、不補內容、不評論好不好——只回報事實對不對、要求有沒有守。原始資料裡沒有的東西，一律不准當成常識自己補。',
+];
+const OPENING_LINES_MUSTS_ONLY = [
+  '你是「剝繭」流程的交貨查核員。這一步的成品已經做好，你的工作是拿使用者的要求逐條對成品，看一定要有的東西有沒有、格式對不對。',
+  '你不改成品、不補內容、不評論好不好——只回報要求有沒有守。本流程沒開數字對原始資料，成品裡的事實不用查出處。',
+];
+
 export function buildCheckPrompt({ title, requirements, sources, product }) {
   const req = requirements ?? {};
+  // 必守三路＝使用者寫的：驗收重點、停點規則、群組規矩（記憶輪；違反歸既有 must 攔）
   const musts = [
     ...str(req.reviewFocus).split('\n').map((x) => x.trim()).filter(Boolean),
     ...arr(req.editRules).map((r) => str(r).trim()).filter(Boolean),
+    ...arr(req.groupRules).map((r) => str(r).trim()).filter(Boolean),
   ];
   const format = [str(req.constraints).trim(), str(req.outputFormat).trim()].filter(Boolean);
+  const factsOff = req.factsOff === true; // 流程關掉「數字對原始資料」：只對必守與格式
+  // 監工備註是參考不是必守——自成一段擺在格式要求之後，永遠不併進 musts
+  const notes = arr(req.supervisorNotes).map((x) => str(x).trim()).filter(Boolean);
+  // 必守第四路（移植合併輪，三層共用檔）：公司／部門規範整份貼成一段（不拆成條列——4,000 字的檔拆進 musts 會把清單撐爆），
+  // 判定規則加一句「違反規範歸 must」；classify 不動，違反走既有 must 攔。沒給＝一字不多
+  // 規範內文行首 # 降一級、###### 封頂（同 host-adapter，手冊標題不與段標題同級）
+  const demote = (text) => str(text).replace(/^(#{1,6})(?=\s)/gm, (m) => (m.length < 6 ? `#${m}` : m));
+  const ruleFiles = (list, layer) => arr(list).filter((f) => f && str(f.name)).flatMap((f) => [`## ${layer}：${str(f.name)}`, demote(f.text)]);
+  const sharedRules = [...ruleFiles(req.companyRules, '公司規範'), ...ruleFiles(req.deptRules, '部門規範')];
+  const judge = factsOff ? JUDGE_RULES_MUSTS_ONLY : JUDGE_RULES;
   return [
-    '你是「剝繭」流程的交貨查核員。這一步的成品已經做好，你的工作是拿原始資料與使用者的要求逐條對它，把對不上的地方挑出來。',
-    '你不改成品、不補內容、不評論好不好——只回報事實對不對、要求有沒有守。原始資料裡沒有的東西，一律不准當成常識自己補。',
+    ...(factsOff ? OPENING_LINES_MUSTS_ONLY : OPENING_LINES),
     '全篇使用與「這一步」相同的語言。',
     '',
     `# 這一步：${str(title)}`,
@@ -337,18 +377,20 @@ export function buildCheckPrompt({ title, requirements, sources, product }) {
     '',
     '# 必守（逐條對）',
     musts.length ? musts.map((m) => `- ${m}`).join('\n') : '（無）',
+    ...(sharedRules.length ? ['', '# 公司／部門規範（一定要守）', ...sharedRules] : []),
     '',
     '# 格式要求',
     format.length ? format.join('\n') : '（無）',
+    ...(notes.length ? ['', '# 監工備註（參考，不是必守）', notes.map((n) => `- ${n}`).join('\n')] : []),
     '',
     '# 判定規則',
-    JUDGE_RULES,
+    sharedRules.length ? `${judge}\n- 「公司／部門規範」段跟必守同等：違反規範歸 must_violations，rule 寫明是哪份規範的哪一條。` : judge,
     '',
     '# 輸出格式',
-    OUTPUT_EXAMPLE,
+    factsOff ? OUTPUT_EXAMPLE_MUSTS_ONLY : OUTPUT_EXAMPLE,
     '',
     '# 原始資料',
-    str(sources) || '（無）',
+    factsOff ? '（本流程沒開數字對原始資料，只對必守與格式）' : (str(sources) || '（無）'),
     '',
     '# 成品',
     str(product),

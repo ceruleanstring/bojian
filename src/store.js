@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import yaml from 'js-yaml';
+import { FACTORY_DICT } from './memory.js';
 
 export class StoreError extends Error {
   constructor(message, code) {
@@ -32,9 +33,12 @@ function readYaml(filePath, subject) {
 }
 
 // 檔名護欄：擋路徑跳脫與 Windows 禁字（參考檔與產出物共用）
+// Windows 保留裝置名（CON／PRN／AUX／NUL／COM1–9／LPT1–9）：不分大小寫、帶副檔名也算（CON.md 一樣寫不進 NTFS）
+const RESERVED_NAMES = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
 export function safeFileName(name) {
   const n = String(name ?? '').trim();
   if (!n || /[\\/:*?"<>|]/.test(n) || n.includes('..')) throw new StoreError(`檔名「${name}」不合法（不能含路徑符號）`, 'BAD_NAME');
+  if (RESERVED_NAMES.test(n)) throw new StoreError(`檔名「${name}」是系統保留字，換個名字`, 'BAD_NAME');
   return n;
 }
 
@@ -47,6 +51,27 @@ function safeSegment(value, subject) {
   return n;
 }
 
+// 全域設定缺省（記憶輪）：缺檔＝全部缺省；readSettings 深合併（物件逐鍵補、陣列整個取代）
+export const DEFAULT_SETTINGS = Object.freeze({
+  version: 1,
+  memory: { paused: false, sensitive: { health: false, politics: false, religion: false, finance: false }, intro_done_at: null },
+  defaults: {
+    permissions_files: true, check_enabled: true, check_facts: 'auto', supervisor_enabled: true,
+    supervisor_flags: { note: true, tier: false, tools: false }, model_tier: null, retry: null,
+  },
+  exec: { auto_makeup: false, remind_leads: [], web: true },
+  company_name: '', // 三層共用檔（移植合併輪）：側欄最上層節點的名字，空＝「公司」
+});
+
+const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+export function deepMerge(base, over) {
+  if (over === undefined) return base;
+  if (!isPlainObject(base) || !isPlainObject(over)) return over;
+  const out = { ...base };
+  for (const [k, v] of Object.entries(over)) out[k] = deepMerge(base[k], v);
+  return out;
+}
+
 export function createStore(dataDir) {
   const wfDir = (category, id) => path.join(dataDir, 'workflows', safeSegment(category, '分類'), safeSegment(id, '流程'));
   const wfFile = (category, id) => path.join(wfDir(category, id), 'workflow.yaml');
@@ -55,11 +80,26 @@ export function createStore(dataDir) {
   const refDir = (category, id) => path.join(wfDir(category, id), 'files');
   const outDir = (category, id, runId) => path.join(runDir(category, id, runId), 'out');
   const promptDir = (category, id, runId) => path.join(runDir(category, id, runId), 'prompts');
+  const logDir = (kind) => path.join(dataDir, 'logs', safeSegment(kind, '工作單種類'));
   const presetsFile = path.join(dataDir, 'presets.json');
   const usageFile = path.join(dataDir, 'usage.jsonl');
   const schedulesFile = path.join(dataDir, 'schedules.json');
   const noticesFile = path.join(dataDir, 'notices.json');
   const snapshotFile = path.join(dataDir, 'calendar-snapshot.json');
+  // 記憶輪：兩本帳（habits/、profile/）、詞典、群組圈、身分、記憶垃圾桶都在 memory/ 底下；設定檔在資料根
+  const memoryDir = path.join(dataDir, 'memory');
+  const CARD_DIRS = { habit: 'habits', profile: 'profile' };
+  const bucketDir = (bucket) => {
+    if (!Object.hasOwn(CARD_DIRS, bucket)) throw new StoreError(`沒有這種卡（${bucket}）`, 'BAD_NAME');
+    return path.join(memoryDir, CARD_DIRS[bucket]);
+  };
+  const cardFile = (bucket, id) => path.join(bucketDir(bucket), `${safeFileName(id)}.yaml`);
+  const groupFile = (category) => path.join(memoryDir, 'groups', `${safeSegment(category, '分類')}.yaml`);
+  const dictFile = path.join(memoryDir, 'dict.yaml');
+  const identitiesFile = path.join(memoryDir, 'identities.yaml');
+  const settingsFile = path.join(dataDir, 'settings.json');
+  const memoryTrashDir = path.join(memoryDir, 'trash');
+  const backupsRoot = path.join(path.dirname(dataDir), `${path.basename(dataDir)}-backups`);
 
   // 頂層 JSON 檔共用小工具：檔案不存在＝空狀態（刪檔即回滾——ADR-005）；
   // 檔案存在但讀不懂＝明確報錯擋住後續寫入，不准把壞檔當空資料再覆蓋掉（健檢 P1-01）。
@@ -135,7 +175,9 @@ export function createStore(dataDir) {
     },
 
     createCategory(name) {
-      fs.mkdirSync(path.join(dataDir, 'workflows', safeSegment(name, '分類名稱')), { recursive: true });
+      const n = safeSegment(name, '分類名稱');
+      if (n === '_company') throw new StoreError('分類名不能是 _company（那是公司共用夾的名字）', 'BAD_NAME');
+      fs.mkdirSync(path.join(dataDir, 'workflows', n), { recursive: true });
     },
 
     moveWorkflow(category, id, toCategory) {
@@ -250,6 +292,52 @@ export function createStore(dataDir) {
       }
     },
 
+    // ---- 記憶垃圾桶（記憶輪）：獨立目錄 memory/trash/<key>/{card,meta}.yaml，跟流程垃圾桶不互通
+    // （restoreTrash 寫死還原成流程，卡走這四支）；30 天，清理跟流程垃圾桶一樣只在伺服器啟動時跑一次 ----
+    trashCard(bucket, id) {
+      const from = cardFile(bucket, id);
+      if (!fs.existsSync(from)) throw new StoreError('找不到這張卡', 'NOT_FOUND');
+      let text = '';
+      try { text = readYaml(from, '這張卡')?.text ?? ''; } catch { /* 壞檔也可丟 */ }
+      const key = `${Date.now().toString(36)}-${bucket}-${safeFileName(id)}`;
+      const dest = path.join(memoryTrashDir, key);
+      fs.mkdirSync(dest, { recursive: true });
+      fs.renameSync(from, path.join(dest, 'card.yaml'));
+      atomicWrite(path.join(dest, 'meta.yaml'), yaml.dump({ bucket, id, text, trashed_at: new Date().toISOString() }));
+      return key;
+    },
+
+    listMemoryTrash() {
+      if (!fs.existsSync(memoryTrashDir)) return [];
+      return fs.readdirSync(memoryTrashDir).sort()
+        .filter((k) => fs.existsSync(path.join(memoryTrashDir, k, 'meta.yaml')))
+        .map((k) => ({ key: k, ...readYaml(path.join(memoryTrashDir, k, 'meta.yaml'), '記憶垃圾桶紀錄') }));
+    },
+
+    // 原位重現（id 唯一，不會撞）；回那張卡
+    restoreCard(key) {
+      const src = path.join(memoryTrashDir, safeSegment(key, '記憶垃圾桶紀錄'));
+      if (!fs.existsSync(path.join(src, 'meta.yaml')) || !fs.existsSync(path.join(src, 'card.yaml'))) {
+        throw new StoreError('垃圾桶裡沒有這張卡', 'NOT_FOUND');
+      }
+      const meta = readYaml(path.join(src, 'meta.yaml'), '記憶垃圾桶紀錄');
+      const card = readYaml(path.join(src, 'card.yaml'), '這張卡');
+      const dest = cardFile(meta.bucket, meta.id);
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.renameSync(path.join(src, 'card.yaml'), dest);
+      fs.rmSync(src, { recursive: true, force: true });
+      return card;
+    },
+
+    purgeMemoryTrash(maxAgeDays = 30) {
+      const cutoff = Date.now() - maxAgeDays * 86_400_000;
+      for (const t of this.listMemoryTrash()) {
+        if (new Date(t.trashed_at).getTime() < cutoff) {
+          fs.rmSync(path.join(memoryTrashDir, t.key), { recursive: true, force: true });
+        }
+      }
+    },
+
     newRunId() {
       const t = new Date();
       const pad = (n) => String(n).padStart(2, '0');
@@ -278,6 +366,58 @@ export function createStore(dataDir) {
       const p = this.refFilePath(category, id, name);
       if (!p) throw new StoreError(`參考檔「${name}」不見了`, 'NOT_FOUND');
       return fs.readFileSync(p, 'utf8');
+    },
+
+    // ---- 三層共用檔（移植合併輪 U1a）：data/shared/<scope>/{index.yaml,files/}，scope＝_company｜分類名；
+    // index.yaml 每檔 {name, kind: rule|ref, chars, text_cache?, uploaded_at}（text_cache 只有規範有＝上傳時轉好的純文字，之後不重算）；
+    // 沒有夾＝空索引（舊資料照樣讀）；刪不進垃圾桶（定案）；同名 DUP（換版＝先刪再傳）----
+    sharedDir(scope) {
+      return path.join(dataDir, 'shared', safeSegment(scope, '共用夾'));
+    },
+    readSharedIndex(scope) {
+      const f = path.join(this.sharedDir(scope), 'index.yaml');
+      if (!fs.existsSync(f)) return { version: 1, files: [] };
+      const idx = readYaml(f, `「${scope}」的共用檔清單`);
+      return { version: 1, ...idx, files: Array.isArray(idx?.files) ? idx.files : [] };
+    },
+    listShared(scope) {
+      const pub = ({ name, chars, bytes, uploaded_at }) => ({ name, chars: chars ?? null, bytes: bytes ?? null, uploaded_at }); // 列表不帶 text_cache
+      const files = this.readSharedIndex(scope).files;
+      const rules = files.filter((f) => f.kind === 'rule').map(pub);
+      return { rules, refs: files.filter((f) => f.kind === 'ref').map(pub), rule_chars: rules.reduce((s, f) => s + (f.chars ?? 0), 0) };
+    },
+    // 字數語意（U1a 覆核）：規範類 chars＝轉純文字後的字元數；參考類 md／txt＝讀成 utf-8 的字元數、其他（docx 等二進位）chars=null；
+    // 兩類都另記 bytes＝檔案大小，UI 印「N 字」只看 chars、二進位印大小看 bytes
+    addShared(scope, { name, kind, buf, text }) {
+      const n = safeFileName(name);
+      if (kind !== 'rule' && kind !== 'ref') throw new StoreError('共用檔只有規範與參考兩種', 'BAD_NAME');
+      const idx = this.readSharedIndex(scope);
+      if (idx.files.some((f) => f.name === n)) throw new StoreError('已有同名檔，先刪再傳', 'DUP');
+      const p = path.join(this.sharedDir(scope), 'files', n);
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      fs.writeFileSync(p, buf);
+      const isText = /\.(md|txt)$/i.test(n);
+      const chars = kind === 'rule' ? String(text ?? '').length : isText ? buf.toString('utf8').length : null;
+      const entry = { name: n, kind, chars, bytes: buf.length, uploaded_at: new Date().toISOString() };
+      if (kind === 'rule') entry.text_cache = String(text ?? '');
+      idx.files.push(entry);
+      atomicWrite(path.join(this.sharedDir(scope), 'index.yaml'), yaml.dump(idx, { lineWidth: -1 }));
+      return entry;
+    },
+    deleteShared(scope, name) {
+      const n = safeFileName(name);
+      const idx = this.readSharedIndex(scope);
+      if (!idx.files.some((f) => f.name === n)) throw new StoreError(`共用檔「${n}」不存在`, 'NOT_FOUND');
+      fs.rmSync(path.join(this.sharedDir(scope), 'files', n), { force: true });
+      idx.files = idx.files.filter((f) => f.name !== n);
+      atomicWrite(path.join(this.sharedDir(scope), 'index.yaml'), yaml.dump(idx, { lineWidth: -1 }));
+    },
+    sharedFilePath(scope, name) {
+      const p = path.join(this.sharedDir(scope), 'files', safeFileName(name));
+      return fs.existsSync(p) ? p : null;
+    },
+    readSharedRuleTexts(scope) {
+      return this.readSharedIndex(scope).files.filter((f) => f.kind === 'rule').map((f) => ({ name: f.name, chars: f.chars, text: f.text_cache ?? '' }));
     },
 
     // ---- 產出物（D19：步驟輸出存成檔案）----
@@ -351,6 +491,112 @@ export function createStore(dataDir) {
       atomicWrite(snapshotFile, JSON.stringify(snap, null, 2));
     },
 
+    // ---- 記憶兩本帳（記憶輪）：一卡一檔 memory/<habits|profile>/<id>.yaml，跟流程一樣原子寫 ----
+    readCard(bucket, id) {
+      return readYaml(cardFile(bucket, id), '這張卡');
+    },
+    writeCard(card) {
+      atomicWrite(cardFile(card.bucket, card.id), yaml.dump(card, { lineWidth: -1 }));
+    },
+    // 不給 bucket＝兩本帳都列；只列讀得懂的 YAML（壞檔跳過，讀單張時才報錯）；可按 status 篩
+    listCards(bucket, { status } = {}) {
+      const out = [];
+      for (const b of bucket ? [bucket] : Object.keys(CARD_DIRS)) {
+        const dir = bucketDir(b);
+        if (!fs.existsSync(dir)) continue;
+        for (const f of fs.readdirSync(dir).sort()) {
+          if (!f.endsWith('.yaml')) continue;
+          let card;
+          try { card = yaml.load(fs.readFileSync(path.join(dir, f), 'utf8')); } catch { continue; }
+          if (!isPlainObject(card) || !card.id) continue;
+          if (status && card.status !== status) continue;
+          out.push(card);
+        }
+      }
+      return out;
+    },
+
+    // ---- 詞典：缺檔＝出廠七條（不落地，寫入時才建檔）----
+    readDict() {
+      if (!fs.existsSync(dictFile)) {
+        const now = new Date().toISOString();
+        return { ...FACTORY_DICT, fields: FACTORY_DICT.fields.map((f) => ({ ...f, synonyms: [...f.synonyms], created_at: now })) };
+      }
+      return readYaml(dictFile, '欄位詞典');
+    },
+    writeDict(dict) {
+      atomicWrite(dictFile, yaml.dump(dict, { lineWidth: -1 }));
+    },
+
+    // ---- 群組圈：一分類一檔 memory/groups/<分類>.yaml；沒有檔＝沒有群組圈 ----
+    readGroup(category) {
+      const f = groupFile(category);
+      if (!fs.existsSync(f)) return null;
+      return readYaml(f, `分類「${category}」的群組圈`);
+    },
+    writeGroup(category, group) {
+      const full = { ...group, category, text: group?.text ?? '', rules: group?.rules ?? [], files: group?.files ?? [], updated_at: new Date().toISOString() };
+      atomicWrite(groupFile(category), yaml.dump(full, { lineWidth: -1 }));
+      return full;
+    },
+    listGroups() {
+      const dir = path.join(memoryDir, 'groups');
+      if (!fs.existsSync(dir)) return [];
+      const out = [];
+      for (const f of fs.readdirSync(dir).sort()) {
+        if (!f.endsWith('.yaml')) continue;
+        try {
+          const g = yaml.load(fs.readFileSync(path.join(dir, f), 'utf8'));
+          if (isPlainObject(g)) out.push(g);
+        } catch { /* 壞檔不列，讀單一分類時才報錯 */ }
+      }
+      return out;
+    },
+
+    // ---- 身分（素材庫用）：一份清單 ----
+    readIdentities() {
+      return fs.existsSync(identitiesFile) ? (readYaml(identitiesFile, '身分') ?? []) : [];
+    },
+    writeIdentities(list) {
+      atomicWrite(identitiesFile, yaml.dump(list, { lineWidth: -1 }));
+    },
+
+    // ---- 全域設定 settings.json：缺檔＝缺省；有檔＝缺省逐鍵補上（壞檔明確報錯，同 readJsonOr 規矩）----
+    readSettings() {
+      return deepMerge(structuredClone(DEFAULT_SETTINGS), readJsonOr(settingsFile, {}));
+    },
+    writeSettings(settings) {
+      atomicWrite(settingsFile, JSON.stringify(settings, null, 2));
+    },
+
+    // ---- 備份：整個資料夾複製到同層 <basename>-backups/<時間戳>/（不含備份夾自己、不含寫到一半的暫存檔）----
+    backup() {
+      const at = new Date();
+      const pad = (n) => String(n).padStart(2, '0');
+      const stamp = `${at.getFullYear()}${pad(at.getMonth() + 1)}${pad(at.getDate())}-${pad(at.getHours())}${pad(at.getMinutes())}${pad(at.getSeconds())}`;
+      let dest = path.join(backupsRoot, stamp);
+      for (let i = 2; fs.existsSync(dest); i += 1) dest = path.join(backupsRoot, `${stamp}-${i}`);
+      const root = path.resolve(backupsRoot);
+      const dataRoot = path.resolve(dataDir);
+      fs.cpSync(dataDir, dest, {
+        recursive: true,
+        filter: (src) => {
+          const r = path.resolve(src);
+          if (r === root || r.startsWith(root + path.sep)) return false;
+          if (path.dirname(r) === dataRoot && path.basename(r) === 'backups') return false;
+          return !path.basename(r).includes('.tmp-');
+        },
+      });
+      return { path: dest, at: at.toISOString() };
+    },
+    listBackups() {
+      if (!fs.existsSync(backupsRoot)) return [];
+      return fs.readdirSync(backupsRoot)
+        .filter((n) => fs.statSync(path.join(backupsRoot, n)).isDirectory())
+        .sort()
+        .map((name) => ({ name, at: fs.statSync(path.join(backupsRoot, name)).mtime.toISOString() }));
+    },
+
     writeRun(category, id, runId, run) {
       atomicWrite(path.join(runDir(category, id, runId), 'run.yaml'), yaml.dump(run, { lineWidth: -1 }));
     },
@@ -395,6 +641,26 @@ export function createStore(dataDir) {
     readPromptRecord(category, id, runId, name) {
       const p = path.join(promptDir(category, id, runId), safeFileName(name));
       if (!fs.existsSync(p)) throw new StoreError(`這一步的指示卷宗「${name}」不存在（改版前跑的舊紀錄沒有卷宗）`, 'NOT_FOUND');
+      return fs.readFileSync(p, 'utf8');
+    },
+
+    // ---- 工作單留存（監工輪）：不屬於任何一次執行的呼叫（建流程、匯入掃描、優化、行事曆快照）也要留全文 ----
+    // 卷宗存在 run 資料夾底下，這四種沒有 run，所以另開 dataDir/logs/<種類>/。寫不進不擋（跟卷宗同一條規矩）：
+    // 少一份紀錄不該讓建流程或抓快照整個失敗。名字經 safeFileName，跳脫路徑的名字寫不出去（丟出去被這裡吃掉）。
+    writeLog(kind, name, text) {
+      try {
+        const p = path.join(logDir(kind), `${safeFileName(name)}.txt`);
+        fs.mkdirSync(path.dirname(p), { recursive: true });
+        fs.writeFileSync(p, text, 'utf8');
+      } catch { /* 工作單寫不進不擋呼叫 */ }
+    },
+    listLogs(kind) {
+      const dir = logDir(kind);
+      return fs.existsSync(dir) ? fs.readdirSync(dir).sort() : [];
+    },
+    readLog(kind, name) {
+      const p = path.join(logDir(kind), `${safeFileName(name)}.txt`);
+      if (!fs.existsSync(p)) throw new StoreError(`工作單「${name}」不存在`, 'NOT_FOUND');
       return fs.readFileSync(p, 'utf8');
     },
 

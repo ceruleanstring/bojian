@@ -1,5 +1,8 @@
 // schema — workflow 定義驗證（命名見 GLOSSARY.md；有向圖模型見 規劃/機器合約.md）
 // 節點 kind：task（預設）｜branch 分岔｜fork 並行點（畫布調色盤元件）｜join（舊格式相容，畫布編輯時自動拆直——會合=多條線接進同一步）
+import { FIELD_KINDS } from './memory.js';
+import { DEFAULT_SETTINGS } from './store.js';
+
 export class SchemaError extends Error {
   constructor(problems) {
     super(`流程定義有問題：${problems.join('；')}`);
@@ -16,6 +19,15 @@ export const OUTPUT_TIER1 = ['md', 'txt', 'csv', 'html', 'json'];
 export const OUTPUT_OFFICE = ['docx', 'xlsx'];
 export const OUTPUT_TIER2 = ['pptx', 'pdf'];
 const OUTPUT_EXTS = [...OUTPUT_TIER1, ...OUTPUT_OFFICE, ...OUTPUT_TIER2];
+// 提前提醒九檔（D20）：步驟層 remind_leads 與全域設定 exec.remind_leads 共用
+const REMIND_LEADS = ['10m', '30m', '1h', '2h', '3h', '6h', '12h', '1d', '2d'];
+const isLeadList = (v) => Array.isArray(v) && v.every((l) =>
+  (typeof l === 'string' ? REMIND_LEADS.includes(l) : l && typeof l === 'object' && typeof l.at === 'string'));
+const MODEL_TIERS = ['fast', 'balanced', 'deep'];
+const ATT_SCOPES = ['company', 'category'];
+const isPlainName = (v) => typeof v === 'string' && !!v.trim() && !/[\\/]|\.\./.test(v);
+const isAttachment = (a) => isPlainName(a) || (a && typeof a === 'object' && ATT_SCOPES.includes(a.scope) && isPlainName(a.name));
+const KIND_LIST = Object.keys(FIELD_KINDS).join('/');
 
 export function nodeKind(n) {
   return n.kind ?? 'task';
@@ -32,6 +44,8 @@ export function validateWorkflow(def, { allowFloating = false } = {}) {
   if (!def || typeof def !== 'object') throw new SchemaError(['整份定義不是物件']);
   if (def.format !== 1) problems.push('format 必須是 1');
   if (typeof def.name !== 'string' || !def.name.trim()) problems.push('缺 name（流程名稱）');
+  // 記憶輪：拆解器的草稿可帶頂層 category（放哪個分類）；這裡只驗型別，POST /api/workflows 存檔前剝掉（分類是路徑，不進 workflow.yaml）
+  if (def.category !== undefined && typeof def.category !== 'string') problems.push('category 要是文字');
   // 流程權限（產檔輪）：files＝允許工人在這趟的產出資料夾寫檔與執行程式；沒帶＝關
   if (def.permissions !== undefined) {
     const pm = def.permissions;
@@ -39,10 +53,20 @@ export function validateWorkflow(def, { allowFloating = false } = {}) {
     else if (pm.files !== undefined && typeof pm.files !== 'boolean') problems.push('permissions.files 要是開或關');
   }
   // 交貨查核輪：流程層一個開關；缺省＝開（enabled !== false 即開）
+  // 監工輪：子開關 facts＝數字對原始資料；缺省也是開（facts !== false）
   if (def.check !== undefined) {
     const ck = def.check;
     if (!ck || typeof ck !== 'object' || Array.isArray(ck)) problems.push('check 要是物件');
-    else if (ck.enabled !== undefined && typeof ck.enabled !== 'boolean') problems.push('check.enabled 要是開或關');
+    else {
+      if (ck.enabled !== undefined && typeof ck.enabled !== 'boolean') problems.push('check.enabled 要是開或關');
+      if (ck.facts !== undefined && typeof ck.facts !== 'boolean') problems.push('check.facts 要是開或關');
+    }
+  }
+  // 監工輪：流程層監工開關；缺省＝開（enabled !== false）。只管開場備註、交接備註、派工、收尾紀錄——判路永遠跑
+  if (def.supervisor !== undefined) {
+    const sv = def.supervisor;
+    if (!sv || typeof sv !== 'object' || Array.isArray(sv)) problems.push('supervisor 要是物件');
+    else if (sv.enabled !== undefined && typeof sv.enabled !== 'boolean') problems.push('supervisor.enabled 要是開或關');
   }
 
   const params = Array.isArray(def.params) ? def.params : (problems.push('params 必須是陣列'), []);
@@ -56,6 +80,8 @@ export function validateWorkflow(def, { allowFloating = false } = {}) {
     // required／hint（排程與健檢輪）：必填旗標＋「要貼什麼」提示；純資料欄位由拆解器標，開跑前健檢據此擋沒填
     if (p && p.required !== undefined && typeof p.required !== 'boolean') problems.push(`params[${i}] required 要是開或關`);
     if (p && p.hint !== undefined && typeof p.hint !== 'string') problems.push(`params[${i}] hint 要是文字`);
+    // kind（記憶輪）：欄位性質六類，拆解器給、詞典長新欄位時沿用；沒給（含 null）＝詞典補成「做法」
+    if (p && p.kind != null && !Object.hasOwn(FIELD_KINDS, p.kind)) problems.push(`params[${i}] kind 必須是 ${KIND_LIST}`);
   });
 
   const nodes = Array.isArray(def.nodes) && def.nodes.length ? def.nodes : (problems.push('nodes 必須是非空陣列'), []);
@@ -63,6 +89,8 @@ export function validateWorkflow(def, { allowFloating = false } = {}) {
   for (const [i, n] of nodes.entries()) {
     const at = `nodes[${i}]`;
     if (!n || typeof n.id !== 'string' || !n.id.trim()) { problems.push(`${at} 缺 id`); continue; }
+    // 監工輪：底線開頭保留給 _brief／_record 兩個偽節點（用量帳本與卷宗都用它們當 node 鍵）
+    if (n.id.startsWith('_')) problems.push(`節點「${n.id}」步驟 id 不能以 _ 開頭`);
     if (ids.has(n.id)) problems.push(`節點 id「${n.id}」重複`);
     else ids.add(n.id);
     if (typeof n.title !== 'string' || !n.title.trim()) problems.push(`${at} 缺 title`);
@@ -79,15 +107,13 @@ export function validateWorkflow(def, { allowFloating = false } = {}) {
         if (n[f] !== undefined && typeof n[f] !== 'string') problems.push(`節點「${n.id}」${f} 要是文字`);
       }
       if (n.output_file !== undefined && !OUTPUT_EXTS.includes(n.output_file)) problems.push(`節點「${n.id}」output_file 必須是 ${OUTPUT_EXTS.join('/')}`);
-      if (n.attachments !== undefined && (!Array.isArray(n.attachments) || n.attachments.some((a) => typeof a !== 'string' || /[\\/]|\.\./.test(a)))) {
-        problems.push(`節點「${n.id}」attachments 要是檔名清單（不含路徑符號）`);
+      // 參考檔勾選（三層共用檔）：字串＝這條流程自己的檔；{scope: company|category, name}＝公司／部門共用夾的參考類檔
+      if (n.attachments !== undefined && (!Array.isArray(n.attachments) || !n.attachments.every(isAttachment))) {
+        problems.push(`節點「${n.id}」attachments 要是檔名清單或 {scope, name}（不含路徑符號）`);
       }
       // 步驟層提前提醒（D20）：等時刻步驟的擋時限升級用；元素=九檔字串或 {at: 自訂時刻}
-      if (n.remind_leads !== undefined) {
-        const LEADS = ['10m', '30m', '1h', '2h', '3h', '6h', '12h', '1d', '2d'];
-        const bad = !Array.isArray(n.remind_leads) || n.remind_leads.some((l) =>
-          !(typeof l === 'string' ? LEADS.includes(l) : l && typeof l === 'object' && typeof l.at === 'string'));
-        if (bad) problems.push(`節點「${n.id}」remind_leads 要是提前量清單（${'10m/30m/1h/2h/3h/6h/12h/1d/2d'} 或 {at: 時刻}）`);
+      if (n.remind_leads !== undefined && !isLeadList(n.remind_leads)) {
+        problems.push(`節點「${n.id}」remind_leads 要是提前量清單（${REMIND_LEADS.join('/')} 或 {at: 時刻}）`);
       }
       // 等時刻（D20）：字串=固定時刻（ISO），物件 {from: nodeId}=由上游步驟產出決定（動態時刻）
       if (n.wait_until !== undefined) {
@@ -96,7 +122,17 @@ export function validateWorkflow(def, { allowFloating = false } = {}) {
         const isFrom = w && typeof w === 'object' && typeof w.from === 'string' && w.from.trim();
         if (!isFixed && !isFrom) problems.push(`節點「${n.id}」wait_until 要是時刻文字或 {from: 步驟id}`);
       }
-      if (n.model_tier !== undefined && !['fast', 'balanced', 'deep'].includes(n.model_tier)) problems.push(`節點「${n.id}」model_tier 必須是 fast/balanced/deep`);
+      // 監工輪：三個勾＝監工可以改這一步的什麼（缺省 note 開、tier 關（09-09 改）、tools 關，取值一律走 supervisor.supervisorFlags）
+      if (n.supervisor !== undefined) {
+        const sv = n.supervisor;
+        if (!sv || typeof sv !== 'object' || Array.isArray(sv)) problems.push(`節點「${n.id}」supervisor 要是物件`);
+        else {
+          for (const f of ['note', 'tier', 'tools']) {
+            if (sv[f] !== undefined && typeof sv[f] !== 'boolean') problems.push(`節點「${n.id}」supervisor.${f} 要是開或關`);
+          }
+        }
+      }
+      if (n.model_tier !== undefined && !MODEL_TIERS.includes(n.model_tier)) problems.push(`節點「${n.id}」model_tier 必須是 fast/balanced/deep`);
       if (n.creativity !== undefined && !['strict', 'open'].includes(n.creativity)) problems.push(`節點「${n.id}」creativity 必須是 strict/open`);
       if (n.retry !== undefined && ![0, 1, 2].includes(n.retry)) problems.push(`節點「${n.id}」retry 必須是 0/1/2`);
       // 一般節點多個 next＝並行分頭（畫布回饋輪：fork/join 盒退場，多出線即並行、多入線即會合）
@@ -163,4 +199,85 @@ export function validateWorkflow(def, { allowFloating = false } = {}) {
   }
 
   if (problems.length) throw new SchemaError(problems);
+}
+
+// 預設補值（監工輪）：純函式，回新物件——把「缺省」寫成明值，好讓流程頁的開關有東西可顯示、可切換。
+// mode='create'（親手建的新流程、前端「存進流程庫」的 POST /api/workflows）：監工、查核、數字對原始資料三個都補。
+//   facts 看這條流程有沒有「必填的資料欄位」——有資料要對才對，沒有就不必每步都去翻原始資料。
+// mode='save'（PUT 存檔）：只補監工與查核，永遠不碰 facts——既有流程沒這個欄位＝缺省開，
+//   手改一個節點位置就把它靜默翻成關，等於使用者沒按過任何按鈕，「數字對原始資料」就自己關掉了。
+// 匯入不套（沿用缺省語意）。型別錯不在這裡表態，交給 validateWorkflow 報人話。
+// 記憶輪：第三參數 defaults＝設定頁「新流程的預設」（settings.json 的 defaults，缺鍵補程式缺省）。只有 create 吃它：
+//   產檔權限、查核開關、監工開關照設定；check_facts 'auto'＝現行 required 規則、'on'／'off'＝固定；
+//   每個 task 節點缺三個勾且設定值不等於程式缺省時才寫進節點（等於缺省就不寫，節點乾淨、supervisorFlags 取值一樣）。
+//   save 永遠只補兩個主開關（既有流程缺省語意＝開，不吃新流程的預設）。defaults 省略＝程式缺省，行為與以前一字不差。
+const PROGRAM_DEFAULTS = DEFAULT_SETTINGS.defaults;
+const isObj = (v) => v && typeof v === 'object' && !Array.isArray(v);
+export function applyDefaults(def, { mode, defaults } = {}) {
+  if (!isObj(def)) return def;
+  const out = { ...def };
+  if (mode !== 'create') {
+    if (out.supervisor === undefined) out.supervisor = { enabled: true };
+    if (out.check === undefined) out.check = { enabled: true };
+    return out;
+  }
+  const d = { ...PROGRAM_DEFAULTS, ...(isObj(defaults) ? defaults : {}) };
+  if (out.supervisor === undefined) out.supervisor = { enabled: d.supervisor_enabled !== false };
+  if (out.check === undefined) out.check = { enabled: d.check_enabled !== false };
+  if (out.permissions === undefined) out.permissions = { files: d.permissions_files !== false };
+  const ck = out.check;
+  if (isObj(ck) && ck.facts === undefined) {
+    const facts = d.check_facts === 'on' ? true : d.check_facts === 'off' ? false
+      : Array.isArray(out.params) && out.params.some((p) => p && p.required === true);
+    out.check = { ...ck, facts };
+  }
+  const flags = { ...PROGRAM_DEFAULTS.supervisor_flags, ...(isObj(d.supervisor_flags) ? d.supervisor_flags : {}) };
+  const custom = Object.keys(PROGRAM_DEFAULTS.supervisor_flags).some((k) => flags[k] !== PROGRAM_DEFAULTS.supervisor_flags[k]);
+  if (custom && Array.isArray(out.nodes)) {
+    out.nodes = out.nodes.map((n) => (isObj(n) && nodeKind(n) === 'task' && n.supervisor === undefined ? { ...n, supervisor: { ...flags } } : n));
+  }
+  return out;
+}
+
+// 全域設定逐欄驗證（記憶輪，PUT /api/settings）：回人話清單，空＝合法。缺鍵不報（readSettings 會補缺省），只驗有給的。
+const SENSITIVE_NAMES = { health: '健康', politics: '政治', religion: '宗教', finance: '財務' };
+export function validateSettings(s) {
+  const out = [];
+  if (!isObj(s)) return ['設定格式不對'];
+  const isBool = (v) => typeof v === 'boolean';
+  const chk = (v, ok, msg) => { if (v !== undefined && !ok(v)) out.push(msg); };
+  chk(s.version, (v) => v === 1, '設定版本只能是 1');
+  const m = s.memory;
+  chk(m, isObj, '設定的記憶格式不對');
+  if (isObj(m)) {
+    chk(m.paused, isBool, '記憶整層暫停要是開或關');
+    chk(m.sensitive, isObj, '設定的敏感類別格式不對');
+    if (isObj(m.sensitive)) {
+      for (const [k, name] of Object.entries(SENSITIVE_NAMES)) chk(m.sensitive[k], isBool, `敏感類別「${name}」要是開或關`);
+    }
+    chk(m.intro_done_at, (v) => v === null || typeof v === 'string', '介紹完成時間要是時刻文字或空');
+  }
+  const d = s.defaults;
+  chk(d, isObj, '設定的新流程預設格式不對');
+  if (isObj(d)) {
+    chk(d.permissions_files, isBool, '新流程的產檔權限預設要是開或關');
+    chk(d.check_enabled, isBool, '新流程的每步都查預設要是開或關');
+    chk(d.check_facts, (v) => ['auto', 'on', 'off'].includes(v), '數字對原始資料的預設只能是 auto、on、off');
+    chk(d.supervisor_enabled, isBool, '新流程的監工預設要是開或關');
+    chk(d.supervisor_flags, isObj, '設定的監工三個勾預設格式不對');
+    if (isObj(d.supervisor_flags)) {
+      for (const k of ['note', 'tier', 'tools']) chk(d.supervisor_flags[k], isBool, `監工三個勾的預設（${k}）要是開或關`);
+    }
+    chk(d.model_tier, (v) => v === null || MODEL_TIERS.includes(v), '模型檔位的預設只能是 fast、balanced、deep，或不設');
+    chk(d.retry, (v) => v === null || [0, 1, 2].includes(v), '自動重試的預設只能是 0、1、2，或不設');
+  }
+  const e = s.exec;
+  chk(e, isObj, '設定的執行與排程格式不對');
+  if (isObj(e)) {
+    chk(e.auto_makeup, isBool, '錯過自動補的預設要是開或關');
+    chk(e.remind_leads, isLeadList, `提前提醒的預設要是提前量清單（${REMIND_LEADS.join('/')} 或 {at: 時刻}）`);
+    chk(e.web, isBool, '允許查網路要是開或關');
+  }
+  chk(s.company_name, (v) => typeof v === 'string' && Array.from(v).length <= 60, '公司名稱要是文字、60 字內');
+  return out;
 }

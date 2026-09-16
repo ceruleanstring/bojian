@@ -4,11 +4,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import yaml from 'js-yaml';
-import { createStore, StoreError } from './store.js';
+import { createStore, StoreError, deepMerge, DEFAULT_SETTINGS, safeFileName } from './store.js';
+import { extractRuleText, checkRuleLimits, SharedError, LIMITS } from './shared.js';
 import { createRunner } from './runner.js';
 import { createHostAdapter } from './host-adapter.js';
 import { compose, ComposeError } from './composer.js';
-import { validateWorkflow, outgoing } from './schema.js';
+import { validateWorkflow, outgoing, applyDefaults, validateSettings } from './schema.js';
+import {
+  createMemory, makeCard, validateCard, matchField, ensureFields, similarFields, mergeFields, parseGroupText,
+  newId, bucketOfId, selectCore, FIELD_KINDS, SCOPE_LEVELS,
+} from './memory.js';
 import { preflight } from './preflight.js';
 import mammoth from 'mammoth';
 import ExcelJS from 'exceljs';
@@ -22,6 +27,16 @@ import { monthView, linkedShifts, snapshotPrompt, parseSnapshot } from './calend
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' };
+// 剝繭版本（設定頁「關於」用）：讀不到就不顯示，不擋啟動
+let PKG_VERSION = null;
+try { PKG_VERSION = JSON.parse(fs.readFileSync(path.join(HERE, '..', 'package.json'), 'utf8')).version ?? null; } catch { /* 沒版本可顯示而已 */ }
+// 備份失敗的人話對照（依 err.code）；對不上的一律「請再試一次」，原始錯誤只進 console
+const BACKUP_ERRORS = {
+  ENOENT: '備份沒做成：找不到備份位置',
+  EACCES: '備份沒做成：沒有權限寫入備份位置',
+  EPERM: '備份沒做成：沒有權限寫入備份位置',
+  ENOSPC: '備份沒做成：磁碟空間不足',
+};
 
 function seedExamples(store, examplesDir) {
   if (!fs.existsSync(examplesDir)) return;
@@ -87,21 +102,60 @@ export async function previewArtifact(buf, name) {
   return { kind: 'text', text };
 }
 
-// 交貨查核輪：run 詳情頁的用量彙總——依 node＋kind 彙總這個 run 的帳；擬規則（edit-rules）兩邊都不算，
+// 交貨查核輪：run 詳情頁的用量彙總——依 node＋kind 彙總這個 run 的帳；擬規則（edit-rules）三格都不算，
 // 它不是工人的一步也不是查核的一次，只在儀表板／帳本總量裡算（既有邏輯不動）。沒有任何紀錄的節點不出現在結果裡。
+// 監工輪：第三格 supervisor（開場、交接、收尾）；開場與收尾的 node 是 _brief／_record 兩個偽節點，一樣算得到。
+const USAGE_BUCKETS = { step: 'step', check: 'check', supervisor: 'supervisor' };
 function usageByNode(allUsage, runId) {
   const out = {};
   for (const u of allUsage) {
     if (u.run !== runId || !u.node) continue;
-    const bucket = u.kind === 'check' ? 'check' : u.kind === 'step' ? 'step' : null;
+    const bucket = USAGE_BUCKETS[u.kind] ?? null;
     if (!bucket) continue;
-    const n = (out[u.node] ??= { step: { input: 0, output: 0, calls: 0 }, check: { input: 0, output: 0, calls: 0 } });
+    const n = (out[u.node] ??= {
+      step: { input: 0, output: 0, calls: 0 },
+      check: { input: 0, output: 0, calls: 0 },
+      supervisor: { input: 0, output: 0, calls: 0 },
+    });
     const b = n[bucket];
     b.input += (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0);
     b.output += u.output_tokens ?? 0;
     b.calls += 1;
   }
   return out;
+}
+
+// 儀表板輪／移植合併輪 U4a：一趟執行的「成品」——終點步（沒有出線）且已完成、有內容或有檔的那些。
+// 儀表板 recent[] 與 GET /runs?detail=1 共用這一支，兩邊看到的成品永遠一致。
+function finalsOf(run) {
+  const finals = [];
+  for (const n of run.def?.nodes ?? []) {
+    if (outgoing(n).length) continue; // 終點步＝沒有出線的步
+    const s = run.steps?.[n.id];
+    if (!s || s.status !== 'done') continue;
+    const text = String(s.edited_output ?? s.output ?? '');
+    if (!text && !s.file) continue;
+    finals.push({ node: n.id, title: n.title, preview: text.slice(0, 400), file: s.file ?? null });
+  }
+  // 資料通道輪：終點是人做步驟（沒交內容）→ 成品回退到最後一個完成的 AI 步驟，別顯示「沒有成品」
+  if (!finals.length && run.status === 'done') {
+    const last = [...(run.def?.nodes ?? [])].reverse().find((n) => {
+      const s = run.steps?.[n.id];
+      return (n.kind ?? 'task') === 'task' && n.executor === 'ai' && s?.status === 'done' && (String(s.edited_output ?? s.output ?? '') || s.file);
+    });
+    if (last) {
+      const s = run.steps[last.id];
+      finals.push({ node: last.id, title: last.title, preview: String(s.edited_output ?? s.output ?? '').slice(0, 400), file: s.file ?? null });
+    }
+  }
+  return finals;
+}
+
+function stepCountsOf(run) {
+  return Object.values(run.steps ?? {}).reduce(
+    (a, s) => ({ total: a.total + 1, done: a.done + (s.status === 'done' ? 1 : 0), failed: a.failed + (s.status === 'failed' ? 1 : 0) }),
+    { total: 0, done: 0, failed: 0 },
+  );
 }
 
 function readBody(req) {
@@ -125,9 +179,42 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
   adapter.setUsageSink?.((u) => {
     try { store.appendUsage(u); } catch (e) { console.error('[bojian] 用量記帳失敗：', e.message); }
   });
-  const runner = createRunner({ store, adapter, now });
+  const memory = createMemory({ store, adapter, now }); // 記憶輪：四條記路的落地（M2）；runner 開跑後叫它判「同值連兩趟」
+  const runner = createRunner({ store, adapter, now, memory });
   const optimizer = createOptimizer({ store, adapter });
+  const nowIso = () => new Date(now()).toISOString();
   const inflight = new Set();
+
+  // 工作單留存（監工輪）：不屬於任何一次執行的四種呼叫（建流程、匯入掃描、優化、行事曆快照）沒有 run 卷宗可存，
+  // 改留在 dataDir/logs/<種類>/。一次呼叫配一組回呼：指示與回覆共用同一個檔名，回覆多一個 .reply。
+  function logPair(kind, tail = '') {
+    let name = null;
+    return {
+      onPrompt: (text) => { name = `${new Date(now()).toISOString().replace(/:/g, '-')}${tail}`; store.writeLog(kind, name, text); },
+      onReply: (text) => { if (name) store.writeLog(kind, `${name}.reply`, text); },
+    };
+  }
+
+  // 記憶輪（M1c）：拆解器的三段參考——分類清單、詞典、所在分類的群組條（只取 active）。
+  // 分類依 body.category，沒有才看草稿頂層的 category；存在的分類才算「已定」。讀不到＝當沒有，不擋建流程。
+  function composeContext(body) {
+    const ctx = { categories: [], dict: null, groupRules: [], category: null, companyRules: [], deptRules: [] };
+    try {
+      ctx.categories = store.listCategories();
+      ctx.dict = store.readDict();
+      ctx.companyRules = store.readSharedRuleTexts('_company'); // 三層共用檔：公司規範當已知條件（沒有夾＝空）
+      const want = typeof body.category === 'string' && body.category ? body.category
+        : (typeof body.current_draft?.category === 'string' ? body.current_draft.category : '');
+      if (want && (ctx.categories.includes(want) || want === '未分類')) {
+        ctx.category = want;
+        ctx.groupRules = (store.readGroup(want)?.rules ?? []).filter((r) => r.status === 'active').map((r) => r.text);
+        if (want !== '未分類') ctx.deptRules = store.readSharedRuleTexts(want);
+      }
+    } catch (e) {
+      console.error('[bojian] 建流程的記憶參考讀不到，照樣拆：', e.message);
+    }
+    return ctx;
+  }
 
   function kick(category, id, runId) {
     const key = `${category}/${id}/${runId}`;
@@ -137,7 +224,8 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
       .then((run) => {
         // run 跑完＝優化引擎的進場時機（US-007：run 結束後出提議）
         if (run?.status === 'done') {
-          optimizer.analyze(category, id).catch((e) => console.error('[bojian] 提議產生失敗（下次一起看）：', e.message));
+          optimizer.analyze(category, id, logPair('optimize', `-${category}-${id}`))
+            .catch((e) => console.error('[bojian] 提議產生失敗（下次一起看）：', e.message));
         }
       })
       .catch((e) => console.error('[bojian] run 推進失敗：', e.message))
@@ -149,8 +237,13 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
   // Google 快照抓取（US-034）：任何失敗都不覆寫既有快取，回人話原因（Error Map）
   async function refreshSnapshot(month) {
     let out;
+    const log = logPair('snapshot', `-${month}`);
     try {
-      out = await adapter.complete({ prompt: snapshotPrompt(month), meta: { kind: 'snapshot' } });
+      const prompt = snapshotPrompt(month);
+      log.onPrompt(prompt); // store.writeLog 自己吞例外：工作單寫不進不擋抓快照
+      // 輕裝連接器例外（監工輪）：這一次呼叫要看得到使用者掛的行事曆，不推 --strict-mcp-config
+      out = await adapter.complete({ prompt, meta: { kind: 'snapshot', mcp: 'calendar' } });
+      log.onReply(String(out ?? ''));
     } catch (e) {
       return { ok: false, reason: e.message };
     }
@@ -208,6 +301,28 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
     return items;
   }
 
+  // 刪共用檔順帶清勾選（移植合併輪 U1a）：掃所有流程步驟的 attachments，拿掉指向這份檔的 {scope,name}；
+  // 公司檔＝全部流程都看，部門檔＝只看該分類；有變的流程升一版（履歷寫原因），回被清掉的步驟數。壞檔跳過不擋刪除。
+  function unlinkSharedAttachments(scope, name) {
+    const tag = scope === '_company' ? 'company' : 'category';
+    let steps = 0;
+    for (const w of store.listWorkflows()) {
+      if (tag === 'category' && w.category !== scope) continue;
+      let def;
+      try { def = store.readWorkflow(w.category, w.id); } catch { continue; }
+      let touched = 0;
+      for (const n of def.nodes ?? []) {
+        if (!Array.isArray(n.attachments)) continue;
+        const kept = n.attachments.filter((a) => !(a && typeof a === 'object' && a.scope === tag && a.name === name));
+        if (kept.length !== n.attachments.length) { n.attachments = kept; touched += 1; }
+      }
+      if (!touched) continue;
+      steps += touched;
+      store.bumpVersion(w.category, w.id, def, `共用檔「${name}」已刪除，${touched} 步的勾選一併取消`, 'manual'); // 精簡：不走 saveManualEdit 的十分鐘合併，讓履歷留下原因
+    }
+    return steps;
+  }
+
   async function handleApi(req, res, segs) {
     const json = (status, obj) => {
       res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
@@ -220,7 +335,12 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
       // /api/compose 用講的建流程
       if (segs[1] === 'compose' && req.method === 'POST' && segs.length === 2) {
         const body = await readBody(req);
-        const out = await compose({ adapter, messages: body.messages ?? [], currentDraft: body.current_draft ?? null });
+        const ctx = composeContext(body);
+        const out = await compose({ adapter, messages: body.messages ?? [], currentDraft: body.current_draft ?? null, context: ctx, ...logPair('compose') });
+        // 記憶輪（M2）記路④：拆好了才路由最後一句使用者話——已存流程在哪個分類就用在那個分類（ctx.category 是驗過存在的），
+        // 新草稿用在全部。路由失敗只多一句 memory_notice，拆好的草稿照回
+        const lastSaid = [...(body.messages ?? [])].reverse().find((m) => m?.role === 'user')?.text ?? '';
+        out.memory_notice = await memory.onChat({ text: lastSaid, category: ctx.category, def: body.current_draft ?? null });
         return json(200, out);
       }
       // /api/preflight 開跑前健檢（資料通道輪）：任何定義（草稿／畫布工作本／已存）都能查——抽屜預覽與開跑擋門同一份規則
@@ -253,6 +373,12 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
         if (!p) return json(404, { error: '找不到這條提議' });
         if (segs[3] === 'accept') {
           if (p.status !== 'pending') return json(400, { error: '這條提議已處理過' });
+          // 監工建議（訊號 D）不是改法、是指路：不動定義、不升版，只回「去哪裡改」讓前端把抽屜開給使用者
+          if (p.kind === 'supervisor_hint') {
+            p.status = 'accepted';
+            store.writeProposals(queue);
+            return json(200, { ok: true, open: { category: p.workflow.category, id: p.workflow.id, node_id: p.change.node_id, field: p.change.field } });
+          }
           try {
             const def = store.readWorkflow(p.workflow.category, p.workflow.id);
             applyProposal(def, p);
@@ -282,7 +408,7 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
       if (segs[1] === 'import' && req.method === 'POST' && segs.length === 3) {
         if (segs[2] === 'scan') {
           const { def, schedule } = parseImport((await readBody(req)).content ?? '');
-          const scan = await scanImport({ adapter, def });
+          const scan = await scanImport({ adapter, def, ...logPair('scan') });
           return json(200, { def, schedule, scan });
         }
         if (segs[2] === 'confirm') {
@@ -321,6 +447,281 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
             store.writeSchedules([...scheds, cand]);
           }
           return json(200, { category: '匯入', id, schedule_result: schedResult });
+        }
+      }
+
+      // ===== 記憶輪：記憶卡／記憶垃圾桶／通知撤回／清空／介紹／詞典／群組圈／這條流程會帶什麼／身分（契約 (h)；錯誤一律人話）=====
+      if (segs[1] === 'memory') {
+        const sub = segs[2];
+        const at = nowIso();
+        if (sub === 'summary' && req.method === 'GET' && segs.length === 3) return json(200, memory.summary());
+        if (sub === 'cards') {
+          if (req.method === 'GET' && segs.length === 3) {
+            const q = new URL(req.url, 'http://localhost').searchParams;
+            const bucket = q.get('bucket') || undefined;
+            if (bucket && !['habit', 'profile'].includes(bucket)) return json(400, { error: '沒有這種卡' });
+            return json(200, store.listCards(bucket, { status: q.get('status') || undefined }));
+          }
+          if (req.method === 'POST' && segs.length === 3) {
+            // 手動新增（記憶頁「＋」）：出處＝manual、原話＝內容本身；習慣卡的欄位可用同義詞進來，存正式名
+            const b = await readBody(req);
+            const dict = store.readDict();
+            const field = b.field == null ? undefined : (matchField(dict, b.field)?.name ?? b.field);
+            const text = String(b.text ?? '').trim();
+            const card = makeCard({ bucket: b.bucket, text, layer: b.layer, field, scope: b.scope, expires: b.expires ?? null, source: { kind: 'manual', at, quote: text } }, at);
+            const problems = validateCard(card, dict);
+            if (problems.length) return json(400, { error: problems.join('；') });
+            store.writeCard(card);
+            return json(200, card);
+          }
+          const cardId = decodeURIComponent(segs[3] ?? '');
+          const readCard = () => store.readCard(bucketOfId(cardId), cardId); // 不存在→404「找不到這張卡」
+          if (req.method === 'GET' && segs.length === 4) return json(200, readCard());
+          if (req.method === 'DELETE' && segs.length === 4) return json(200, { ok: true, key: store.trashCard(bucketOfId(cardId), cardId) });
+          if (req.method === 'POST' && segs.length === 5) {
+            const card = readCard();
+            const b = await readBody(req);
+            const save = (out) => { store.writeCard(out); return json(200, out); };
+            if (segs[4] === 'replace') {
+              // 鐵則：text 不可改，改＝新卡取代舊卡（計數歸零、狀態重新 active）；舊卡標 replaced 並記被誰取代
+              const text = String(b.text ?? '').trim();
+              if (!text) return json(400, { error: '要先寫新的內容' });
+              const next = makeCard({ ...card, id: undefined, text, status: 'active', replaces: card.id, source: { ...card.source, kind: 'replace', at, quote: text } }, at);
+              store.writeCard(next);
+              store.writeCard({ ...card, status: 'replaced', replaced_by: next.id });
+              return json(200, next);
+            }
+            if (segs[4] === 'retire') return save({ ...card, status: 'retired' });
+            if (segs[4] === 'revive') {
+              if (!['dormant', 'retired'].includes(card.status)) return json(400, { error: '這張卡不是休眠或退休，不用復活' });
+              return save({ ...card, status: 'active', unpicked_streak: 0 });
+            }
+            if (segs[4] === 'extend') {
+              const out = { ...card, expires: b.expires ?? null };
+              const problems = validateCard(out);
+              if (problems.length) return json(400, { error: problems.join('；') });
+              return save(out);
+            }
+            if (segs[4] === 'scope') {
+              // 記憶頁直接設範圍（縮也可以；靠證據往外擴才走 widenScope）
+              if (!SCOPE_LEVELS.includes(b.level)) return json(400, { error: '用在哪只能是全部、分類、流程' });
+              const scope = {
+                level: b.level,
+                category: b.level === 'all' ? null : (b.category ?? card.scope?.category ?? null),
+                workflow: b.level === 'workflow' ? (b.workflow ?? card.scope?.workflow ?? null) : null,
+              };
+              const out = { ...card, scope, scope_log: [...(card.scope_log ?? []), { at, from: { ...(card.scope ?? {}) }, to: { ...scope }, why: '你在記憶頁改的' }] };
+              const problems = validateCard(out); // 流程層缺分類／流程、分類層缺分類→400，不落地
+              if (problems.length) return json(400, { error: problems.join('；') });
+              return save(out);
+            }
+            return json(404, { error: '找不到這個動作' });
+          }
+        }
+        if (sub === 'trash') {
+          if (req.method === 'GET' && segs.length === 3) return json(200, store.listMemoryTrash());
+          if (req.method === 'POST' && segs[4] === 'restore' && segs.length === 5) return json(200, store.restoreCard(decodeURIComponent(segs[3])));
+        }
+        if (sub === 'notices' && req.method === 'POST' && segs[4] === 'undo' && segs.length === 5) {
+          const b = await readBody(req);
+          return json(200, memory.undo({ cardId: decodeURIComponent(segs[3]), category: b.category, id: b.id, run: b.run }));
+        }
+        if (sub === 'clear' && req.method === 'POST' && segs.length === 3) {
+          // 清空記憶＝全部卡進記憶垃圾桶（30 天內可復原）；詞典、群組圈、設定不動
+          let moved = 0;
+          for (const c of store.listCards()) { store.trashCard(c.bucket, c.id); moved += 1; }
+          return json(200, { ok: true, moved });
+        }
+        if (sub === 'intro' && segs.length === 3) {
+          if (req.method === 'GET') return json(200, { done_at: store.readSettings().memory.intro_done_at });
+          if (req.method === 'POST') {
+            const b = await readBody(req);
+            return json(200, memory.intro({ answers: b.answers ?? {}, skip: b.skip === true }));
+          }
+        }
+        if (sub === 'dict') {
+          if (req.method === 'GET' && segs.length === 3) {
+            const dict = store.readDict();
+            if (new URL(req.url, 'http://localhost').searchParams.get('usage') !== '1') return json(200, dict);
+            // 設定頁詞典表的「用在哪些流程」（M5a）：掃全部流程的 params[].label 對詞典（同義詞也算）；壞檔跳過、每條流程每欄位只算一次
+            const usage = Object.fromEntries(dict.fields.map((f) => [f.name, []]));
+            for (const w of store.listWorkflows()) {
+              let def;
+              try { def = store.readWorkflow(w.category, w.id); } catch { continue; }
+              const seen = new Set();
+              for (const p of def?.params ?? []) {
+                const hit = matchField(dict, p?.label);
+                if (!hit || seen.has(hit.name)) continue;
+                seen.add(hit.name);
+                usage[hit.name].push({ category: w.category, id: w.id, name: def.name ?? w.name });
+              }
+            }
+            return json(200, { ...dict, usage });
+          }
+          if (req.method === 'POST' && segs[3] === 'merge' && segs.length === 4) {
+            const b = await readBody(req);
+            if (!String(b.keep ?? '').trim() || !String(b.drop ?? '').trim()) return json(400, { error: '要指定留下哪個、併掉哪個' });
+            const { dict, cards } = mergeFields(store.readDict(), store.listCards(), b.keep, b.drop); // 詞典裡沒有→Error 人話→400
+            store.writeDict(dict);
+            for (const c of cards) store.writeCard(c);
+            // 群組條的 field 是存死的字串（M1a 差異 ③）：每個群組用新詞典重拆，掛到留下的欄位；id 與 created_at 照舊
+            for (const g of store.listGroups()) store.writeGroup(g.category, { ...g, rules: parseGroupText(g.text, dict, g.rules, at) });
+            return json(200, { dict, changed: cards.length });
+          }
+          if (req.method === 'PUT' && segs.length === 4) {
+            const name = decodeURIComponent(segs[3]);
+            const b = await readBody(req);
+            const dict = store.readDict();
+            const f = dict.fields.find((x) => x.name === name);
+            if (!f) return json(404, { error: '詞典裡沒有這個欄位' });
+            if (b.kind !== undefined && !Object.hasOwn(FIELD_KINDS, b.kind)) return json(400, { error: '性質只能是六類之一' });
+            if (b.synonyms !== undefined && !(Array.isArray(b.synonyms) && b.synonyms.every((s) => typeof s === 'string'))) return json(400, { error: '同義詞要是文字清單' });
+            if (b.kind !== undefined) f.kind = b.kind;
+            if (b.synonyms !== undefined) f.synonyms = [...new Set(b.synonyms.map((s) => s.trim()).filter((s) => s && s !== f.name))];
+            store.writeDict(dict);
+            return json(200, dict);
+          }
+        }
+        if (sub === 'groups') {
+          if (req.method === 'GET' && segs.length === 3) return json(200, store.listGroups());
+          if (segs.length === 4) {
+            const category = decodeURIComponent(segs[3]);
+            if (!store.listCategories().includes(category)) return json(404, { error: '沒有這個分類' });
+            const prev = store.readGroup(category);
+            // 沒有檔＝沒有群組圈：回空殼給前端畫文字框，不落地
+            if (req.method === 'GET') return json(200, prev ?? { category, text: '', rules: [], files: [], updated_at: null });
+            if (req.method === 'PUT') {
+              const b = await readBody(req);
+              if (typeof b.text !== 'string') return json(400, { error: '規矩要是文字（一行一條）' });
+              const rules = parseGroupText(b.text, store.readDict(), prev?.rules ?? [], at);
+              return json(200, store.writeGroup(category, { ...(prev ?? {}), text: b.text, rules }));
+            }
+          }
+        }
+        if (sub === 'for-workflow' && req.method === 'GET' && segs.length === 5) {
+          const category = decodeURIComponent(segs[3]);
+          const wfId = decodeURIComponent(segs[4]);
+          const out = memory.forWorkflow(category, wfId);
+          // 身分（M5a）：?identity=<id> 照指定；沒給＝預設綁這個分類的第一個身分；空字串＝不限縮；找不到＝不限縮（跟 runner 的 contextFor 一樣）。
+          // 有身分時 core 用同一支 selectCore 重算（身分限縮後再取內容層前幾張，跟開跑時帶的一致）；身分檔讀不到＝當沒有
+          const q = new URL(req.url, 'http://localhost').searchParams;
+          let idn = null;
+          try {
+            const list = store.readIdentities();
+            idn = q.has('identity') ? (list.find((i) => i?.id === q.get('identity')) ?? null) : (list.find((i) => (i?.categories ?? []).includes(category)) ?? null);
+          } catch (e) { console.error('[bojian] 身分讀不到，這條流程不限縮：', e.message); }
+          if (idn) {
+            const core = selectCore({ profileCards: store.listCards('profile'), category, workflowId: wfId, paused: out.paused, identity: idn });
+            out.core = { expression: core.filter((c) => c.layer === 'expression'), content: core.filter((c) => c.layer === 'content') };
+          }
+          return json(200, { ...out, identity: idn?.id ?? null });
+        }
+        if (sub === 'identities') {
+          const strList = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string') : []);
+          if (req.method === 'GET' && segs.length === 3) return json(200, store.readIdentities());
+          if (req.method === 'POST' && segs.length === 3) {
+            const b = await readBody(req);
+            const name = String(b.name ?? '').trim();
+            if (!name) return json(400, { error: '先取個名字' });
+            const idn = { id: newId('i'), name, cards: strList(b.cards), categories: strList(b.categories), created_at: at };
+            store.writeIdentities([...store.readIdentities(), idn]);
+            return json(200, idn);
+          }
+          if (segs.length === 4) {
+            const list = store.readIdentities();
+            const idn = list.find((x) => x.id === decodeURIComponent(segs[3]));
+            if (!idn) return json(404, { error: '找不到這個身分' });
+            if (req.method === 'PUT') {
+              const b = await readBody(req);
+              if (b.name !== undefined) {
+                const name = String(b.name ?? '').trim();
+                if (!name) return json(400, { error: '先取個名字' });
+                idn.name = name;
+              }
+              if (b.cards !== undefined) idn.cards = strList(b.cards);
+              if (b.categories !== undefined) idn.categories = strList(b.categories);
+              store.writeIdentities(list);
+              return json(200, idn);
+            }
+            if (req.method === 'DELETE') {
+              store.writeIdentities(list.filter((x) => x !== idn));
+              return json(200, { ok: true });
+            }
+          }
+        }
+      }
+      // ===== 三層共用檔（移植合併輪 U1a）：/api/shared/:scope/files（scope＝_company｜現有分類名）=====
+      // 規範類（rule）上傳時轉純文字存 text_cache、擋格式與字數（單檔 4,000／每層 8,000→413）；參考類（ref）任何副檔名、10MB 封頂（同流程參考檔）；
+      // 同名 409（換版＝先刪再傳）；刪除不進垃圾桶，順帶把所有流程步驟裡指向它的勾選拿掉（進履歷，看得到為什麼勾選不見了）
+      if (segs[1] === 'shared' && segs[3] === 'files' && (segs.length === 4 || segs.length === 5)) {
+        const scope = decodeURIComponent(segs[2]);
+        if (scope !== '_company' && !store.listCategories().includes(scope)) return json(404, { error: '沒有這個分類' });
+        const view = () => json(200, { scope, ...store.listShared(scope), limits: { ...LIMITS } });
+        if (req.method === 'GET' && segs.length === 4) return view();
+        if (req.method === 'POST' && segs.length === 4) {
+          const b = await readBody(req);
+          if (typeof b.name !== 'string') return json(400, { error: '檔名要是文字' });
+          const name = safeFileName(b.name); // 不合法／保留字直接 400（StoreError BAD_NAME）
+          if (b.kind !== 'rule' && b.kind !== 'ref') return json(400, { error: '要說明這份是規範還是參考' });
+          // content_b64 嚴格驗證（U1a 覆核）：Buffer.from 對壞 base64 寬鬆解碼不報錯，會把亂碼當內容存進去；型別錯也走同一句人話
+          if (typeof b.content_b64 !== 'string' || !/^[A-Za-z0-9+/]*={0,2}$/.test(b.content_b64) || b.content_b64.length % 4 !== 0) {
+            return json(400, { error: '檔案內容沒讀到，請重新選檔上傳' });
+          }
+          const buf = Buffer.from(b.content_b64, 'base64');
+          if (!buf.length) return json(400, { error: '檔案是空的' });
+          if (buf.length > 10 * 1024 * 1024) return json(400, { error: '檔案太大（上限 10MB）' });
+          const current = store.listShared(scope);
+          if ([...current.rules, ...current.refs].some((f) => f.name === name)) return json(409, { error: '已有同名檔，先刪再傳' });
+          let text = null;
+          if (b.kind === 'rule') {
+            try { text = await extractRuleText(buf, name); } catch (e) {
+              if (e instanceof SharedError) return json(400, { error: e.message });
+              throw e;
+            }
+            const problem = checkRuleLimits(text.length, current.rule_chars);
+            if (problem) return json(413, { error: problem });
+          }
+          store.addShared(scope, { name, kind: b.kind, buf, text });
+          return view();
+        }
+        if (segs.length === 5) {
+          const name = decodeURIComponent(segs[4]);
+          if (req.method === 'GET') {
+            const p = store.sharedFilePath(scope, name);
+            if (!p) return json(404, { error: `共用檔「${name}」不存在` });
+            res.writeHead(200, {
+              'content-type': 'application/octet-stream',
+              'content-disposition': `attachment; filename*=UTF-8''${encodeURIComponent(name)}`,
+            });
+            return res.end(fs.readFileSync(p));
+          }
+          if (req.method === 'DELETE') {
+            store.deleteShared(scope, name); // 不存在 → 404
+            return json(200, { ok: true, unlinked_steps: unlinkSharedAttachments(scope, name) });
+          }
+        }
+      }
+      // ===== 記憶輪：全域設定（設定頁六組的資料源）與備份 =====
+      if (segs[1] === 'settings' && segs.length === 2) {
+        if (req.method === 'GET') return json(200, { ...store.readSettings(), data_dir: dataDir, version: PKG_VERSION });
+        if (req.method === 'PUT') {
+          // 部分送也行：合到現況上再逐欄驗，一欄錯整份不落地。data_dir／version 是 GET 附帶的唯讀資訊，送回來也不收
+          const { data_dir: _d, version: _v, ...b } = await readBody(req);
+          const merged = deepMerge(store.readSettings(), b);
+          const problems = validateSettings(merged);
+          if (problems.length) return json(400, { error: problems.join('；') });
+          store.writeSettings(merged);
+          return json(200, merged);
+        }
+      }
+      if (segs[1] === 'backup' && segs.length === 2) {
+        if (req.method === 'GET') return json(200, store.listBackups());
+        if (req.method === 'POST') {
+          // 失敗只回人話（不透傳原始錯誤與本機路徑）；原始錯誤進 console
+          try { return json(200, store.backup()); } catch (e) {
+            console.error('[bojian] 備份失敗：', e.message);
+            return json(500, { error: BACKUP_ERRORS[e.code] ?? '備份沒做成，請再試一次' });
+          }
         }
       }
 
@@ -371,14 +772,17 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
           const [wc, ...wr] = String(b.workflow_id).split('/');
           const def = store.readWorkflow(wc, wr.join('/')); // 不存在 → 404
           // 有填的欄位保留原值交給 validator（健檢 M1：錯誤型別要被打回 400，不准被靜默改成別的設定）
+          // 記憶輪（M5b）：沒帶「錯過自動補」「提前提醒」就用設定頁「執行與排程」的預設（settings.exec）；設定讀不到→程式缺省，不擋建排程
+          let exec = DEFAULT_SETTINGS.exec;
+          try { exec = store.readSettings().exec; } catch (e) { console.error('[bojian] 設定檔讀不到，新排程用程式缺省：', e.message); }
           const sched = {
             id: `s-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
             name: b.name === undefined ? def.name : (typeof b.name === 'string' && b.name.trim() ? b.name.trim() : b.name),
             workflow_id: b.workflow_id, freq: b.freq,
             weekday: b.weekday ?? 1, day: b.day ?? 1, time: b.time ?? '08:00', at: b.at ?? null,
             enabled: b.enabled === undefined ? true : b.enabled,
-            auto_makeup: b.auto_makeup === undefined ? false : b.auto_makeup,
-            remind_leads: b.remind_leads === undefined ? [] : b.remind_leads,
+            auto_makeup: b.auto_makeup === undefined ? exec.auto_makeup === true : b.auto_makeup,
+            remind_leads: b.remind_leads === undefined ? structuredClone(Array.isArray(exec.remind_leads) ? exec.remind_leads : []) : b.remind_leads,
             overrides: {},
           };
           validateSchedule(sched); // 建立／更新共用同一套（健檢 P2-02）；錯 → 400 人話
@@ -513,46 +917,29 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
         const allUsage = store.readUsage();
         const byRun = {};
         const byRunCheck = {}; // 交貨查核輪：run 卡片附「查核 N token」，只算 kind==='check' 那幾筆
+        const byRunSup = {}; // 監工輪：同上，只算 kind==='supervisor'（開場、交接、收尾三種都在裡面）
         for (const u of allUsage) {
           if (!u.run) continue;
+          const inTok = (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0);
           const b = (byRun[u.run] ??= { input: 0, output: 0, cost: 0 });
-          b.input += (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0);
+          b.input += inTok;
           b.output += u.output_tokens ?? 0;
           b.cost += u.cost_usd ?? 0;
-          if (u.kind === 'check') {
-            const c = (byRunCheck[u.run] ??= { input: 0, output: 0 });
-            c.input += (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0);
-            c.output += u.output_tokens ?? 0;
+          const sub = u.kind === 'check' ? (byRunCheck[u.run] ??= { input: 0, output: 0 })
+            : u.kind === 'supervisor' ? (byRunSup[u.run] ??= { input: 0, output: 0 }) : null;
+          if (sub) {
+            sub.input += inTok;
+            sub.output += u.output_tokens ?? 0;
           }
         }
         const recent = store.listRecentRuns(limit).map((r) => {
           let run;
           try { run = store.readRun(r.category, r.id, r.runId); } catch { return null; } // 壞 run 檔不擋整頁
-          const finals = [];
-          for (const n of run.def?.nodes ?? []) {
-            if (outgoing(n).length) continue; // 終點步＝沒有出線的步
-            const s = run.steps?.[n.id];
-            if (!s || s.status !== 'done') continue;
-            const text = String(s.edited_output ?? s.output ?? '');
-            if (!text && !s.file) continue;
-            finals.push({ node: n.id, title: n.title, preview: text.slice(0, 400), file: s.file ?? null });
-          }
-          // 資料通道輪：終點是人做步驟（沒交內容）→ 成品回退到最後一個完成的 AI 步驟，別顯示「沒有成品」
-          if (!finals.length && run.status === 'done') {
-            const last = [...(run.def?.nodes ?? [])].reverse().find((n) => {
-              const s = run.steps?.[n.id];
-              return (n.kind ?? 'task') === 'task' && n.executor === 'ai' && s?.status === 'done' && (String(s.edited_output ?? s.output ?? '') || s.file);
-            });
-            if (last) {
-              const s = run.steps[last.id];
-              finals.push({ node: last.id, title: last.title, preview: String(s.edited_output ?? s.output ?? '').slice(0, 400), file: s.file ?? null });
-            }
-          }
-          const steps = Object.values(run.steps ?? {}).reduce(
-            (a, s) => ({ total: a.total + 1, done: a.done + (s.status === 'done' ? 1 : 0), failed: a.failed + (s.status === 'failed' ? 1 : 0) }),
-            { total: 0, done: 0, failed: 0 },
-          );
-          const usage = byRun[r.runId] ? { ...byRun[r.runId], check: byRunCheck[r.runId] ?? { input: 0, output: 0 } } : null;
+          const finals = finalsOf(run);
+          const steps = stepCountsOf(run);
+          const usage = byRun[r.runId]
+            ? { ...byRun[r.runId], check: byRunCheck[r.runId] ?? { input: 0, output: 0 }, supervisor: byRunSup[r.runId] ?? { input: 0, output: 0 } }
+            : null;
           return {
             category: r.category, id: r.id, name: run.workflow?.name ?? r.name, run_id: r.runId,
             status: run.status, source: run.source ?? 'manual', makeup: run.makeup === true,
@@ -561,7 +948,13 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
           };
         }).filter(Boolean);
         const sinceMs = now() - days * 86_400_000;
-        return json(200, { recent, usage: allUsage.filter((u) => new Date(u.at).getTime() >= sinceMs), usage_days: days });
+        // 記憶輪（M4）：「要你處理」第一列的數——到期＋休眠＋被取代（summary 的例外三格各數幾張；卡讀不到＝全 0，不擋儀表板）
+        let memoryEx = { expired: 0, dormant: 0, replaced: 0, total: 0 };
+        try {
+          const ex = memory.summary().exceptions;
+          memoryEx = { expired: ex.expired.length, dormant: ex.dormant.length, replaced: ex.replaced.length, total: ex.expired.length + ex.dormant.length + ex.replaced.length };
+        } catch (e) { console.error('[bojian] 儀表板的記憶例外數算不出來：', e.message); }
+        return json(200, { recent, usage: allUsage.filter((u) => new Date(u.at).getTime() >= sinceMs), usage_days: days, memory: { exceptions: memoryEx } });
       }
 
       if (segs[1] !== 'workflows') return json(404, { error: '找不到這個位址' });
@@ -570,14 +963,24 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
       if (segs.length === 2) {
         if (req.method === 'POST') {
           const body = await readBody(req);
-          // 產檔輪：親手建的流程預設開產檔權限（匯入走 /api/import/confirm，那邊一律關）
-          if (body.def && typeof body.def === 'object' && body.def.permissions === undefined) body.def.permissions = { files: true };
-          // 交貨查核輪：新建流程預設開查核（匯入不動，沿用缺省＝開）
-          if (body.def && typeof body.def === 'object' && body.def.check === undefined) body.def.check = { enabled: true };
-          validateWorkflow(body.def, { allowFloating: true });
+          // 新建流程一次補齊缺省（產檔權限、監工、查核、數字對原始資料、每步三個勾）——照設定頁「新流程的預設」；
+          // 設定檔讀不到就用程式缺省，不擋存檔（匯入走 /api/import/confirm，不套、產檔一律關）
+          let defaults;
+          try { defaults = store.readSettings().defaults; } catch (e) { console.error('[bojian] 設定檔讀不到，新流程用程式缺省：', e.message); }
+          const newDef = applyDefaults(body.def, { mode: 'create', defaults });
+          validateWorkflow(newDef, { allowFloating: true });
+          delete newDef.category; // 拆解器草稿的頂層 category 只是「放哪」：分類是路徑，不進 workflow.yaml
           const id = `wf-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-          store.writeWorkflow(body.category, id, body.def); // 分類名過 store 護欄，`../x` 這類直接 400
-          return json(200, { category: body.category, id });
+          store.writeWorkflow(body.category, id, newDef); // 分類名過 store 護欄，`../x` 這類直接 400
+          // 詞典自己長（記憶輪）：欄位名對不上詞典就新建一條（記從哪條流程長出來）；像同一件事的提醒一句，不擋、不寫
+          let dict_similar = [];
+          try {
+            const dict = store.readDict();
+            const { dict: next, added } = ensureFields(dict, newDef.params, { category: body.category, workflow: id }, nowIso());
+            dict_similar = [...new Set(added.flatMap((f) => similarFields(dict, f.name)))];
+            if (added.length) store.writeDict(next);
+          } catch (e) { console.error('[bojian] 詞典沒更新（不擋存檔）：', e.message); }
+          return json(200, { category: body.category, id, dict_similar });
         }
         if (req.method === 'GET') return json(200, store.listWorkflows());
       }
@@ -600,8 +1003,11 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
         if (req.method === 'PUT') {
           store.readWorkflow(category, id); // 不存在 → 404
           const body = await readBody(req);
-          validateWorkflow(body.def, { allowFloating: true });
-          const version = store.saveManualEdit(category, id, body.def); // 畫布／欄位編輯也進履歷（US-010）
+          // 監工輪：存檔只補監工與查核兩個主開關，不碰 check.facts——沒有那個欄位的既有流程缺省是開，
+          // 補一個 false 進去等於使用者沒動手就被關掉（save 模式的定義見 schema.applyDefaults）
+          const saveDef = applyDefaults(body.def, { mode: 'save' });
+          validateWorkflow(saveDef, { allowFloating: true });
+          const version = store.saveManualEdit(category, id, saveDef); // 畫布／欄位編輯也進履歷（US-010）
           return json(200, { ok: true, version });
         }
         if (req.method === 'GET') return json(200, store.readWorkflow(category, id));
@@ -663,12 +1069,26 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
       }
 
       if (segs[4] === 'runs') {
-        // GET /runs 清單（接回進行中用）
+        // GET /runs 清單（接回進行中用）；?detail=1（移植合併輪 U4a）每筆補 finished_at／steps／finals／files、started_at 倒序——流程頁右側「每次執行」用。
+        // 壞掉的 run.yaml：不帶 detail 跳過（三欄形狀不變、舊讀者不炸）；帶 detail 照列、標 status:'unreadable'＋人話 error、排最後
         if (segs.length === 5 && req.method === 'GET') {
-          return json(200, store.listRuns(category, id).map((rid) => {
-            const r = store.readRun(category, id, rid);
-            return { run_id: rid, status: r.status, started_at: r.started_at };
-          }));
+          const detail = new URL(req.url, 'http://localhost').searchParams.get('detail') === '1';
+          const rows = [];
+          for (const rid of store.listRuns(category, id)) {
+            let r;
+            try {
+              r = store.readRun(category, id, rid);
+              if (!r || typeof r !== 'object') throw new Error(`執行紀錄「${rid}」的檔案讀不懂（內容是空的或不是紀錄）`);
+            } catch (e) {
+              if (detail) rows.push({ run_id: rid, status: 'unreadable', error: e.message, started_at: null, finished_at: null, steps: { total: 0, done: 0, failed: 0 }, finals: [], files: store.listArtifacts(category, id, rid) });
+              continue;
+            }
+            rows.push(detail
+              ? { run_id: rid, status: r.status, started_at: r.started_at, finished_at: r.finished_at ?? null, steps: stepCountsOf(r), finals: finalsOf(r), files: store.listArtifacts(category, id, rid) }
+              : { run_id: rid, status: r.status, started_at: r.started_at });
+          }
+          if (detail) rows.sort((a, b) => String(b.started_at ?? '').localeCompare(String(a.started_at ?? '')));
+          return json(200, rows);
         }
         // POST /runs 開跑（開跑前健檢：宿主可用？流程檔讀得懂？——US-013／Error Map）
         if (segs.length === 5 && req.method === 'POST') {
@@ -689,7 +1109,10 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
           if (blocks.length) {
             return json(409, { error: `開跑前健檢：有 ${blocks.length} 處要先修，修好再按開始`, issues: [...blocks, ...pf.issues.filter((i) => i.level !== 'block')] });
           }
-          const run = runner.startRun(category, id, body.overrides ?? {}); // 讀檔＋驗定義，壞檔在這裡被擋
+          // 記憶輪（M2）：開跑表單點的習慣卡、點了又改掉的、帶的身分，原樣進 run.memory（M3b 才有介面送這三欄）
+          const run = runner.startRun(category, id, body.overrides ?? {}, {
+            memoryPicks: body.memory_picks ?? {}, memoryChanged: body.memory_changed ?? [], memoryIdentity: body.memory_identity ?? null,
+          }); // 讀檔＋驗定義，壞檔在這裡被擋
           kick(category, id, run.run_id);
           return json(200, run);
         }
@@ -753,6 +1176,9 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
             // 交貨查核輪：停點改過就順手擬「後面每步要守的規則」；擬不出來 deriveEditRules 自己退成預設，這裡只防萬一丟錯，不擋這次修改
             try { await runner.deriveEditRules(category, id, runId, body.node); } catch (e) { console.error('[bojian] 擬規則失敗（不擋修改）：', e.message); }
             runner.resume(category, id, runId); // 規則寫進檔案了才放行（裁定 28）——在這之前 GET run 看到的是 paused，不會把下游先放出去
+            // 記憶輪（M2）記路②：放行後另起一條，不等它（optimizer 的訊號 B 是另一回事，各記各的）；門面自己接住錯，這裡只防萬一
+            memory.onStopEdit({ category, id, runId, node: body.node, note: body.note ?? null })
+              .catch((e) => console.error('[bojian] 記憶（停點）沒記成：', e.message));
           }
           else if (action === 'human-done') runner.completeHuman(category, id, runId, body.node, body.feedback ?? null, body.content ?? null); // content＝交給下一步的內容（資料通道輪）
           else if (action === 'retry') runner.retry(category, id, runId, body.node);
@@ -764,13 +1190,21 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
           else if (action === 'check-retry') runner.checkRetry(category, id, runId, body.node, body.note ?? null); // 查核攔下：回話重做（查核輪）
           else if (action === 'check-accept') runner.checkAccept(category, id, runId, body.node); // 查核攔下：就這樣過（查核輪）
           else if (action === 'edit-rules') runner.setEditRules(category, id, runId, body.node, body.rules); // 查核卡上使用者自己改規則（查核輪）
+          else if (action === 'interject') {
+            // 插話（監工輪）：只把話留下來等下一次交接消化——不推進流程，所以不 kick()，自己 return
+            if (typeof body.text !== 'string' || !body.text.trim()) return json(400, { error: '要先寫一句要交代的話' });
+            runner.interject(category, id, runId, body.node, body.text);
+            return json(200, store.readRun(category, id, runId));
+          }
           else if (action === 'run-feedback') {
             const run = store.readRun(category, id, runId);
             run.feedback = body.text;
             store.writeRun(category, id, runId, run);
-            optimizer.analyze(category, id, { feedback: body.text })
+            optimizer.analyze(category, id, { feedback: body.text, ...logPair('optimize', `-${category}-${id}`) })
               .catch((e) => console.error('[bojian] 提議產生失敗（下次一起看）：', e.message));
-            return json(200, { ok: true });
+            // 記憶輪（M2）記路③：另起一條、等它回一句通知隨 200 回去（optimizer 那條不等、也不知道它）；門面失敗只回 fail 通知
+            const memory_notice = await memory.onFeedback({ category, id, runId, text: body.text });
+            return json(200, { ok: true, memory_notice });
           }
           else return json(404, { error: '找不到這個動作' });
           kick(category, id, runId);
@@ -811,6 +1245,7 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
     start(port, { tickMs = 60_000 } = {}) {
       seedExamples(store, examplesDir);
       try { store.purgeTrash(30); } catch (e) { console.error('[bojian] 垃圾桶清理失敗：', e.message); }
+      try { store.purgeMemoryTrash(30); } catch (e) { console.error('[bojian] 記憶垃圾桶清理失敗：', e.message); }
       scheduler.start(tickMs); // 排程器 tick（ADR-005：server 內建、每分鐘、冪等）
       return new Promise((resolve) => server.listen(port, '127.0.0.1', resolve));
     },
