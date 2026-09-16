@@ -109,7 +109,7 @@
     }
     const cls = n.executor === 'human' ? ' human' : n.stop_point === 'always' ? ' hold' : '';
     const badges = [
-      `<span class="chip ${n.executor === 'human' ? 'violet' : 'blue'}" style="font-size:10px">${n.executor === 'human' ? '你來' : 'AI'}</span>`,
+      `<span class="chip" style="font-size:10px">${n.executor === 'human' ? '<i class="ph ph-user"></i>你來' : 'AI'}</span>`,
       n.stop_point === 'always' ? '<span class="chip amber" style="font-size:10px"><i class="ph-fill ph-hand-pointing"></i>停</span>' : '',
     ].join(' ');
     return `<div class="node${cls}${sel}" data-node="${esc(n.id)}" ${at}>${pin}${pout}<b>${esc(n.title)}</b><div class="badges">${badges}</div></div>`;
