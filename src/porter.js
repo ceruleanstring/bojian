@@ -29,18 +29,18 @@ export function parseImport(text) {
   try {
     doc = yaml.load(text);
   } catch {
-    throw new PorterError('這不是剝繭流程檔，或已損壞——請對方重新匯出一份');
+    throw new PorterError('這不是剝繭 Workflow 檔，或已損壞——請對方重新匯出一份');
   }
   if (!doc || typeof doc !== 'object' || doc.bojian_export === undefined) {
-    throw new PorterError('這不是剝繭流程檔，或已損壞——請對方重新匯出一份');
+    throw new PorterError('這不是剝繭 Workflow 檔，或已損壞——請對方重新匯出一份');
   }
   if (doc.bojian_export !== EXPORT_FORMAT) {
-    throw new PorterError(`這份流程檔的格式版本（${doc.bojian_export}）比這個剝繭認得的新——先更新剝繭再匯入`);
+    throw new PorterError(`這份 Workflow 檔的格式版本（${doc.bojian_export}）比這個剝繭認得的新——先更新剝繭再匯入`);
   }
   try {
     validateWorkflow(doc.workflow, { allowFloating: true }); // 別人編輯到一半匯出的檔也收；開跑才嚴格
   } catch (e) {
-    if (e instanceof SchemaError) throw new PorterError(`流程檔內容不完整：${e.problems.slice(0, 3).join('；')}`);
+    if (e instanceof SchemaError) throw new PorterError(`Workflow 檔內容不完整：${e.problems.slice(0, 3).join('；')}`);
     throw e;
   }
   // 產檔輪定案：匯入的流程一律關產檔權限——寫檔與執行程式的能力只給你親手打開的流程

@@ -33,7 +33,7 @@ function setup() {
   store.writeWorkflow('工作', 'wf', DEF);
   const adapter = fakeAdapter();
   const opt = createOptimizer({ store, adapter });
-  return { store, adapter, opt };
+  return { dir, store, adapter, opt };
 }
 
 function doneRun(store, params = {}, steps = {}) {
@@ -107,9 +107,9 @@ test('事後回饋：即時轉提議（AI 指認節點）；節點亂指→略�
 
 test('applyProposal：目標節點／參數已不存在 → 丟人話錯誤，不准靜默沒事', () => {
   const gone = { kind: 'node_instruction', change: { node_id: '沒這節點', node_title: '整理', new_instruction: 'x' } };
-  assert.throws(() => applyProposal(structuredClone(DEF), gone), /已經不在/);
+  assert.throws(() => applyProposal(structuredClone(DEF), gone), /已經不在了（Workflow 後來改過）/);
   const goneParam = { kind: 'param_default', change: { key: 'no_such', param_label: '講稿長度', new_default: 'x' } };
-  assert.throws(() => applyProposal(structuredClone(DEF), goneParam), /已經不在/);
+  assert.throws(() => applyProposal(structuredClone(DEF), goneParam), /已經不在了（Workflow 後來改過）/);
 });
 
 // ===== 監工輪 K5：訊號 D（監工建議）與 E（連兩趟同款交接） =====
@@ -224,4 +224,56 @@ test('applyProposal：參數改預設／節點換指示', () => {
   const p2 = { kind: 'node_instruction', change: { node_id: 'organize', new_instruction: '新指示' } };
   const d2 = applyProposal(structuredClone(DEF), p2);
   assert.equal(d2.nodes[0].instruction, '新指示');
+});
+
+// ── 2026-09-18 審查修正輪 ──────────────────────────────────────────────
+
+test('一個壞掉的 run.yaml 不准讓這條流程從此再也沒有提議', async () => {
+  const { dir, store, opt } = setup();
+  // 連續兩趟都把同一個欄位改成同一個值＝訊號 A，正常情況下會產生一條提議
+  doneRun(store, { script_length: '5 分鐘' });
+  doneRun(store, { script_length: '5 分鐘' });
+  // 另有一趟的檔案壞掉（id 取字典序最前，確保掃描時先碰到它）
+  store.writeRun('工作', 'wf', 'aaa-bad', { run_id: 'aaa-bad', status: 'done', params: {}, steps: {} });
+  // store 沒有對外暴露 run 目錄，路徑是自己組的——先斷言檔案真的在那裡，組錯就不會靜靜地假通過
+  const f = path.join(dir, 'workflows', '工作', 'wf', 'runs', 'aaa-bad', 'run.yaml');
+  assert.ok(fs.existsSync(f), `run.yaml 不在假設的路徑上：${f}`);
+  fs.writeFileSync(f, 'a: [這不是合法 yaml\n  b: "', 'utf8');
+
+  const res = await opt.analyze('工作', 'wf');
+
+  assert.equal(res.created, 1, '壞檔讓 analyze 整支炸掉——兩個呼叫端都只印一行「下次一起看」就吞掉，等於這條流程從此不再有提議');
+  assert.equal(store.readProposals()[0].kind, 'param_default');
+});
+
+test('跨 await 不准蓋掉使用者剛按的決定：analyze 寫回時要重讀最新佇列', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bojian-opt-'));
+  const store = createStore(dir);
+  store.writeWorkflow('工作', 'wf', DEF);
+  // 佇列裡本來有一筆待決提議
+  store.writeProposals([{
+    id: 'p-old', key: 'k-old', kind: 'node_instruction', status: 'pending', reject_count: 0,
+    workflow: { category: '工作', id: 'wf' }, change: { node_id: 'organize', new_instruction: '舊的' },
+  }]);
+
+  let acted = false;
+  const adapter = {
+    async complete() {
+      // AI 還在跑的這幾分鐘，使用者正在剛跑完的畫面上按「好」
+      if (!acted) {
+        acted = true;
+        const q = store.readProposals();
+        q[0].status = 'accepted';
+        store.writeProposals(q);
+      }
+      return ['好的。', '```yaml', 'node_id: organize', 'summary: 要不要短一點？', 'new_instruction: 照回饋改', '```'].join('\n');
+    },
+  };
+
+  const res = await createOptimizer({ store, adapter }).analyze('工作', 'wf', { feedback: '太長了' });
+
+  const after = store.readProposals();
+  assert.equal(after.find((p) => p.id === 'p-old').status, 'accepted', '使用者按過的決定被舊快照洗掉了');
+  assert.equal(res.created, 1, '新提議照樣要加進去');
+  assert.equal(after.length, 2, '只插不蓋：舊的留著、新的加上');
 });

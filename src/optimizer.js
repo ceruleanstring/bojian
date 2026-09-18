@@ -10,11 +10,11 @@ export function applyProposal(def, p) {
   // 目標不見了（流程後來改過）→ 明講，不准靜默沒事（零靜默失敗）
   if (p.kind === 'param_default') {
     const param = def.params.find((x) => x.key === p.change.key);
-    if (!param) throw new Error(`這條提議指的欄位「${p.change.param_label ?? p.change.key}」已經不在了（流程後來改過）——這條作廢`);
+    if (!param) throw new Error(`這條提議指的欄位「${p.change.param_label ?? p.change.key}」已經不在了（Workflow 後來改過）——這條作廢`);
     param.default = p.change.new_default;
   } else if (p.kind === 'node_instruction') {
     const node = def.nodes.find((n) => n.id === p.change.node_id);
-    if (!node) throw new Error(`這條提議指的步驟「${p.change.node_title ?? p.change.node_id}」已經不在了（流程後來改過）——這條作廢`);
+    if (!node) throw new Error(`這條提議指的步驟「${p.change.node_title ?? p.change.node_id}」已經不在了（Workflow 後來改過）——這條作廢`);
     node.instruction = p.change.new_instruction;
   }
   return def;
@@ -47,10 +47,15 @@ async function note(fn, value) {
 
 export function createOptimizer({ store, adapter }) {
   function lastDoneRuns(category, id, n = 5) {
-    return store.listRuns(category, id)
-      .map((rid) => store.readRun(category, id, rid))
-      .filter((r) => r.status === 'done')
-      .slice(-n);
+    const out = [];
+    for (const rid of store.listRuns(category, id)) {
+      // 壞掉的 run.yaml 只跳過這一筆：不擋的話 analyze 會整支 reject，兩個呼叫點都只印一行
+      // 「下次一起看」就吞掉——而壞檔一直在，這條流程從此再也不會有任何提議（同 scheduler 那條同型病）
+      let r;
+      try { r = store.readRun(category, id, rid); } catch { continue; }
+      if (r.status === 'done') out.push(r);
+    }
+    return out.slice(-n);
   }
 
   return {
@@ -161,8 +166,17 @@ export function createOptimizer({ store, adapter }) {
         }
       }
 
-      if (fresh.length) store.writeProposals([...queue, ...fresh]);
-      return { created: fresh.length };
+      if (!fresh.length) return { created: 0 };
+      // 跨 await 不准持有舊物件（runner.js 開頭那條寫入紀律）：analyze 中間是好幾趟數分鐘的 AI 呼叫，
+      // 而使用者這時正在剛跑完的畫面上按「好／不要」。把 await 之前的整包佇列寫回去會洗掉他的決定——
+      // 已接受的提議變回 pending、被再套用一次、版本多升一版；拒兩次靜音的規則也被打回（2026-09-18 審查）。
+      // 改成寫入時重讀最新、只插不蓋，順手擋掉這段期間別人已經加過的同 key。
+      const latest = store.readProposals();
+      const alive = new Set(latest.filter((p) => ['pending', 'muted', 'accepted', 'stale'].includes(p.status)).map((p) => p.key));
+      const ids = new Set(latest.map((p) => p.id));
+      const add = fresh.filter((p) => !ids.has(p.id) && !alive.has(p.key));
+      if (add.length) store.writeProposals([...latest, ...add]);
+      return { created: add.length };
     },
   };
 }

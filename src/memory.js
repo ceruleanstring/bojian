@@ -12,13 +12,15 @@ export const FIELD_KINDS = Object.freeze({
 export const SCOPE_LEVELS = Object.freeze(['all', 'category', 'workflow']);
 // 出處八種＋取代；認識卡只准前五種（步驟產出永遠不是認識卡的來源）
 export const SOURCE_KINDS = Object.freeze(['intro', 'chat', 'stop-note', 'run-params', 'stop-edit', 'feedback', 'group-box', 'manual', 'replace']);
-export const PROFILE_SOURCE_KINDS = Object.freeze(['intro', 'chat', 'stop-note', 'manual', 'replace']);
+// 認識卡只准這幾種出處＝「他自己打的字」（步驟產出永遠不是來源）。feedback 也是他自己打的字——
+// 跑完丟的那一句；沒有家的欄位改記成認識卡（2026-09-19 裁定）之後這條路變常態，標成 chat 等於天天誤導
+export const PROFILE_SOURCE_KINDS = Object.freeze(['intro', 'chat', 'stop-note', 'feedback', 'manual', 'replace']);
 // 認識卡層級：表達層（每步帶）｜內容層（按場合帶）
 export const PROFILE_LAYERS = Object.freeze(['expression', 'content']);
 // 當選項連續沒被選幾次→休眠（確認書 §十一 暫定數字）
 export const DORMANT_STREAK = 5;
 
-const SCOPE_MSG = '用在哪只能是全部、分類、流程';
+const SCOPE_MSG = '用在哪只能是全部、分類、Workflow';
 
 function deepFreeze(o) {
   for (const v of Object.values(o)) if (v && typeof v === 'object') deepFreeze(v);
@@ -37,6 +39,9 @@ export const FACTORY_DICT = deepFreeze({
     factory('語言', 'appearance', ['中英文']),
     factory('截止日', 'time', ['交期', '什麼時候要']),
     factory('產出檔類型', 'appearance', ['檔案格式']),
+    factory('型態', 'appearance', ['成品類型', '做成什麼']), // 拆法輪（契約 F）：成品卡七格對詞典正式名——型態／分段歸「產出的樣子」、範圍歸「範圍」，六類不加
+    factory('分段', 'appearance', ['段落', '章節']),
+    factory('範圍', 'range', ['期間', '涵蓋']),
   ],
 });
 
@@ -121,7 +126,7 @@ export function validateCard(card, dict = null) {
   }
   if (!SCOPE_LEVELS.includes(c.scope?.level)) out.push(SCOPE_MSG);
   const has = (v) => String(v ?? '').trim() !== '';
-  if (c.scope?.level === 'workflow' && !(has(c.scope.category) && has(c.scope.workflow))) out.push('用在流程時要指定分類和流程');
+  if (c.scope?.level === 'workflow' && !(has(c.scope.category) && has(c.scope.workflow))) out.push('用在 Workflow 時要指定分類和 Workflow');
   if (c.scope?.level === 'category' && !has(c.scope.category)) out.push('用在分類時要指定分類');
   if (!String(c.source?.quote ?? '').trim()) out.push('沒有出處的卡不存在');
   if (c.expires != null && !isDateOnly(c.expires)) out.push('有效期要是 YYYY-MM-DD');
@@ -520,6 +525,26 @@ export function createMemory({ store, adapter = null, now = () => Date.now() } =
 
   // 路由結果落地：習慣卡的欄位對不上詞典就先長出來（先寫詞典再寫卡）；認識卡的 field 只在詞典對得到時帶；
   // 每張過 validateCard 才寫，不合格的只留 console 一句。force='profile'＝不管路由怎麼判都成認識卡（「以後都」）
+  // 這一格有沒有「家」＝有沒有任何一條流程的開跑表單有這個欄位。習慣卡只在對得上的欄位下面出 chip，
+  // 沒有家的卡就永遠出不來。**不能拿詞典當判準**：詞典會累積路由自己發明出來的格，等於自己給自己開後門
+  // ——2026-09-19 實測踩到（第一次發明「住宿位置」進了詞典，之後每一張同格的卡都被判成「有家」）。
+  // 讀不到流程庫＝當作沒有家（寧可記成認識卡，至少帶得進工作單）。
+  function fieldHasHome(dict, field) {
+    const want = str(matchField(dict, field)?.name ?? field).trim();
+    if (!want) return false;
+    let list = [];
+    try { list = store.listWorkflows(); } catch { return false; }
+    for (const w of list) {
+      let def = null;
+      try { def = store.readWorkflow(w.category, w.id); } catch { continue; }
+      for (const p of arr(def?.params)) {
+        const label = str(p?.label).trim();
+        if (label && str(matchField(dict, label)?.name ?? label) === want) return true;
+      }
+    }
+    return false;
+  }
+
   function land(cards, { category, id, runId, node, quote, scopeFor, sourceFor, force = null }) {
     let dict = store.readDict();
     let dictChanged = false;
@@ -536,11 +561,21 @@ export function createMemory({ store, adapter = null, now = () => Date.now() } =
       };
       const hit = c.field ? matchField(dict, c.field) : null;
       if (c.bucket === 'habit') {
-        if (hit) input.field = hit.name;
-        else {
+        if (fieldHasHome(dict, c.field)) {
+          if (!hit) { dict = ensureFields(dict, [{ label: c.field, kind: c.kind }], { category, workflow: id }, at).dict; dictChanged = true; }
+          input.field = hit?.name ?? c.field;
+        } else {
+          // 沒有家的格＝沒有任何流程的開跑表單有這個欄位，做成習慣卡就沒有
+          // chip 的位置：開跑表單上永遠不會出現，通知卻已經說了「下次開跑當選項」。改記成認識卡內容層——
+          // 它講的本來就是偏好，按場合帶進每一步立刻有用（2026-09-19 劇本實走，裁示「這是記憶問題」）。
+          // 詞典照樣長那一格：拆解器看得到，以後的流程拆得出這個欄位，那時再由使用者設成開跑選項。
           dict = ensureFields(dict, [{ label: c.field, kind: c.kind }], { category, workflow: id }, at).dict;
           dictChanged = true;
+          input.bucket = 'profile';
+          input.layer = 'content';
           input.field = c.field;
+          input.scope = scopeFor('profile');
+          input.source = { ...input.source, kind: sourceFor('profile') };
         }
       } else {
         input.layer = c.layer;
@@ -574,6 +609,8 @@ export function createMemory({ store, adapter = null, now = () => Date.now() } =
   const failStamp = (e) => stamp({ kind: 'fail', card: null, text: failNote(humanReason(e)) });
   // 流程名（通知與虛線 chip 的「來自「某流程」」）：讀不到＝用 id
   const nameOf = (category, wfId) => { try { return store.readWorkflow(category, wfId)?.name || wfId; } catch { return wfId; } };
+  // 通知顯示用：分類名本身已以「分類」結尾（資料值「未分類」）就不再加尾綴，免得拼成「未分類分類」；資料值不動
+  const catText = (c) => (String(c ?? '').endsWith('分類') ? String(c ?? '') : `${c}分類`);
 
   // 這一趟每一步要帶的（M3a，runner 在 runUntilPause 開頭叫一次——卡、群組、欄位值都是趟級的，每步一樣）：
   // 選卡（暫停、身分、過期）→外圈蓋內圈→兩段文字＋這步用了哪幾條；picks＝開跑表單點的習慣卡（欄位 key→卡），
@@ -622,11 +659,11 @@ export function createMemory({ store, adapter = null, now = () => Date.now() } =
         const from = c.scope ?? {};
         if (from.level === 'workflow' && from.category === category) {
           c = widenScope(c, { level: 'category', category, why: '在第二條流程也被選了', now: at });
-          notices.push({ kind: 'widen', card: c.id, text: `「${c.text}」的範圍從「${nameOf(from.category, from.workflow)}」擴大到${category}分類：你在第二條流程也選了它。仍是選項，沒有升格` });
+          notices.push({ kind: 'widen', card: c.id, text: `「${c.text}」的範圍從「${nameOf(from.category, from.workflow)}」擴大到${catText(category)}：你在第二條 Workflow 也選了它。仍是選項，沒有升格` });
         } else {
-          const fromText = from.level === 'workflow' ? `「${nameOf(from.category, from.workflow)}」` : `${from.category}分類`;
+          const fromText = from.level === 'workflow' ? `「${nameOf(from.category, from.workflow)}」` : catText(from.category);
           c = widenScope(c, { level: 'all', why: '在別的分類也被選了', now: at });
-          notices.push({ kind: 'widen', card: c.id, text: `「${c.text}」的範圍從${fromText}擴大到全部流程：你在別的分類也選了它。仍是選項，沒有升格` });
+          notices.push({ kind: 'widen', card: c.id, text: `「${c.text}」的範圍從${fromText}擴大到全部 Workflow：你在別的分類也選了它。仍是選項，沒有升格` });
         }
       }
       store.writeCard(c);
@@ -721,7 +758,9 @@ export function createMemory({ store, adapter = null, now = () => Date.now() } =
         const notices = await routeAndLand({
           category, id, runId, node: '_memory', def: run.def, text, hint: 'feedback',
           scopeFor: (b) => (b === 'habit' ? { level: 'workflow', category, workflow: id } : { level: 'category', category }),
-          sourceFor: (b) => (b === 'habit' ? 'feedback' : 'chat'),
+          // 兩種 bucket 的出處都是 feedback：記憶頁把 chat 顯示成「聊天裡說的」，但這句話是跑完丟的一句結果。
+          // 沒有家的欄位改記成認識卡（2026-09-19 裁定）之後，這條路變成常態，標錯就是天天在誤導人
+          sourceFor: () => 'feedback',
           why: '你回報的',
         });
         return notices.map((n) => noteOnRun(category, id, runId, n))[0];

@@ -8,7 +8,11 @@ function fakeChild() {
   const child = new EventEmitter();
   child.stdout = new EventEmitter();
   child.stderr = new EventEmitter();
-  child.stdin = { written: '', write(s) { this.written += s; }, end() {} };
+  // 真 stream 有這兩支，假的也要有：stdout／stderr 要能定編碼（不然跨塊中文會被切壞），
+  // stdin 要能掛 'error'（EPIPE 沒人接會炸掉整個行程）
+  child.stdout.setEncoding = () => {};
+  child.stderr.setEncoding = () => {};
+  child.stdin = { written: '', write(s) { this.written += s; }, end() {}, on() {} };
   child.killed = false;
   child.kill = () => { child.killed = true; };
   return child;
@@ -113,7 +117,7 @@ test('claude 不存在（spawn error）→ HostError UNAVAILABLE，訊息是人�
   const adapter = createHostAdapter({ spawnFn: () => (child = fakeChild()) });
   const p = adapter.executeNode(NODE_ARGS);
   child.emit('error', Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' }));
-  await assert.rejects(p, (e) => e instanceof HostError && e.code === 'UNAVAILABLE' && e.message.includes('連不上 Claude'));
+  await assert.rejects(p, (e) => e instanceof HostError && e.code === 'UNAVAILABLE' && e.message.includes('連不上 Claude') && e.message.includes('你的 Workflow 庫都在，不會不見。'));
 });
 
 test('結束碼非 0 → HostError FAILED，附 stderr 摘要', async () => {
@@ -131,7 +135,7 @@ test('登入過期（訊息走 stdout、結束碼 1）→ HostError UNAVAILABLE�
   const p = adapter.executeNode(NODE_ARGS);
   child.stdout.emit('data', 'Failed to authenticate: OAuth session expired and could not be refreshed');
   child.emit('close', 1);
-  await assert.rejects(p, (e) => e instanceof HostError && e.code === 'UNAVAILABLE' && e.message.includes('登入'));
+  await assert.rejects(p, (e) => e instanceof HostError && e.code === 'UNAVAILABLE' && e.message.includes('登入') && e.message.includes('你的 Workflow 庫都在，不會不見。'));
 });
 
 test('逾時 → HostError TIMEOUT 並砍掉子行程', async () => {
@@ -639,4 +643,28 @@ test('U1b 覆核該修：規範內文行首 # 全部降一級（# → ##、#####
   assert.ok(prompt.includes('## 部門.md\n## 部門規範\n含稅。'));
   const h1 = prompt.split('\n').filter((l) => /^# /.test(l));
   assert.deepEqual(h1, ['# 這一步：整理歸納', '# 要求', '# 公司規範（每一步都照做；查核員也會對）', '# 部門規範（分類「旅遊」，同上）', '# 上一步的產出（你的輸入）'], '一級標題只剩系統段');
+});
+
+// ── 2026-09-18 審查修正輪：真子行程迴歸（假 stream 驗不到編碼，只有真的 pipe 才會分塊）──
+
+test('長中文產出不被切壞：stdout 跨 64KB 塊界的中文要原樣回來', async () => {
+  const { spawn } = await import('node:child_process');
+  const N = 60_000; // 「繭」3 bytes × 60000 ＝ 180KB，必定跨好幾個 64KB 塊界
+  // 真子行程：由它自己生字，避免把 180KB 塞進命令列（Windows 命令列有長度上限）
+  const code = `process.stdout.write(JSON.stringify({ type: 'result', result: '繭'.repeat(${N}) }))`;
+  const adapter = createHostAdapter({ spawnFn: () => spawn(process.execPath, ['-e', code]) });
+  const out = await adapter.complete({ prompt: 'x' });
+  assert.equal(out.includes('�'), false, 'stdout 出現 U+FFFD＝跨塊的中文被切壞了');
+  assert.equal(out.length, N, `產出長度應為 ${N}，實得 ${out.length}`);
+});
+
+test('子行程在工作單寫完前就死掉：回人話錯誤，不把行程炸掉', async () => {
+  const { spawn } = await import('node:child_process');
+  // 立刻結束、完全不讀 stdin 的子行程；工作單夠大才會留下沒排空的 write（EPIPE 的必要條件）
+  const adapter = createHostAdapter({ spawnFn: () => spawn(process.execPath, ['-e', 'process.exit(1)']) });
+  await assert.rejects(
+    () => adapter.complete({ prompt: 'x'.repeat(2_000_000) }),
+    (e) => e instanceof HostError,
+    '應回 HostError，而不是讓未捕捉的 stdin EPIPE 把整個行程帶走',
+  );
 });

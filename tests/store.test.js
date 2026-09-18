@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createStore, StoreError, DEFAULT_SETTINGS } from '../src/store.js';
+import { createStore, StoreError, DEFAULT_SETTINGS, safeFileName } from '../src/store.js';
 
 function tmpStore() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bojian-store-'));
@@ -35,6 +35,30 @@ test('listWorkflows 列出分類與名稱', () => {
   assert.equal(list[0].category, '範例');
   assert.equal(list[0].id, 'wf1');
   assert.equal(list[0].name, '測試流程');
+});
+
+test('排版輪 L5 ⑥：listWorkflows 每筆多 steps／human_steps（只數一般步驟；壞檔＝null）；舊欄位原樣、存檔格式不變', () => {
+  const { store, dir } = tmpStore();
+  const def = {
+    ...DEF,
+    nodes: [
+      { id: 'a', title: 'A', executor: 'ai', stop_point: 'never', instruction: '做A', next: ['b'] },
+      { id: 'b', kind: 'branch', title: '分岔', instruction: '看狀況', branches: [{ label: 'x', next: 'c' }, { label: 'y', next: 'd' }], next: [] },
+      { id: 'c', kind: 'task', title: 'C', executor: 'human', stop_point: 'never', instruction: '你做', next: [] },
+      { id: 'd', title: 'D', executor: 'ai', stop_point: 'never', instruction: '做D', next: [] },
+    ],
+  };
+  store.writeWorkflow('範例', 'wf1', def);
+  store.writeWorkflow('範例', 'old', DEF); // 舊資料（只有一步、沒有任何新欄位）照樣列
+  store.writeWorkflow('範例', 'bad', DEF);
+  const yamlBefore = fs.readFileSync(path.join(dir, 'workflows', '範例', 'old', 'workflow.yaml'), 'utf8');
+  fs.writeFileSync(path.join(dir, 'workflows', '範例', 'bad', 'workflow.yaml'), 'a: [沒關括號', 'utf8');
+  const byId = Object.fromEntries(store.listWorkflows().map((w) => [w.id, w]));
+  assert.deepEqual(byId.wf1, { category: '範例', id: 'wf1', name: '測試流程', steps: 3, human_steps: 1 });
+  assert.deepEqual(byId.old, { category: '範例', id: 'old', name: '測試流程', steps: 1, human_steps: 0 });
+  assert.deepEqual(byId.bad, { category: '範例', id: 'bad', name: 'bad', steps: null, human_steps: null }, '壞檔仍列出，步數 null');
+  assert.equal(fs.readFileSync(path.join(dir, 'workflows', '範例', 'old', 'workflow.yaml'), 'utf8'), yamlBefore, '列清單不改檔');
+  assert.deepEqual(store.readWorkflow('範例', 'old'), DEF, '定義檔讀回原樣（沒被塞步數欄位）');
 });
 
 test('損壞的 workflow.yaml → StoreError CORRUPT，訊息是人話', () => {
@@ -327,11 +351,11 @@ test('記憶卡：寫後讀回一致、無暫存檔殘留；兩本帳各自一�
   assert.deepEqual(store.listCards('habit').length, 2, '壞檔不列、也不炸');
 });
 
-test('詞典：缺檔回出廠七條（version 1、語氣含口吻、created_at 有值）；寫後讀回；壞檔明確報錯', () => {
+test('詞典：缺檔回出廠十條（version 1、語氣含口吻、created_at 有值）；寫後讀回；壞檔明確報錯', () => {
   const { store, dir } = tmpStore();
   const dict = store.readDict();
   assert.equal(dict.version, 1);
-  assert.equal(dict.fields.length, 7);
+  assert.equal(dict.fields.length, 10);
   assert.ok(dict.fields.find((f) => f.name === '語氣').synonyms.includes('口吻'));
   assert.ok(dict.fields.every((f) => typeof f.created_at === 'string'));
   assert.equal(fs.existsSync(path.join(dir, 'memory', 'dict.yaml')), false, '只讀不落地');
@@ -456,6 +480,53 @@ test('備份：同層 <basename>-backups/<ts>/ 整份複製、含 memory/、不�
   }
 });
 
+// 多組織：造一個資料根（orgs.json＋orgs/main＋orgs/org-x），回 { rootDir, orgDir }
+function tmpOrgRoot() {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bojian-root-'));
+  fs.mkdirSync(path.join(rootDir, 'orgs', 'main'), { recursive: true });
+  fs.mkdirSync(path.join(rootDir, 'orgs', 'org-x'), { recursive: true });
+  fs.writeFileSync(path.join(rootDir, 'orgs.json'), JSON.stringify({ orgs: [{ id: 'main' }, { id: 'org-x' }] }));
+  fs.writeFileSync(path.join(rootDir, 'orgs', 'org-x', 'mark.txt'), 'x');
+  return { rootDir, orgDir: path.join(rootDir, 'orgs', 'main') };
+}
+
+test('多組織備份：帶 root 時備的是整個資料根（含 orgs.json 與全部組織夾），不含 .tmp- 與備份夾自己', () => {
+  const { rootDir, orgDir } = tmpOrgRoot();
+  const backupsRoot = `${rootDir}-backups`;
+  try {
+    const store = createStore(orgDir, { root: rootDir });
+    store.writeWorkflow('範例', 'wf1', DEF);
+    fs.writeFileSync(path.join(rootDir, 'orgs.json.tmp-999'), 'half');
+    const { path: dest } = store.backup();
+    assert.equal(path.dirname(dest), backupsRoot);
+    assert.ok(fs.existsSync(path.join(dest, 'orgs.json')), '含 orgs.json');
+    assert.ok(fs.existsSync(path.join(dest, 'orgs', 'main', 'workflows', '範例', 'wf1', 'workflow.yaml')), '含 main 組織');
+    assert.ok(fs.existsSync(path.join(dest, 'orgs', 'org-x', 'mark.txt')), '含其他組織');
+    assert.equal(fs.existsSync(path.join(dest, 'orgs.json.tmp-999')), false, '不含暫存檔');
+    assert.equal(fs.existsSync(path.join(dest, path.basename(backupsRoot))), false, '不含備份夾自己');
+    assert.equal(store.listBackups().length, 1);
+  } finally {
+    fs.rmSync(backupsRoot, { recursive: true, force: true });
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+test('多組織備份：不帶 root 時 root＝dataDir，備份仍只備那一夾、落在 <dataDir>-backups/（舊行為不變）', () => {
+  const { rootDir, orgDir } = tmpOrgRoot();
+  const backupsRoot = `${orgDir}-backups`;
+  try {
+    const store = createStore(orgDir);
+    store.writeWorkflow('範例', 'wf1', DEF);
+    const { path: dest } = store.backup();
+    assert.equal(path.dirname(dest), backupsRoot);
+    assert.ok(fs.existsSync(path.join(dest, 'workflows', '範例', 'wf1', 'workflow.yaml')));
+    assert.equal(fs.existsSync(path.join(dest, 'orgs.json')), false, '備的是組織夾、不是資料根');
+  } finally {
+    fs.rmSync(backupsRoot, { recursive: true, force: true });
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
 // ---- 移植合併輪 U1a：共用檔儲存（data/shared/<scope>/{index.yaml,files/}）----
 test('U1a 共用檔：沒有夾＝空索引；加規範存 text_cache、加參考不存；同名 DUP；列表分兩類；刪除連檔帶索引；路徑與規範全文', () => {
   const { store, dir } = tmpStore();
@@ -506,6 +577,42 @@ test('U1a 共用檔：沒有夾＝空索引；加規範存 text_cache、加參�
   assert.throws(() => store.deleteShared('_company', '手冊.md'), (e) => e instanceof StoreError && e.code === 'NOT_FOUND');
 });
 
+// —— 拆法輪 B4 ⑥／契約 F：詞典補缺三條、settings.compose 缺省 ——
+test('B4 ⑥：舊 dict.yaml 只有七條→readDict() 十條、既有條 created_at 不變、新三條 origin factory 且 kind 對；已有同名「範圍」自訂條→不重複也不動；不落地', () => {
+  const { store, dir } = tmpStore();
+  const OLD = ['語氣', '長度', '格式', '讀者', '語言', '截止日', '產出檔類型'];
+  const oldFields = OLD.map((name) => ({ name, kind: 'appearance', synonyms: [], origin: 'factory', created_at: '2026-09-09T00:00:00.000Z' }));
+  fs.mkdirSync(path.join(dir, 'memory'), { recursive: true });
+  const yamlText = ['version: 1', 'fields:', ...oldFields.map((f) => `  - {name: ${f.name}, kind: ${f.kind}, synonyms: [], origin: factory, created_at: '${f.created_at}'}`)].join('\n');
+  fs.writeFileSync(path.join(dir, 'memory', 'dict.yaml'), yamlText, 'utf8');
+  const dict = store.readDict();
+  assert.equal(dict.fields.length, 10);
+  assert.deepEqual(dict.fields.slice(0, 7).map((f) => [f.name, f.created_at]), oldFields.map((f) => [f.name, f.created_at]), '既有條原樣、順序不變');
+  const added = dict.fields.slice(7);
+  assert.deepEqual(added.map((f) => [f.name, f.kind]), [['型態', 'appearance'], ['分段', 'appearance'], ['範圍', 'range']]);
+  assert.ok(added.every((f) => f.origin === 'factory' && typeof f.created_at === 'string' && f.created_at > '2026-09-10'));
+  assert.ok(added.find((f) => f.name === '型態').synonyms.includes('成品類型'));
+  assert.ok(added.find((f) => f.name === '範圍').synonyms.includes('期間'));
+  assert.equal(fs.readFileSync(path.join(dir, 'memory', 'dict.yaml'), 'utf8'), yamlText, '補缺只在讀出來的那份，不改檔');
+  // 已有同名自訂條：不重複、不動
+  const custom = { name: '範圍', kind: 'method', synonyms: ['哪一段'], origin: { category: '旅遊', workflow: 'wf-1' }, created_at: '2026-09-01T00:00:00.000Z' };
+  store.writeDict({ version: 1, fields: [...oldFields, custom] });
+  const d2 = store.readDict();
+  assert.equal(d2.fields.length, 10);
+  assert.equal(d2.fields.filter((f) => f.name === '範圍').length, 1);
+  assert.deepEqual(d2.fields.find((f) => f.name === '範圍'), custom);
+  assert.deepEqual(d2.fields.slice(8).map((f) => f.name), ['型態', '分段']);
+});
+
+test('B4 契約 F：DEFAULT_SETTINGS.compose 深等於 {confirm_shape:true}；舊 settings.json 沒 compose 讀回補上；寫 false 讀回 false', () => {
+  const { store, dir } = tmpStore();
+  assert.deepEqual(DEFAULT_SETTINGS.compose, { confirm_shape: true });
+  fs.writeFileSync(path.join(dir, 'settings.json'), JSON.stringify({ version: 1, memory: { paused: true } }), 'utf8');
+  assert.deepEqual(store.readSettings().compose, { confirm_shape: true }, '舊設定檔沒這鍵也補缺省');
+  store.writeSettings({ version: 1, compose: { confirm_shape: false } });
+  assert.equal(store.readSettings().compose.confirm_shape, false);
+});
+
 test('U1a 設定與分類：DEFAULT_SETTINGS 有 company_name 空字串、舊 settings.json 讀回補上；分類名不能是 _company', () => {
   const { store, dir } = tmpStore();
   assert.equal(DEFAULT_SETTINGS.company_name, '');
@@ -542,4 +649,331 @@ test('U1a 修正：safeFileName 擋 Windows 保留字（CON／PRN／AUX／NUL／
   assert.equal(fs.existsSync(path.join(dir, 'shared')), false, '一個都沒落地');
   for (const ok of ['CONTRACT.md', 'console.txt', 'COM10.md', 'lpt.md']) store.addShared('_company', { name: ok, kind: 'ref', buf: Buffer.from('x'), text: null });
   assert.equal(store.listShared('_company').refs.length, 4);
+});
+
+// —— 拆法輪 B0：分類改名（八處同步：流程夾／群組 yaml／共用夾／排程／提議／習慣卡與認識卡／身分／垃圾桶）＋復原擋門 ——
+function seedRename(store) {
+  store.writeWorkflow('旅遊', 'a', { ...DEF, name: '訂機票' });
+  store.writeWorkflow('工作', 'b', { ...DEF, name: '寫週報' });
+  const rid = store.newRunId();
+  store.writeRun('旅遊', 'a', rid, { run_id: rid, status: 'done', workflow: { category: '旅遊', id: 'a', name: '訂機票' } });
+  store.writeGroup('旅遊', { text: '旅遊守則' });
+  store.addShared('旅遊', { name: '規範.md', kind: 'rule', buf: Buffer.from('x'), text: '規範' });
+  store.writeSchedules([
+    { id: 's1', workflow_id: '旅遊/a', freq: 'daily', time: '08:00' },
+    { id: 's2', workflow_id: '工作/b', freq: 'daily', time: '09:00' },
+  ]);
+  store.writeProposals([
+    { id: 'p1', workflow: { category: '旅遊', id: 'a' }, status: 'pending' },
+    { id: 'p2', workflow: { category: '工作', id: 'b' }, status: 'pending' },
+  ]);
+  store.writeCard({ bucket: 'habit', id: 'h1', text: '簡短', scope: { level: 'category', category: '旅遊', workflow: null }, status: 'active' });
+  store.writeCard({ bucket: 'profile', id: 'pf1', text: '我是誰', scope: { level: 'workflow', category: '旅遊', workflow: 'a' }, status: 'active' });
+  // level:all 的卡就算 category 欄位殘留舊名也不動（只認 category／workflow 兩層）
+  store.writeCard({ bucket: 'habit', id: 'h2', text: '全域', scope: { level: 'all', category: '旅遊', workflow: null }, status: 'active' });
+  store.writeIdentities([{ id: 'i1', name: '業務', categories: ['旅遊', '工作'] }, { id: 'i2', name: '工程', categories: ['工作'] }]);
+  store.writeNotices([
+    { id: 'n1', type: 'step_failed', status: 'unread', run: { category: '旅遊', id: 'a', run_id: rid, node: 'n1' } },
+    { id: 'n2', type: 'step_failed', status: 'done', run: { category: '旅遊', id: 'a', run_id: rid, node: 'n1' } },
+    { id: 'n3', type: 'step_failed', status: 'unread', run: { category: '工作', id: 'b', run_id: 'r-x', node: 'n1' } },
+  ]);
+  return { rid };
+}
+
+test('B0 ①：renameCategory 搬流程夾、群組 yaml、共用夾到新名；舊名消失；listCategories 含新不含舊', () => {
+  const { store, dir } = tmpStore();
+  seedRename(store);
+  const moved = store.renameCategory('旅遊', '出差');
+  assert.equal(moved.workflows, 1);
+  assert.ok(fs.existsSync(path.join(dir, 'workflows', '出差', 'a', 'workflow.yaml')), '流程夾搬到新名');
+  assert.ok(!fs.existsSync(path.join(dir, 'workflows', '旅遊')), '舊流程夾不存在');
+  assert.ok(fs.existsSync(path.join(dir, 'memory', 'groups', '出差.yaml')), '群組 yaml 搬到新名');
+  assert.ok(!fs.existsSync(path.join(dir, 'memory', 'groups', '旅遊.yaml')));
+  const g = store.readGroup('出差');
+  assert.equal(g.text, '旅遊守則');
+  assert.equal(g.category, '出差', '群組檔內的 category 欄位也要改（server 詞典合併會拿它回寫檔名）');
+  assert.equal(store.readGroup('旅遊'), null);
+  assert.ok(fs.existsSync(path.join(dir, 'shared', '出差', 'index.yaml')), '共用夾搬到新名');
+  assert.ok(!fs.existsSync(path.join(dir, 'shared', '旅遊')));
+  assert.equal(store.listShared('出差').rules.length, 1);
+  const cats = store.listCategories();
+  assert.ok(cats.includes('出差') && !cats.includes('旅遊'), `listCategories=${cats}`);
+  assert.equal(store.readWorkflow('出差', 'a').name, '訂機票');
+  assert.equal(store.readWorkflow('工作', 'b').name, '寫週報', '別的分類不動');
+});
+
+test('B0 ②：排程 workflow_id 前綴、提議 workflow.category、習慣卡與認識卡 scope.category（level all 不動）、身分 categories 全同步；回各處筆數', () => {
+  const { store } = tmpStore();
+  seedRename(store);
+  const moved = store.renameCategory('旅遊', '出差');
+  assert.deepEqual(moved, { workflows: 1, schedules: 1, proposals: 1, cards: 2, identities: 1, notices: 1, trash: 0 });
+  const scheds = store.readSchedules();
+  assert.equal(scheds.find((s) => s.id === 's1').workflow_id, '出差/a');
+  assert.equal(scheds.find((s) => s.id === 's2').workflow_id, '工作/b', '其他分類的排程不動');
+  const props = store.readProposals();
+  assert.equal(props.find((p) => p.id === 'p1').workflow.category, '出差');
+  assert.equal(props.find((p) => p.id === 'p2').workflow.category, '工作');
+  assert.equal(store.readCard('habit', 'h1').scope.category, '出差', '習慣卡（分類層）');
+  assert.deepEqual(store.readCard('profile', 'pf1').scope, { level: 'workflow', category: '出差', workflow: 'a' }, '認識卡（流程層）');
+  assert.equal(store.readCard('habit', 'h2').scope.category, '旅遊', 'level:all 不動');
+  assert.deepEqual(store.readIdentities().map((i) => i.categories), [['出差', '工作'], ['工作']]);
+});
+
+test('B0 修正輪（第九處）：改名後未讀通知的 run.category 是新名（不然點「重試」拿舊分類找 run 回莫名的 404）；已處理的留痕不動、別的分類不動', () => {
+  const { store } = tmpStore();
+  seedRename(store);
+  assert.equal(store.renameCategory('旅遊', '出差').notices, 1);
+  const notices = store.readNotices();
+  assert.equal(notices.find((n) => n.id === 'n1').run.category, '出差', '未讀通知指到新分類');
+  assert.equal(notices.find((n) => n.id === 'n2').run.category, '旅遊', '已處理的通知是留痕，不動');
+  assert.equal(notices.find((n) => n.id === 'n3').run.category, '工作', '別的分類的通知不動');
+  assert.deepEqual(notices.map((n) => n.status), ['unread', 'done', 'unread'], '狀態不動');
+});
+
+test('B0 ③：歷史留舊名——run.yaml 的 workflow.category 與 history/v1.yaml 一字不動、不升版；readRun 從新路徑讀得到、舊路徑 NOT_FOUND', () => {
+  const { store, dir } = tmpStore();
+  const { rid } = seedRename(store);
+  const v1Before = fs.readFileSync(path.join(dir, 'workflows', '旅遊', 'a', 'history', 'v1.yaml'), 'utf8');
+  store.renameCategory('旅遊', '出差');
+  assert.equal(store.readRun('出差', 'a', rid).workflow.category, '旅遊', 'run.yaml 留舊名');
+  assert.equal(fs.readFileSync(path.join(dir, 'workflows', '出差', 'a', 'history', 'v1.yaml'), 'utf8'), v1Before, '履歷快照不動');
+  assert.deepEqual(store.listVersions('出差', 'a').map((v) => v.version), [1], '改分類名不升版');
+  assert.deepEqual(store.listRuns('出差', 'a'), [rid]);
+  assert.throws(() => store.readRun('旅遊', 'a', rid), (e) => e instanceof StoreError && e.code === 'NOT_FOUND');
+});
+
+test('B0 ④：擋門——空名、同名、_company、「未分類」（新或舊）、已存在、找不到舊分類、路徑符號各自 code；一個都沒落地', () => {
+  const { store, dir } = tmpStore();
+  seedRename(store);
+  store.createCategory('未分類');
+  const codeOf = (fn) => { try { fn(); } catch (e) { assert.ok(e instanceof StoreError, `要是 StoreError：${e.message}`); return e.code; } return null; };
+  assert.equal(codeOf(() => store.renameCategory('旅遊', '')), 'BAD_NAME');
+  assert.equal(codeOf(() => store.renameCategory('旅遊', '   ')), 'BAD_NAME');
+  assert.equal(codeOf(() => store.renameCategory('旅遊', undefined)), 'BAD_NAME');
+  assert.equal(codeOf(() => store.renameCategory('旅遊', '旅遊')), 'BAD_NAME');
+  assert.equal(codeOf(() => store.renameCategory('旅遊', '_company')), 'BAD_NAME');
+  assert.equal(codeOf(() => store.renameCategory('_company', '出差')), 'BAD_NAME');
+  assert.equal(codeOf(() => store.renameCategory('旅遊', '未分類')), 'BAD_NAME');
+  assert.equal(codeOf(() => store.renameCategory('未分類', '出差')), 'BAD_NAME');
+  assert.equal(codeOf(() => store.renameCategory('旅遊', '工作')), 'CONFLICT');
+  assert.equal(codeOf(() => store.renameCategory('沒有的', '出差')), 'NOT_FOUND');
+  assert.equal(codeOf(() => store.renameCategory('旅遊', '壞/名')), 'BAD_NAME');
+  assert.equal(codeOf(() => store.renameCategory('旅遊', '..')), 'BAD_NAME');
+  assert.throws(() => store.renameCategory('旅遊', ''), /名稱不可留空/);
+  assert.throws(() => store.renameCategory('旅遊', '旅遊'), /新舊名稱相同/);
+  assert.throws(() => store.renameCategory('旅遊', '_company'), /_company/);
+  assert.throws(() => store.renameCategory('旅遊', '未分類'), /「未分類」不能改名/);
+  assert.throws(() => store.renameCategory('未分類', '出差'), /「未分類」不能改名/);
+  assert.throws(() => store.renameCategory('旅遊', '工作'), /已有同名分類/);
+  assert.deepEqual(store.listCategories().sort(), ['工作', '旅遊', '未分類']);
+  assert.ok(!fs.existsSync(path.join(dir, 'workflows', '出差')));
+  assert.equal(store.readSchedules()[0].workflow_id, '旅遊/a');
+  assert.deepEqual(store.readIdentities()[0].categories, ['旅遊', '工作']);
+});
+
+test('B0 ⑤：中途失敗回滾——群組 yaml 搬不動（目標被資料夾佔住）→ 流程夾搬回舊名、新名不留、其他檔一字不動、丟 StoreError；讀壞檔在驗證階段就擋、什麼都沒搬', () => {
+  const { store, dir } = tmpStore();
+  seedRename(store);
+  fs.mkdirSync(path.join(dir, 'memory', 'groups', '出差.yaml', '占位'), { recursive: true });
+  const before = { scheds: JSON.stringify(store.readSchedules()), props: JSON.stringify(store.readProposals()), cards: JSON.stringify(store.listCards()), idn: JSON.stringify(store.readIdentities()), notices: JSON.stringify(store.readNotices()) };
+  assert.throws(() => store.renameCategory('旅遊', '出差'), (e) => e instanceof StoreError && e.code === 'RENAME_FAILED' && e.message.includes('放回'));
+  assert.ok(fs.existsSync(path.join(dir, 'workflows', '旅遊', 'a', 'workflow.yaml')), '流程夾回到舊名');
+  assert.ok(!fs.existsSync(path.join(dir, 'workflows', '出差')), '新名不留');
+  assert.ok(fs.existsSync(path.join(dir, 'memory', 'groups', '旅遊.yaml')), '群組 yaml 還在舊名');
+  assert.ok(fs.existsSync(path.join(dir, 'shared', '旅遊', 'index.yaml')), '共用夾沒動');
+  assert.equal(JSON.stringify(store.readSchedules()), before.scheds);
+  assert.equal(JSON.stringify(store.readProposals()), before.props);
+  assert.equal(JSON.stringify(store.listCards()), before.cards);
+  assert.equal(JSON.stringify(store.readIdentities()), before.idn);
+  assert.equal(JSON.stringify(store.readNotices()), before.notices);
+  assert.ok(store.listCategories().includes('旅遊'));
+  // 驗證階段：提議檔壞 → CORRUPT，三個目錄都沒搬
+  fs.rmSync(path.join(dir, 'memory', 'groups', '出差.yaml'), { recursive: true, force: true });
+  fs.writeFileSync(path.join(dir, 'proposals', 'queue.yaml'), 'a: [壞掉', 'utf8');
+  assert.throws(() => store.renameCategory('旅遊', '出差'), (e) => e instanceof StoreError && e.code === 'CORRUPT');
+  assert.ok(fs.existsSync(path.join(dir, 'workflows', '旅遊')) && !fs.existsSync(path.join(dir, 'workflows', '出差')));
+  assert.ok(fs.existsSync(path.join(dir, 'memory', 'groups', '旅遊.yaml')) && fs.existsSync(path.join(dir, 'shared', '旅遊')));
+});
+
+test('B0 ⑧：舊資料相容——沒有 schedules.json／提議檔／memory/／shared/／trash/／notices.json 時照樣改名，且不會把那些檔建出來', () => {
+  const { store, dir } = tmpStore();
+  store.writeWorkflow('旅遊', 'a', DEF);
+  const moved = store.renameCategory('旅遊', '出差');
+  assert.deepEqual(moved, { workflows: 1, schedules: 0, proposals: 0, cards: 0, identities: 0, notices: 0, trash: 0 });
+  assert.equal(store.readWorkflow('出差', 'a').name, DEF.name);
+  for (const p of ['schedules.json', 'notices.json', 'proposals', 'memory', 'shared', 'trash']) assert.ok(!fs.existsSync(path.join(dir, p)), `${p} 不該被建出來`);
+  // 空分類（沒有任何流程）也能改名
+  store.createCategory('空的');
+  assert.equal(store.renameCategory('空的', '還是空的').workflows, 0);
+  assert.ok(store.listCategories().includes('還是空的') && !store.listCategories().includes('空的'));
+});
+
+test('B0 ⑨：垃圾桶——改名後 meta.category 跟著改、復原落在新名底下；原分類消失的那筆 restoreTrash 丟 NO_CATEGORY、不新建分類、那筆還在；分類建回來就能復原', () => {
+  const { store, dir } = tmpStore();
+  store.writeWorkflow('旅遊', 'a', DEF);
+  const key = store.trashWorkflow('旅遊', 'a');
+  const moved = store.renameCategory('旅遊', '出差');
+  assert.equal(moved.trash, 1);
+  assert.equal(store.listTrash()[0].category, '出差', '垃圾桶列顯示新名');
+  const restored = store.restoreTrash(key);
+  assert.equal(restored.category, '出差');
+  assert.equal(store.readWorkflow('出差', restored.id).name, DEF.name);
+  assert.ok(!fs.existsSync(path.join(dir, 'workflows', '旅遊')), '舊分類沒被復活');
+  // 手寫一筆原分類已不存在的
+  const key2 = 'zz-消失的-x';
+  fs.mkdirSync(path.join(dir, 'trash', key2), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'trash', key2, 'workflow.yaml'), 'format: 1\nname: 舊的\nparams: []\nnodes: []\n', 'utf8');
+  fs.writeFileSync(path.join(dir, 'trash', key2, 'meta.yaml'), 'category: 消失的\nid: x\nname: 舊的\ntrashed_at: 2026-09-01T00:00:00.000Z\n', 'utf8');
+  assert.throws(() => store.restoreTrash(key2),
+    (e) => e instanceof StoreError && e.code === 'NO_CATEGORY' && e.message.includes('已經不在了') && e.message.includes('消失的'));
+  assert.ok(!fs.existsSync(path.join(dir, 'workflows', '消失的')), '不靜默新建分類');
+  assert.deepEqual(store.listTrash().map((t) => t.key), [key2], '那筆還在垃圾桶');
+  store.createCategory('消失的');
+  assert.deepEqual(store.restoreTrash(key2), { category: '消失的', id: 'x' });
+  assert.deepEqual(store.listTrash(), []);
+});
+
+test('B0 修正輪：改名版之後十分鐘內的畫布編輯不併入改名版——另記新版、改名版的 note 與 def 一字不動（「共用檔已刪除」那種註記版同理）', () => {
+  const { store } = tmpStore();
+  store.writeWorkflow('旅遊', 'a', DEF);
+  const renamed = { ...DEF, name: '新名' };
+  const vRename = store.saveRename('旅遊', 'a', renamed, DEF.name);
+  assert.equal(vRename, 2);
+  const edited = { ...renamed, nodes: [{ ...DEF.nodes[0], instruction: '做A（畫布改過）' }] };
+  const vEdit = store.saveManualEdit('旅遊', 'a', edited);
+  assert.equal(vEdit, 3, '改名版不准被併掉');
+  const snapRename = store.readVersion('旅遊', 'a', 2);
+  assert.equal(snapRename.diff_note, `改名：「${DEF.name}」→「新名」`);
+  assert.deepEqual(snapRename.def, renamed, '改名版的 def 還是改名當時那份');
+  assert.equal(store.readVersion('旅遊', 'a', 3).diff_note, '手動編輯（畫布／欄位）');
+  assert.deepEqual(store.readWorkflow('旅遊', 'a'), edited);
+  // 「手動編輯」之間照舊十分鐘合併（既有行為不變）
+  const again = { ...edited, nodes: [{ ...edited.nodes[0], instruction: '做A（又改）' }] };
+  assert.equal(store.saveManualEdit('旅遊', 'a', again), 3, '手動編輯之間仍合併同版');
+  assert.deepEqual(store.listVersions('旅遊', 'a').map((v) => v.diff_note), ['建立', `改名：「${DEF.name}」→「新名」`, '手動編輯（畫布／欄位）']);
+});
+
+// ---- 排版輪 L11（題 2 A）：本次上傳暫存區 data/uploads/<token>/<檔名>，開跑時搬進 runs/<rid>/in/ ----
+test('排版輪 L11 ②③⑦：暫存上傳——writeUpload 回 token、檔名護欄、readUpload、claimUpload 搬進該趟 in/ 並刪暫存、壞 token 讀不到、sweepUploads 清 24 小時沒用掉的', () => {
+  const { store, dir } = tmpStore();
+  store.writeWorkflow('旅遊', 'a', DEF);
+  for (const bad of ['../x.csv', 'a/b.csv', 'CON.csv', '']) assert.throws(() => store.writeUpload(bad, Buffer.from('x')), (e) => e.code === 'BAD_NAME', bad);
+  assert.equal(fs.existsSync(path.join(dir, 'uploads')) ? fs.readdirSync(path.join(dir, 'uploads')).length : 0, 0, '擋下的不落地');
+  const up = store.writeUpload('  三月.csv ', Buffer.from('a,b\n1,2'));
+  assert.match(up.token, /^[0-9a-f]{24}$/);
+  assert.equal(up.name, '三月.csv', '頭尾空白修掉');
+  assert.deepEqual({ ...store.readUpload(up.token), path: undefined }, { token: up.token, name: '三月.csv', size: 7, path: undefined });
+  assert.ok(store.readUpload(up.token).path.startsWith(path.join(dir, 'uploads', up.token)));
+  for (const t of ['..', '../uploads', 'zz', up.token.toUpperCase(), '0'.repeat(24)]) assert.equal(store.readUpload(t), null, t);
+  store.writeRun('旅遊', 'a', 'r-1', { run_id: 'r-1', status: 'running', steps: {} });
+  assert.equal(store.claimUpload(up.token, '旅遊', 'a', 'r-1'), '三月.csv');
+  const moved = path.join(dir, 'workflows', '旅遊', 'a', 'runs', 'r-1', 'in', '三月.csv');
+  assert.equal(fs.readFileSync(moved, 'utf8'), 'a,b\n1,2');
+  assert.equal(store.runInputPath('旅遊', 'a', 'r-1', '三月.csv'), moved);
+  assert.equal(store.runInputPath('旅遊', 'a', 'r-1', '沒有.csv'), null);
+  assert.equal(store.readUpload(up.token), null, 'token 用過即刪');
+  assert.ok(!fs.existsSync(path.join(dir, 'uploads', up.token)));
+  assert.throws(() => store.claimUpload(up.token, '旅遊', 'a', 'r-1'), (e) => e.code === 'NOT_FOUND');
+  // 24 小時沒用掉的清掉；新的留著
+  const old = store.writeUpload('舊.csv', Buffer.from('1'));
+  const fresh = store.writeUpload('新.csv', Buffer.from('2'));
+  const past = new Date(Date.now() - 25 * 3600e3);
+  fs.utimesSync(path.join(dir, 'uploads', old.token), past, past);
+  assert.equal(store.sweepUploads(), 1);
+  assert.equal(store.readUpload(old.token), null);
+  assert.ok(store.readUpload(fresh.token));
+});
+
+// ---- 排版輪 L13 附帶修（L11 覆核非阻擋兩條）：暫存代碼綁定發放的 Workflow；檔名含控制字元（NUL 等）走人話擋下 ----
+test('排版輪 L13 附帶①：writeUpload 帶發放對象→readUpload／claimUpload 對象不符＝找不到；不帶對象讀照舊；舊暫存（沒有綁定記號）照舊可用', () => {
+  const { store, dir } = tmpStore();
+  const up = store.writeUpload('三月.csv', Buffer.from('1,2'), { category: '旅遊', id: 'a' });
+  assert.deepEqual(fs.readdirSync(path.join(dir, 'uploads', up.token)).filter((n) => n !== 'owner..json'), ['三月.csv'], '暫存夾只多一個綁定記號');
+  assert.equal(store.readUpload(up.token).name, '三月.csv', '綁定記號不會被當成上傳檔');
+  assert.equal(store.readUpload(up.token, { category: '旅遊', id: 'a' }).name, '三月.csv');
+  assert.equal(store.readUpload(up.token, { category: '旅遊', id: 'b' }), null, '別條 Workflow 拿不到');
+  assert.equal(store.readUpload(up.token, { category: '別的', id: 'a' }), null, '別的分類同名 Workflow 也拿不到');
+  store.writeRun('旅遊', 'b', 'r-1', { run_id: 'r-1', status: 'running', steps: {} });
+  assert.throws(() => store.claimUpload(up.token, '旅遊', 'b', 'r-1'), (e) => e.code === 'NOT_FOUND', '挪用擋下');
+  assert.ok(store.readUpload(up.token), '擋下的不刪暫存');
+  store.writeRun('旅遊', 'a', 'r-2', { run_id: 'r-2', status: 'running', steps: {} });
+  assert.equal(store.claimUpload(up.token, '旅遊', 'a', 'r-2'), '三月.csv');
+  assert.deepEqual(fs.readdirSync(path.join(dir, 'workflows', '旅遊', 'a', 'runs', 'r-2', 'in')), ['三月.csv'], '綁定記號不跟著搬進該趟');
+  const legacy = store.writeUpload('舊.csv', Buffer.from('1'));
+  assert.equal(store.readUpload(legacy.token, { category: '旅遊', id: 'b' }).name, '舊.csv', '沒有綁定記號的舊暫存照舊');
+});
+
+// L13b（L13 覆核退回）：代碼綁的是「這條 Workflow」，不是它當時所在的分類——移分類／分類改名後照常能用；
+// id 不保證跨分類唯一（範例補種只看「範例」分類，移出去的範例下次開機會再種一份同 id），所以不能只比 id，改成搬家時把記號跟著改
+test('L13b：移分類、分類改名後綁定記號跟著走——自己照常能用、舊位置同 id 的別條拿不到；uploadProblem 分清「別條的」與「找不到」', () => {
+  const { store } = tmpStore();
+  store.writeWorkflow('旅遊', 'a', DEF);
+  store.writeWorkflow('旅遊', 'b', DEF);
+  const up = store.writeUpload('三月.csv', Buffer.from('1,2'), { category: '旅遊', id: 'a' });
+  const other = store.writeUpload('別條.csv', Buffer.from('1'), { category: '旅遊', id: 'b' });
+  store.moveWorkflow('旅遊', 'a', '行銷');
+  assert.equal(store.readUpload(up.token, { category: '行銷', id: 'a' })?.name, '三月.csv', '移分類後自己照常能用');
+  assert.equal(store.readUpload(other.token, { category: '旅遊', id: 'b' })?.name, '別條.csv', '沒搬的那條記號不動');
+  store.writeWorkflow('旅遊', 'a', DEF); // 舊位置又冒出同 id 的另一條（範例補種的情況）
+  assert.equal(store.readUpload(up.token, { category: '旅遊', id: 'a' }), null, '舊位置同 id 的別條拿不到');
+  store.renameCategory('行銷', '行銷部');
+  assert.equal(store.readUpload(up.token, { category: '行銷部', id: 'a' })?.name, '三月.csv', '分類改名後照常能用');
+  assert.equal(store.readUpload(up.token, { category: '行銷', id: 'a' }), null, '舊分類名不再認');
+  assert.equal(store.readUpload(other.token, { category: '旅遊', id: 'b' })?.name, '別條.csv', '別的分類的記號不動');
+  // 人話分兩種
+  assert.equal(store.uploadProblem(up.token, { category: '行銷部', id: 'a' }), null);
+  assert.match(store.uploadProblem(up.token, { category: '旅遊', id: 'b' }), /別條 Workflow/);
+  assert.match(store.uploadProblem('0'.repeat(24), { category: '旅遊', id: 'b' }), /找不到了（可能超過 24 小時被清掉）/);
+  store.writeRun('旅遊', 'b', 'r-1', { run_id: 'r-1', status: 'running', steps: {} });
+  assert.throws(() => store.claimUpload(up.token, '旅遊', 'b', 'r-1'), (e) => e.code === 'NOT_FOUND' && /別條 Workflow/.test(e.message), '挪用的訊息講「別條」');
+  store.writeRun('行銷部', 'a', 'r-2', { run_id: 'r-2', status: 'running', steps: {} });
+  assert.equal(store.claimUpload(up.token, '行銷部', 'a', 'r-2'), '三月.csv');
+});
+
+test('排版輪 L13 附帶②：safeFileName 擋控制字元（NUL、換行、tab 等）＝BAD_NAME 人話；一般中文與空白照收', () => {
+  const ctl = (c) => String.fromCharCode(c);
+  for (const bad of [`a${ctl(0)}.pdf`, `a${ctl(10)}.csv`, `a${ctl(9)}.txt`, `${ctl(31)}.md`, `x${ctl(127)}.csv`]) {
+    assert.throws(() => safeFileName(bad), (e) => e.code === 'BAD_NAME' && e.message.includes('看不見的控制字元'), JSON.stringify(bad));
+  }
+  assert.equal(safeFileName('三月 報表.csv'), '三月 報表.csv');
+  const { store, dir } = tmpStore();
+  assert.throws(() => store.writeUpload(`a${ctl(0)}.pdf`, Buffer.from('x')), (e) => e.code === 'BAD_NAME' && !e.message.includes(dir));
+});
+
+// ── 2026-09-18 審查修正輪 ──────────────────────────────────────────────
+
+test('搬分類：握著「分類/id」這把鍵的東西要跟著走（排程／提議／未讀通知）', () => {
+  const { store } = tmpStore();
+  store.writeWorkflow('行銷', 'wf-a', { format: 1, name: '週報', nodes: [] });
+  store.writeSchedules([
+    { id: 's1', workflow_id: '行銷/wf-a', enabled: true },
+    { id: 's2', workflow_id: '行銷/wf-b', enabled: true }, // 別條流程的排程不准動
+  ]);
+  store.writeProposals([{ id: 'p1', workflow: { category: '行銷', id: 'wf-a' }, status: 'pending' }]);
+  store.writeNotices([
+    { id: 'n1', status: 'unread', run: { category: '行銷', id: 'wf-a', run_id: 'r1' } },
+    { id: 'n2', status: 'done', run: { category: '行銷', id: 'wf-a', run_id: 'r0' } },
+  ]);
+
+  const counts = store.moveWorkflow('行銷', 'wf-a', '業務');
+
+  assert.equal(store.readWorkflow('業務', 'wf-a').name, '週報');
+  const scheds = store.readSchedules();
+  assert.equal(scheds.find((s) => s.id === 's1').workflow_id, '業務/wf-a', '排程沒跟著走＝每次到點都 start_failed');
+  assert.equal(scheds.find((s) => s.id === 's2').workflow_id, '行銷/wf-b', '別條流程的排程不准動');
+  assert.equal(store.readProposals()[0].workflow.category, '業務');
+  const nt = store.readNotices();
+  assert.equal(nt.find((x) => x.id === 'n1').run.category, '業務', '未讀通知要指得到現況');
+  assert.equal(nt.find((x) => x.id === 'n2').run.category, '行銷', '已處理的留痕不動');
+  assert.deepEqual(counts, { schedules: 1, proposals: 1, cards: 0, notices: 1 });
+});
+
+test('搬分類：目的地已有同名就整個不動（不做半套）', () => {
+  const { store } = tmpStore();
+  store.writeWorkflow('行銷', 'wf-a', { format: 1, name: '週報', nodes: [] });
+  store.writeWorkflow('業務', 'wf-a', { format: 1, name: '別人', nodes: [] });
+  store.writeSchedules([{ id: 's1', workflow_id: '行銷/wf-a', enabled: true }]);
+  assert.throws(() => store.moveWorkflow('行銷', 'wf-a', '業務'), (e) => e.code === 'CONFLICT');
+  assert.equal(store.readSchedules()[0].workflow_id, '行銷/wf-a', '擋下來時排程要原封不動');
+  assert.equal(store.readWorkflow('行銷', 'wf-a').name, '週報');
 });

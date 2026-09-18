@@ -5,7 +5,7 @@ import { DEFAULT_SETTINGS } from './store.js';
 
 export class SchemaError extends Error {
   constructor(problems) {
-    super(`流程定義有問題：${problems.join('；')}`);
+    super(`Workflow 定義有問題：${problems.join('；')}`);
     this.problems = problems;
   }
 }
@@ -43,7 +43,7 @@ export function validateWorkflow(def, { allowFloating = false } = {}) {
   const problems = [];
   if (!def || typeof def !== 'object') throw new SchemaError(['整份定義不是物件']);
   if (def.format !== 1) problems.push('format 必須是 1');
-  if (typeof def.name !== 'string' || !def.name.trim()) problems.push('缺 name（流程名稱）');
+  if (typeof def.name !== 'string' || !def.name.trim()) problems.push('缺 name（Workflow 名稱）');
   // 記憶輪：拆解器的草稿可帶頂層 category（放哪個分類）；這裡只驗型別，POST /api/workflows 存檔前剝掉（分類是路徑，不進 workflow.yaml）
   if (def.category !== undefined && typeof def.category !== 'string') problems.push('category 要是文字');
   // 流程權限（產檔輪）：files＝允許工人在這趟的產出資料夾寫檔與執行程式；沒帶＝關
@@ -82,6 +82,8 @@ export function validateWorkflow(def, { allowFloating = false } = {}) {
     if (p && p.hint !== undefined && typeof p.hint !== 'string') problems.push(`params[${i}] hint 要是文字`);
     // kind（記憶輪）：欄位性質六類，拆解器給、詞典長新欄位時沿用；沒給（含 null）＝詞典補成「做法」
     if (p && p.kind != null && !Object.hasOwn(FIELD_KINDS, p.kind)) problems.push(`params[${i}] kind 必須是 ${KIND_LIST}`);
+    // input（排版輪 L11，題 2 A）：'file'＝每次開跑上傳一個檔（只跟這一趟存）；缺省＝文字欄位（舊檔都沒有這個鍵）
+    if (p && p.input !== undefined && p.input !== 'file') problems.push(`params[${i}] input 只能是 file（每次上傳一個檔）`);
   });
 
   const nodes = Array.isArray(def.nodes) && def.nodes.length ? def.nodes : (problems.push('nodes 必須是非空陣列'), []);
@@ -97,6 +99,8 @@ export function validateWorkflow(def, { allowFloating = false } = {}) {
     const kind = nodeKind(n);
     if (!KINDS.includes(kind)) { problems.push(`節點「${n.id}」kind 必須是 task/branch/fork/join`); continue; }
     if (!Array.isArray(n.next)) problems.push(`${at} next 必須是陣列`);
+    // merge（排版輪 L13，題 1 A）：'any'＝任一條線到就開始；缺省＝等全部（舊檔都沒有這個鍵）
+    if (n.merge !== undefined && n.merge !== 'any') problems.push(`節點「${n.id}」merge 只能是 any（任一條到）`);
     if (kind === 'task') {
       if (!EXECUTORS.includes(n.executor)) problems.push(`節點「${n.id}」executor 必須是 ai 或 human`);
       if (!STOP_POINTS.includes(n.stop_point)) problems.push(`節點「${n.id}」stop_point 必須是 always 或 never`);
@@ -177,7 +181,7 @@ export function validateWorkflow(def, { allowFloating = false } = {}) {
       color.set(id, 2);
       return false;
     };
-    if (nodes.some((n) => cyc(n.id))) problems.push('流程有繞圈（某條路走回了前面的步驟）');
+    if (nodes.some((n) => cyc(n.id))) problems.push('Workflow 有繞圈（某條路走回了前面的步驟）');
     if (!allowFloating) {
       // 接進流程＝與第一顆節點連在同一張圖（不分方向）。多起點平行流程合法——
       // 執行引擎按「前面步驟都完成才開跑」推進，入度 0 的起點可以有多顆（健檢 P2-04；畫布同規則）
@@ -194,7 +198,7 @@ export function validateWorkflow(def, { allowFloating = false } = {}) {
       while (stack.length) {
         for (const t of adj.get(stack.pop()) ?? []) if (!reach.has(t)) { reach.add(t); stack.push(t); }
       }
-      for (const n of nodes) if (!reach.has(n.id)) problems.push(`斷鏈：「${n.title ?? n.id}」還沒接進流程`);
+      for (const n of nodes) if (!reach.has(n.id)) problems.push(`斷鏈：「${n.title ?? n.id}」還沒接進 Workflow`);
     }
   }
 
@@ -258,12 +262,12 @@ export function validateSettings(s) {
     chk(m.intro_done_at, (v) => v === null || typeof v === 'string', '介紹完成時間要是時刻文字或空');
   }
   const d = s.defaults;
-  chk(d, isObj, '設定的新流程預設格式不對');
+  chk(d, isObj, '設定的新 Workflow 預設格式不對');
   if (isObj(d)) {
-    chk(d.permissions_files, isBool, '新流程的產檔權限預設要是開或關');
-    chk(d.check_enabled, isBool, '新流程的每步都查預設要是開或關');
+    chk(d.permissions_files, isBool, '新 Workflow 的產檔權限預設要是開或關');
+    chk(d.check_enabled, isBool, '新 Workflow 的每步都查預設要是開或關');
     chk(d.check_facts, (v) => ['auto', 'on', 'off'].includes(v), '數字對原始資料的預設只能是 auto、on、off');
-    chk(d.supervisor_enabled, isBool, '新流程的監工預設要是開或關');
+    chk(d.supervisor_enabled, isBool, '新 Workflow 的監工預設要是開或關');
     chk(d.supervisor_flags, isObj, '設定的監工三個勾預設格式不對');
     if (isObj(d.supervisor_flags)) {
       for (const k of ['note', 'tier', 'tools']) chk(d.supervisor_flags[k], isBool, `監工三個勾的預設（${k}）要是開或關`);
@@ -278,6 +282,9 @@ export function validateSettings(s) {
     chk(e.remind_leads, isLeadList, `提前提醒的預設要是提前量清單（${REMIND_LEADS.join('/')} 或 {at: 時刻}）`);
     chk(e.web, isBool, '允許查網路要是開或關');
   }
-  chk(s.company_name, (v) => typeof v === 'string' && Array.from(v).length <= 60, '公司名稱要是文字、60 字內');
+  chk(s.company_name, (v) => typeof v === 'string' && Array.from(v).length <= 60, '組織名稱要是文字、60 字內');
+  const c = s.compose; // 拆法輪（契約 F）
+  chk(c, isObj, '設定的拆解格式不對');
+  if (isObj(c)) chk(c.confirm_shape, isBool, '拆之前先確認成品長相要是開或關');
   return out;
 }

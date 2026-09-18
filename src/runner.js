@@ -1,9 +1,10 @@
 // runner — run 生命週期（有向圖版，D14）：就緒集推進、平行併發、分岔判路、停點/人步暫停、checkpoint。
 // 寫入紀律：所有狀態變更走 update()（讀最新→改→原子存），跨 await 不持有舊物件——平行支不互相蓋寫。
 import fs from 'node:fs';
+import path from 'node:path';
 import { validateWorkflow, nodeKind, outgoing, OUTPUT_TIER2, OUTPUT_OFFICE } from './schema.js';
 import { predecessors, computeSkipped, ancestorIds } from './graph.js';
-import { inputSources } from './preflight.js';
+import { inputSources, uploadReaders } from './preflight.js';
 import { buildSources, extractFileText, runCheck, deriveEditRules as deriveRules } from './checker.js';
 import {
   supervisorFlags, buildRecordTable,
@@ -19,6 +20,25 @@ const BRANCH_FLAGS = { note: false, tier: false, tools: false };
 // {{欄位}} 引用；會代入欄位值的節點欄位（記憶輪：這一步引用到的欄位，其被選的習慣卡才算「這步用了」）
 const PARAM_REF = /\{\{\s*([\w-]+)\s*\}\}/g;
 const INJECTED_FIELDS = ['instruction', 'role_context', 'background', 'constraints', 'examples', 'review_focus', 'output_type', 'output_structure', 'output_length', 'output_tone', 'output_format'];
+
+// 拆法輪（契約 C）：每一步的輸入＝沿路全部祖先 task 的產出，總量上限 80,000 字（只借查核員的數字，不借它的切法）
+export const UPSTREAM_CAP = 80000;
+const UPSTREAM_PREFACE = '（沿路全部產出，最近的在前）';
+
+// 沿路產出的截斷（純函式）：parts＝[{title,text}] 最近在前。從最遠那段開始整段丟，丟到放得下為止；
+// 最近那段永遠留著（整段丟的政策不切半段，單段超量交給宿主）；丟過就在尾巴記名，工人知道少了哪幾步。
+export function capUpstream(parts, cap = UPSTREAM_CAP) {
+  const seg = (x) => `【${x.title}】\n${x.text}`;
+  const kept = parts.map(seg);
+  const dropped = [];
+  let total = kept.reduce((n, s) => n + s.length, 0);
+  while (total > cap && kept.length > 1) {
+    total -= kept.pop().length;
+    dropped.unshift(parts[kept.length].title);
+  }
+  const body = `${UPSTREAM_PREFACE}\n${kept.join('\n\n')}`;
+  return dropped.length ? `${body}\n（更早的產出已截斷：${dropped.join('、')}）` : body;
+}
 
 // 查核輪：長欄位值不代進句子——給了 sink 時，換行或超過 200 字的值不直接代入，
 // 改留一句指向「欄位內容」段的提示，原文收進 sink（Map，同一 key 只收一次）；不給 sink＝舊行為。
@@ -60,9 +80,46 @@ export function parseWhen(text) {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
+// 排版輪 L13（題 1 A）：任一條到。「到了」＝前驅沒被跳過、已完成，而且那條線是活的（前驅是分岔的話要選中這張卡）
+function arrivedPreds(run, nodeId, preds, skipped) {
+  const byId = new Map(run.def.nodes.map((n) => [n.id, n]));
+  return preds.filter((p) => !skipped.has(p) && run.steps[p]?.status === 'done'
+    && (nodeKind(byId.get(p) ?? {}) !== 'branch' || run.steps[p].choice === nodeId));
+}
+// 沿路全帶用的前驅表：開始過的任一條到卡只認 merge_from——沒趕上的線不進這張卡，也不經由它流進下游。沒有這種卡＝原表照用
+function livePreds(run, predMap = predecessors(run.def)) {
+  let out = predMap;
+  for (const [nid, s] of Object.entries(run.steps ?? {})) {
+    if (!Array.isArray(s?.merge_from) || !predMap.has(nid)) continue;
+    if (out === predMap) out = new Map(predMap);
+    out.set(nid, predMap.get(nid).filter((p) => s.merge_from.includes(p)));
+  }
+  return out;
+}
+
 // memory（記憶輪 M2，可省略）＝createMemory 門面：開跑後判「同值連兩趟」記習慣卡。門面炸了只留一句，run 照建
 export function createRunner({ store, adapter, now = () => Date.now(), memory = null }) {
   const load = (c, i, r) => store.readRun(c, i, r);
+
+  // 產出檔名：以步驟標題為主（使用者下載時看得懂），但標題既不保證唯一也不保證合法——
+  // ① schema 只驗標題非空、不驗重複，兩個同名步驟並行時會算出同一個絕對路徑，
+  //    後一步的 artifactOf 只比 {size, mtimeMs}，會把前一步剛寫好的檔案認成自己的成品送去查核；
+  // ② 標題結尾有句點會算出「名字..副檔名」，被 safeFileName 的 '..' 檢查擋掉，而且是在 AI 已經跑完、
+  //    錢已經花掉之後才炸，重試永遠失敗到使用者自己去改標題為止（2026-09-18 審查）。
+  // 只有真的撞名才加 id 後綴，單獨的標題維持原本的檔名，不動既有紀錄。
+  // 撞名要比「算出來的檔名」不是比標題：淨化會把 / : ? * 換成底線、砍掉結尾句點，
+  // 所以「月報/初稿」與「月報_初稿」、「月報.」與「月報」標題不同卻算出同一個檔名——
+  // 比標題的話 dup 是 false、不加後綴，上面 ① 那個病原封不動（2026-09-18 二次審查）。
+  const artifactBase = (node) => String(node.title ?? '')
+    .replace(/[\\/:*?"<>|]/g, '_')
+    .replace(/\.{2,}/g, '.')
+    .replace(/[.\s]+$/, '')
+    .trim() || node.id;
+  function artifactName(nodes, node, ext) {
+    const base = artifactBase(node);
+    const dup = (nodes ?? []).some((n) => n.id !== node.id && artifactBase(n) === base);
+    return `${dup ? `${base}-${node.id}` : base}.${ext}`;
+  }
 
   // D19：步驟輸出存成檔案。TIER2 未接工具鏈→降級 .md 並在 step.file_note 講明；有範本先填範本（{{參數}}＋{{output}}）
   function saveArtifact(category, id, runId, node, params, step, output, opts = {}) {
@@ -70,7 +127,7 @@ export function createRunner({ store, adapter, now = () => Date.now(), memory = 
     let ext = node.output_file ?? (node.template_file.includes('.') ? node.template_file.split('.').pop() : 'md');
     if (OUTPUT_OFFICE.includes(ext)) {
       // 產檔輪：Word／Excel 真檔由工人在產出資料夾做；走到這裡＝流程沒開產檔權限、或工人沒交出檔案 → 文字產出先存成 .md
-      step.file_note = opts.officeNote ?? `這條流程沒開產檔權限——.${ext} 先存成 .md；流程頁打開「允許這條流程產出檔案」就會產真檔`;
+      step.file_note = opts.officeNote ?? `這條 Workflow 沒開產檔權限——.${ext} 先存成 .md；Workflow 頁打開「允許這條 Workflow 產出檔案」就會產真檔`;
       ext = 'md';
     } else if (OUTPUT_TIER2.includes(ext)) {
       step.file_note = `.${ext} 的工具鏈這台還沒接——先存成 .md，內容已照你的格式要求`;
@@ -86,8 +143,7 @@ export function createRunner({ store, adapter, now = () => Date.now(), memory = 
         step.file_note = `範本「${node.template_file}」讀不到——先存原始產出`;
       }
     }
-    const fname = `${node.title.replace(/[\\/:*?"<>|]/g, '_')}.${ext}`;
-    step.file = store.writeArtifact(category, id, runId, fname, content);
+    step.file = store.writeArtifact(category, id, runId, artifactName(opts.nodes, node, ext), content);
   }
   function update(c, i, r, fn) {
     const run = load(c, i, r);
@@ -104,22 +160,25 @@ export function createRunner({ store, adapter, now = () => Date.now(), memory = 
     return m;
   };
 
-  // 節點的上游輸入：非跳過且完成的前驅之有效產出；多個時加標頭併排
+  // 節點的上游輸入（拆法輪，契約 C）：沿路全部祖先 task（非跳過、完成、有效產出非空）的產出，最近在前；
+  // 並行點／分岔天生不在清單（過濾 task）、同一步只出現一次（ancestorIds 的 seen）。
+  // 一個祖先＝原文不加標頭（現況）；兩個以上＝前言＋每段【步驟名】，超過 UPSTREAM_CAP 由遠而近整段丟、記名。
   function upstreamText(run, nodeId, skipped, predMap) {
     const byId = new Map(run.def.nodes.map((n) => [n.id, n]));
-    const parts = (predMap.get(nodeId) ?? [])
-      .filter((p) => !skipped.has(p) && run.steps[p].status === 'done')
+    const parts = ancestorIds(run, nodeId, livePreds(run, predMap))
+      .filter((p) => byId.has(p) && nodeKind(byId.get(p)) === 'task' && !skipped.has(p) && run.steps[p]?.status === 'done')
       .map((p) => ({ title: byId.get(p).title, text: effectiveOutput(run.steps[p]) }))
-      .filter((x) => x.text);
+      .filter((x) => x.text)
+      .reverse();
     if (parts.length === 0) return '';
     if (parts.length === 1) return parts[0].text;
-    return parts.map((x) => `【${x.title}】\n${x.text}`).join('\n\n');
+    return capUpstream(parts, UPSTREAM_CAP);
   }
 
   // 查核輪：查核要看的原始資料之一——所有祖先任務步驟的有效產出（拓樸序；結構節點與空產出不列）
   function ancestorsOf(run, nodeId, predMap) {
     const byId = new Map(run.def.nodes.map((n) => [n.id, n]));
-    return ancestorIds(run, nodeId, predMap)
+    return ancestorIds(run, nodeId, livePreds(run, predMap))
       .filter((p) => byId.has(p) && nodeKind(byId.get(p)) === 'task')
       .map((p) => ({ title: byId.get(p).title, text: effectiveOutput(run.steps[p] ?? {}) }))
       .filter((x) => x.text);
@@ -127,7 +186,7 @@ export function createRunner({ store, adapter, now = () => Date.now(), memory = 
 
   // 查核輪：上游停點改過後擬出來的規則，只有 scope='all' 的往下游帶（自己那一步不吃自己的）
   function editRulesFor(run, nodeId, predMap) {
-    return ancestorIds(run, nodeId, predMap)
+    return ancestorIds(run, nodeId, livePreds(run, predMap))
       .flatMap((p) => run.steps[p]?.edit_rules ?? [])
       .filter((rule) => rule && rule.scope === 'all');
   }
@@ -249,8 +308,15 @@ export function createRunner({ store, adapter, now = () => Date.now(), memory = 
       const params = {};
       for (const p of def.params) {
         const v = overrides[p.key];
-        params[p.key] = v === undefined || v === null || String(v).trim() === '' ? p.default : v;
+        const empty = v === undefined || v === null || String(v).trim() === '';
+        // 上傳欄位不准退回 default：default 常是「轉成上傳欄位之前」留下的說明文字（schema 不禁止非空 default，
+        // UI 勾「每次上傳檔案」也不清空它）。一退回，下面那道必填檔守門就永遠打不到——排程照跑、
+        // runInputPath 找不到檔靜默回 null 被濾掉，AI 在零資料下寫出一份標著「完成」的報告（2026-09-18 審查）
+        params[p.key] = empty ? (p.input === 'file' ? '' : p.default) : v;
       }
+      // 排版輪 L11（題 2 A）：必填的上傳欄位沒有檔＝不開跑（排程／通知「照跑」沒辦法替你上傳；呼叫端把這句發成通知）
+      const noFile = def.params.find((p) => p.input === 'file' && p.required === true && !String(params[p.key] ?? '').trim());
+      if (noFile) throw new Error(`「${noFile.label}」每次開跑都要上傳一個檔，這一趟沒有檔——排程沒辦法替你上傳，請到 Workflow 的「本次資料」選檔後按開始`);
       // 前一趟（記憶輪：記路①「開跑同值連兩趟」與記路②「停點連兩趟」都對它比）——不限狀態，依 started_at 判：
       // run id 同秒只差亂數尾碼，字典序不等於先後（覆核探針：同秒兩趟選錯機率近半），所以尾端幾筆逐一讀開跑時間取最晚的
       const runId = store.newRunId();
@@ -264,6 +330,10 @@ export function createRunner({ store, adapter, now = () => Date.now(), memory = 
         source: opts.source ?? 'manual', // manual｜schedule（D20）
         makeup: opts.makeup === true || undefined, // 錯過補跑標記（行事曆標「補」）
         params,
+        ...(typeof opts.note === 'string' && opts.note.trim() ? { note: opts.note } : {}), // 排版輪 L11（題 3f）：本次補充；沒有＝不加鍵（舊 run 形狀不變）
+        // 大跑輪：本次附件＝檔案版的本次補充（不綁欄位，這一趟每個 AI 步驟都看得到）；檔名由 store.claimUpload 洗過，這裡只記名
+        ...(Array.isArray(opts.runFiles) && opts.runFiles.some((x) => typeof x === 'string' && x)
+          ? { run_files: opts.runFiles.filter((x) => typeof x === 'string' && x) } : {}),
         started_at: new Date().toISOString(),
         finished_at: null,
         shared: sharedSnapshot(category), // 三層共用檔：兩層規範的開跑快照（鎖版本）；舊 run 沒有這欄＝不帶
@@ -301,6 +371,16 @@ export function createRunner({ store, adapter, now = () => Date.now(), memory = 
       const def = run.def; // 定義快照，整趟不變——labels／predMap／監工開關都只算一次
       const labels = Object.fromEntries((def.params ?? []).map((p) => [p.key, p.label])); // 查核輪：長欄位提示語要用的欄位標籤
       const predMap = predecessors(def);
+      // 排版輪 L11（題 2 A）：本次上傳的檔（runs/<rid>/in/）只掛給沒有 AI 祖先的 AI 步驟；舊 run／沒有上傳欄位＝空
+      const uploadFiles = def.params?.some((p) => p.input === 'file') ? def.params.filter((p) => p.input === 'file').map((p) => {
+        try { return run.params?.[p.key] ? store.runInputPath(category, id, runId, run.params[p.key]) : null; } catch { return null; }
+      }).filter(Boolean) : [];
+      const uploadReaderIds = new Set(uploadFiles.length ? uploadReaders(def) : []);
+      const uploadsFor = (node) => (uploadReaderIds.has(node.id) ? uploadFiles : []);
+      // 大跑輪：本次附件（run.run_files）不綁欄位，比照「本次補充」每個 AI 步驟都看得到；舊 run 沒這欄＝空
+      const runFiles = (run.run_files ?? []).map((n) => {
+        try { return store.runInputPath(category, id, runId, n); } catch { return null; }
+      }).filter(Boolean);
       const supervisorOn = def.supervisor?.enabled !== false; // 監工缺省＝開（只管備註、派工、紀錄；判路不歸它管）
       // 全域設定（記憶輪）：節點沒設的檔位／重試／查網用它補；讀不到＝程式缺省
       let settings = {};
@@ -361,7 +441,7 @@ export function createRunner({ store, adapter, now = () => Date.now(), memory = 
         if (!isBranch && !(supervisorOn && hasUpstream && (flags.note || flags.tier || flags.tools))) return started;
         // 跨 await 前先取值——await 期間平行支會改寫同一份 run
         const byId = new Map(def.nodes.map((n) => [n.id, n]));
-        const ups = (predMap.get(node.id) ?? [])
+        const ups = (livePreds(started, predMap).get(node.id) ?? [])
           .filter((p) => started.steps[p]?.status === 'done')
           .map((p) => ({ title: byId.get(p)?.title ?? p, text: effectiveOutput(started.steps[p]) }))
           .filter((u) => u.text);
@@ -416,7 +496,7 @@ export function createRunner({ store, adapter, now = () => Date.now(), memory = 
                   s.choice = hit.next;
                   s.choice_by = 'ai';
                   s.choice_label = hit.label;
-                  s.output = upstream; // 傳遞內容給選中的下游
+                  s.output = ''; // 分岔只選路不轉運：下游直接拿祖先 task 的產出（契約 C）
                 } else {
                   s.status = 'waiting_branch';
                 }
@@ -472,7 +552,8 @@ export function createRunner({ store, adapter, now = () => Date.now(), memory = 
                 // 三層共用檔：公司／部門規範（開跑快照，每步都帶）；參考檔路徑各對各層（字串＝流程層、{scope}＝共用夾）
                 companyRules: ruleArgs(sharedRules.company),
                 deptRules: ruleArgs(sharedRules.dept),
-                attachments: (node.attachments ?? []).map((a) => attPath(category, id, a)).filter(Boolean),
+                // 大跑輪：本次附件併進檔案清單（每步都在），逐欄上傳照舊只給引用該欄位的步驟
+                attachments: [...(node.attachments ?? []).map((a) => attPath(category, id, a)).filter(Boolean), ...uploadsFor(node), ...runFiles],
                 upstream,
                 paramBlocks: [...sink.values()], // 查核輪：長欄位值原文，buildPrompt 另開「欄位內容」段
                 editRules, // 查核輪：上游停點改出來的規則，工人與查核員都當必守
@@ -491,7 +572,7 @@ export function createRunner({ store, adapter, now = () => Date.now(), memory = 
               if (makesFile) {
                 callArgs.fileMode = {
                   cwd: store.runOutDir(category, id, runId),
-                  fileName: `${node.title.replace(/[\\/:*?"<>|]/g, '_')}.${officeExt}`,
+                  fileName: artifactName(started.def.nodes, node, officeExt),
                   templatePath: node.template_file ? (store.refFilePath(category, id, node.template_file) ?? null) : null,
                 };
               }
@@ -555,6 +636,14 @@ export function createRunner({ store, adapter, now = () => Date.now(), memory = 
                     const text = await extractFileText(fs.readFileSync(fp), rawName(a));
                     if (text) refTexts.push({ name: attName(a), text });
                   } catch { /* 讀不到的參考檔跳過，不擋查核 */ }
+                }
+                // 排版輪 L11：本次上傳也是查核的原始資料；大跑輪：本次附件同理（每步都查得到）
+                for (const [fp, tag] of [...uploadsFor(node).map((f) => [f, '這次上傳']), ...runFiles.map((f) => [f, '這次附件'])]) {
+                  try {
+                    const name = path.basename(fp);
+                    const text = await extractFileText(fs.readFileSync(fp), name);
+                    if (text) refTexts.push({ name: `${name}（${tag}）`, text });
+                  } catch { /* 讀不到跳過 */ }
                 }
                 return refTexts;
               };
@@ -658,9 +747,9 @@ export function createRunner({ store, adapter, now = () => Date.now(), memory = 
                     s.file = art.name; // 工人交出真檔
                     s.file_note = null;
                   } else if (callArgs.fileMode) {
-                    saveArtifact(category, id, runId, node, r.params, s, output, { officeNote: `工人沒交出 .${officeExt} 檔——先把它的文字產出存成 .md，可按「重試這步」再來一次` });
+                    saveArtifact(category, id, runId, node, r.params, s, output, { nodes: r.def.nodes, officeNote: `工人沒交出 .${officeExt} 檔——先把它的文字產出存成 .md，可按「重試這步」再來一次` });
                   } else {
-                    saveArtifact(category, id, runId, node, r.params, s, output);
+                    saveArtifact(category, id, runId, node, r.params, s, output, { nodes: r.def.nodes });
                   }
                 }
               });
@@ -693,8 +782,19 @@ export function createRunner({ store, adapter, now = () => Date.now(), memory = 
           const st = run.steps[n.id].status;
           if (skipped.has(n.id) || inflight.has(n.id)) return false;
           if (st !== 'pending' && st !== 'running') return false;
-          return (predMap.get(n.id) ?? []).every((p) => skipped.has(p) || ['done', 'skipped'].includes(run.steps[p].status));
+          const preds = predMap.get(n.id) ?? [];
+          const settled = preds.every((p) => skipped.has(p) || ['done', 'skipped'].includes(run.steps[p].status));
+          if (n.merge !== 'any') return settled;
+          // 排版輪 L13（題 1 A）：任一條到——開始過（記了 merge_from）就照舊可續跑；否則有一條線到了、或全部都已了結
+          return Array.isArray(run.steps[n.id].merge_from) || settled || arrivedPreds(run, n.id, preds, skipped).length > 0;
         });
+        // 任一條到的卡：開始當下已到的線記進 merge_from（只記一次）——之後才做完的線不再送進這張卡與它的下游，重試／續跑沿用
+        const toMark = ready.filter((n) => n.merge === 'any' && !Array.isArray(run.steps[n.id].merge_from));
+        if (toMark.length) {
+          run = update(category, id, runId, (r) => {
+            for (const n of toMark) r.steps[n.id].merge_from = arrivedPreds(r, n.id, predMap.get(n.id) ?? [], skipped);
+          });
+        }
 
         if (ready.length === 0) {
           if (inflight.size > 0) {
@@ -769,15 +869,21 @@ export function createRunner({ store, adapter, now = () => Date.now(), memory = 
           const baseUpstream = upstreamText(run, node.id, skipped, predMap);
           // 補資料（資料通道輪）：使用者在資料不全卡貼的內容排在前面，原本的上游照給——都給才是完整輸入
           const supplied = run.steps[node.id]?.supplied_input;
-          const upstream = supplied
+          const withSupplied = supplied
             ? `【你補的資料】\n${supplied}${baseUpstream ? `\n\n【上一步的產出】\n${baseUpstream}` : ''}`
             : baseUpstream;
+          // 排版輪 L11（題 3f）：本次補充接在最後，每個 AI 步驟都看得到；adapter 段標題不動，寫在 upstream 字串裡；沒有補充＝逐字照舊
+          const withNote = run.note ? `${withSupplied ? `${withSupplied}\n\n` : ''}【你這次的補充】\n${run.note}` : withSupplied;
+          // 大跑輪：本次附件跟在補充後面，同樣每個 AI 步驟都看得到；沒有附件＝逐字照舊
+          const upstream = runFiles.length
+            ? `${withNote ? `${withNote}\n\n` : ''}【你這次的附件】\n這一趟另外上傳的檔（已在上面的參考檔案清單裡，逐一打開看）：\n${runFiles.map((p) => `- ${path.basename(p)}`).join('\n')}`
+            : withNote;
           if (kind === 'fork' || kind === 'join') {
-            // 結構節點即時完成：產出=上游內容（fork 傳遞、join 匯流）
+            // 結構節點即時完成：產出記空字串——沿路全帶後它不再是轉運站，下游直接拿祖先 task 的產出（契約 C；舊 run 的舊產出不回改，報備 4）
             run = update(category, id, runId, (r) => {
               r.steps[node.id].status = 'done';
-              r.steps[node.id].output = upstream;
-              r.steps[node.id].check = noCheck('skipped'); // 並行點只搬運上游內容，沒有新東西可查
+              r.steps[node.id].output = '';
+              r.steps[node.id].check = noCheck('skipped'); // 並行點只是結構，沒有新東西可查
             });
           } else if (kind === 'task' && node.executor === 'human') {
             run = update(category, id, runId, (r) => {
@@ -815,7 +921,7 @@ export function createRunner({ store, adapter, now = () => Date.now(), memory = 
         step.status = 'done';
         const node = r.def.nodes.find((n) => n.id === nodeId);
         const isOffice = typeof step.file === 'string' && OUTPUT_OFFICE.some((e) => step.file.endsWith(`.${e}`));
-        if (node && !isOffice) saveArtifact(category, id, runId, node, r.params, step, editedOutput); // 改過的版本蓋回檔案（Word／Excel 真檔不覆蓋——改的是摘要）
+        if (node && !isOffice) saveArtifact(category, id, runId, node, r.params, step, editedOutput, { nodes: r.def.nodes }); // 改過的版本蓋回檔案（Word／Excel 真檔不覆蓋——改的是摘要）
       });
     },
 
@@ -856,12 +962,11 @@ export function createRunner({ store, adapter, now = () => Date.now(), memory = 
         }
         const hit = node.branches.find((b) => b.next === target);
         if (!hit) throw new Error(`「${target}」不是這個分岔的選項`);
-        const predMap = predecessors(r.def);
         step.status = 'done';
         step.choice = hit.next;
         step.choice_by = 'user';
         step.choice_label = hit.label;
-        step.output = upstreamText(r, nodeId, computeSkipped(r.def, choicesOf(r)), predMap);
+        step.output = ''; // 同 AI 選路：分岔不轉運（契約 C）
         r.status = 'running';
       });
     },
@@ -884,7 +989,10 @@ export function createRunner({ store, adapter, now = () => Date.now(), memory = 
         const step = r.steps[nodeId];
         if (!step || step.status !== 'waiting_data') throw new Error(`步驟「${nodeId}」不在等待補資料`);
         step.output = `【已標注資料不全：${step.data_note}】\n${step.output ?? ''}`;
-        step.status = 'done';
+        // 停點照舊生效（2026-09-19 真 AI 補驗輪實走抓到）：使用者按的是「用現有資料做」，
+        // 不是「不用給我看」——這裡無條件標 done 會把 stop_point: always 的那一步整個跳過
+        const node = (r.def?.nodes ?? []).find((n) => n.id === nodeId);
+        step.status = node?.stop_point === 'always' ? 'waiting_review' : 'done';
         r.status = 'running';
       });
     },

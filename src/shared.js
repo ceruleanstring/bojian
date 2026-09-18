@@ -30,8 +30,18 @@ export function checkRuleLimits(chars, layerChars) {
   return null;
 }
 
+// 排版輪 L7（上桌題 3b）：共用檔「查看」形態——md／txt 看原文（text）、docx／xlsx／csv 走成品預覽排版（preview）、其他（pdf、圖）頁內看不了（null）
+export function viewKind(name) {
+  const ext = String(name ?? '').includes('.') ? extOf(name) : '';
+  if (ext === 'md' || ext === 'txt') return 'text';
+  if (['docx', 'xlsx', 'csv'].includes(ext)) return 'preview';
+  return null;
+}
+// 網址來的檔名正規化：NFC（macOS 送來的 NFD 也對得到清單）＋去頭尾空白
+export const normName = (s) => String(s ?? '').normalize('NFC').trim();
+
 // 共用夾鑰匙：公司＝固定 _company；部門＝分類名
 export const scopeKey = (scope, category) => (scope === 'company' ? '_company' : category);
 // attachments 元素＝字串（流程層）｜{scope, name}（共用層）：顯示名標層、鍵不撞名
-export const attName = (a) => (typeof a === 'string' ? a : `${a.name}（${a.scope === 'company' ? '公司' : '部門'}）`);
+export const attName = (a) => (typeof a === 'string' ? a : `${a.name}（${a.scope === 'company' ? '組織' : '分類'}）`);
 export const attKey = (a) => (typeof a === 'string' ? a : `${a.scope}:${a.name}`);

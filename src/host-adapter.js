@@ -15,7 +15,7 @@ export class HostError extends Error {
   }
 }
 
-const UNAVAILABLE_MSG = '連不上 Claude——請確認 Claude Code 已安裝、指令列打 claude 打得開。你的流程庫都在，不會不見。';
+const UNAVAILABLE_MSG = '連不上 Claude——請確認 Claude Code 已安裝、指令列打 claude 打得開。你的 Workflow 庫都在，不會不見。';
 
 // 不帶行李模式（BOJIAN_LEAN，2026-09-08 起預設開，A／B 測試後定案）：宿主每次呼叫都會自帶一整包
 // 預設脈絡（系統提示、外掛、斜線指令、全部工具定義），一句話的 prompt 也要送近六萬 token。輕裝＝自己給
@@ -216,6 +216,10 @@ export function createHostAdapter({ timeoutMs = 300_000, spawnFn = defaultSpawn,
       if (timer) clearTimeout(timer);
       fn(v);
     };
+    // 先定編碼再累加：Buffer 直接 += 成字串＝每塊各自解碼，跨塊的中文會被切成兩個 U+FFFD。
+    // Node 的 pipe 每 64KB 切一塊，長中文報告必中；JSON.parse 照樣成功所以全程無聲（2026-09-18 審查實測）
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
     child.stdout.on('data', (d) => { out += d; });
     child.stderr.on('data', (d) => { err += d; });
     child.on('error', () => settle(onFail, new HostError(UNAVAILABLE_MSG, 'UNAVAILABLE')));
@@ -223,10 +227,22 @@ export function createHostAdapter({ timeoutMs = 300_000, spawnFn = defaultSpawn,
       if (code === 0) return settle(onDone, String(out).trim());
       const detail = `${err}\n${out}`.trim(); // claude 的錯誤有時走 stdout
       if (/authenticat|oauth|login/i.test(detail)) {
-        return settle(onFail, new HostError('Claude 的登入過期了——請開終端機執行 claude 重新登入，回來按「重試這步」。你的流程庫都在，不會不見。', 'UNAVAILABLE'));
+        return settle(onFail, new HostError('Claude 的登入過期了——請開終端機執行 claude 重新登入，回來按「重試這步」。你的 Workflow 庫都在，不會不見。', 'UNAVAILABLE'));
       }
       settle(onFail, new HostError(`這一步執行失敗（Claude 回報：${detail.slice(0, 200) || `結束碼 ${code}`}）。可以按「重試這步」。`, 'FAILED'));
     });
+  }
+
+  // 送工作單：stdin 的 'error' 不歸 child.on('error') 管（那支只管 ChildProcess）。
+  // 工作單常有數萬字、write 是非同步排空的，子行程先死（claude 沒裝／登入過期／cmd 立刻結束）
+  // 就會在沒有監聽器的 stdin 上丟 EPIPE＝未捕捉例外＝整個伺服器連同所有進行中的 run 一起死。
+  // 這裡只負責「不炸」；真正的錯誤訊息仍由 collect 的 close／error 那兩路給出人話。
+  function sendPrompt(child, text) {
+    child.stdin.on('error', () => {});
+    try {
+      child.stdin.write(text);
+      child.stdin.end();
+    } catch { /* 管線已經關了：collect 會收到 close／error 並回報 */ }
   }
 
   // 收到宿主回覆：記帳（有帳必記，失敗的呼叫也花了 token）→ is_error 轉人話錯誤 → 回產出文字
@@ -281,8 +297,7 @@ export function createHostAdapter({ timeoutMs = 300_000, spawnFn = defaultSpawn,
         if (model) args.push('--model', model);
         const child = spawnFn(args, fm ? { cwd: fm.cwd, env: { ...process.env, NODE_PATH: fm.nodePath ?? BUNDLED_NODE_PATH } } : {});
         collect(child, timeoutMs, (raw) => settleParsed(raw, meta, model, resolve, reject), reject);
-        child.stdin.write(buildPrompt(fields));
-        child.stdin.end();
+        sendPrompt(child, buildPrompt(fields));
       });
     },
 
@@ -296,8 +311,7 @@ export function createHostAdapter({ timeoutMs = 300_000, spawnFn = defaultSpawn,
         if (meta?.mcp) args.push('--allowedTools', CALENDAR_TOOLS);
         const child = spawnFn(args);
         collect(child, t ?? timeoutMs, (raw) => settleParsed(raw, meta, null, resolve, reject), reject);
-        child.stdin.write(prompt);
-        child.stdin.end();
+        sendPrompt(child, prompt);
       });
     },
 

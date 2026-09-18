@@ -16,6 +16,7 @@ function fakeAdapter() {
   const spans = []; // {nodeId, start, end} 併發驗證用
   let failOn = null;
   let delay = 0;
+  const delayFor = {}; // 排版輪 L13：單一步驟的延遲（任一條到要一快一慢）
   let seq = 0;
   let failTimes = Infinity;
   const outputs = {}; // 指定某步下一次的回覆（資料通道輪：模擬【資料不全】，用一次即清）
@@ -36,6 +37,7 @@ function fakeAdapter() {
     setOutput(nodeId, text) { outputs[nodeId] = text; },
     setFileWriter(fn) { fileWriter = fn; }, // 產檔輪：模擬工人在 fileMode.cwd 寫出檔案（回 true＝寫預設文字、回內容＝寫那份內容）
     setDelay(ms) { delay = ms; },
+    setDelayFor(nodeId, ms) { delayFor[nodeId] = ms; },
     setBriefReply(x) { briefReply = x; }, // 字串，或 (meta, prompt)=>字串／丟錯
     setHandoffReply(x) { handoffReply = x; },
     setRecordReply(x) { recordReply = x; },
@@ -66,7 +68,8 @@ function fakeAdapter() {
         const written = fileWriter(fileMode);
         if (written) fs.writeFileSync(path.join(fileMode.cwd, fileMode.fileName), written === true ? `FILE:${fileMode.fileName}` : written);
       }
-      if (delay) await new Promise((r) => setTimeout(r, delay));
+      const ms = delayFor[nodeId] ?? delay;
+      if (ms) await new Promise((r) => setTimeout(r, ms));
       const end = seq++;
       spans.push({ nodeId, start, end });
       if (failOn === nodeId && failTimes > 0) { failTimes--; throw new Error('連不上 Claude（測試注入）'); }
@@ -112,7 +115,7 @@ test('開跑嚴格：定義裡有還沒接上的步驟 → startRun 擋下並點
   const def = structuredClone(LINEAR3);
   def.nodes.push({ id: 'float', title: '孤島步驟', executor: 'ai', stop_point: 'never', instruction: '沒人接', next: [] });
   const { runner } = setup(def);
-  assert.throws(() => runner.startRun('測試', 'wf', {}), (e) => e.message.includes('孤島步驟') && e.message.includes('還沒接進流程'));
+  assert.throws(() => runner.startRun('測試', 'wf', {}), (e) => e.message.includes('孤島步驟') && e.message.includes('還沒接進 Workflow'));
 });
 
 test('單步自動重試：retry=1 首次失敗自動重來成功，模型檔位對映一併傳宿主', async () => {
@@ -157,6 +160,7 @@ test('D19 降級：output_file=pptx 未接工具鏈 → 存 .md＋file_note 講�
   const r = store.readRun('測試', 'wf', run.run_id);
   assert.ok(r.steps.a.file_note.includes('工具鏈'));
   assert.ok(r.steps.b.file_note.includes('產檔權限'));
+  assert.equal(r.steps.b.file_note, '這條 Workflow 沒開產檔權限——.docx 先存成 .md；Workflow 頁打開「允許這條 Workflow 產出檔案」就會產真檔');
   assert.equal(adapter.calls.find((c) => c.nodeId === 'b').fileMode, undefined, '沒權限就不進產檔模式');
   assert.equal(store.readArtifact('測試', 'wf', run.run_id, 'A.md').toString('utf8'), '產出:a');
 });
@@ -234,7 +238,8 @@ test('runUntilPause：無停點流程一路跑完；產出串鏈、參數注入�
   assert.equal(steps.length, 3);
   assert.ok(steps[0].instruction.includes('本季'), '參數預設值要注入指示');
   assert.equal(steps[1].upstream, '產出:a', '下游輸入=上游產出');
-  assert.equal(steps[2].upstream, '產出:b');
+  // 拆法輪 B1：第三步拿沿路全部產出（最近在前、多段加標頭）
+  assert.equal(steps[2].upstream, '（沿路全部產出，最近的在前）\n【B】\n產出:b\n\n【A】\n產出:a');
   const saved = store.readRun('測試', 'wf', run.run_id);
   for (const s of Object.values(saved.steps)) assert.equal(s.status, 'done');
 });
@@ -260,7 +265,9 @@ test('停點核可→續跑；停點修改→改過的版本進下游；人步�
   r = await runner.runUntilPause('測試', 'wf', run.run_id);
   assert.equal(r.steps.compose.status, 'waiting_review', '第二停：做成報告＋講稿');
   const analyzeCall = adapter.calls.find((c) => c.nodeId === 'analyze');
-  assert.equal(analyzeCall.upstream, '改過的彙總', '下游吃修改後版本');
+  // 拆法輪 B1：沿路全帶——修改後版本排最前（最近在前），更早的抓資料產出跟在後面
+  assert.ok(analyzeCall.upstream.startsWith('（沿路全部產出，最近的在前）\n【整理歸納】\n改過的彙總\n\n【'), `下游吃修改後版本：${analyzeCall.upstream}`);
+  assert.ok(!analyzeCall.upstream.includes('產出:organize'), '原版不進下游');
   r = runner.approve('測試', 'wf', run.run_id, 'compose');
   r = await runner.runUntilPause('測試', 'wf', run.run_id);
   assert.equal(r.steps.present.status, 'waiting_human', '人做步驟停著等');
@@ -406,6 +413,37 @@ test('資料不全自報：【資料不全】開頭→停該步＋缺什麼入�
   const bCall = adapter.calls.filter((c) => c.nodeId === 'b').at(-1);
   assert.ok(bCall.upstream.includes('缺 7 月'), '下游輸入要帶著標注');
   assert.ok(r2.steps.a.output.includes('已標注'), '成品留標注');
+});
+
+test('資料不全「就這樣繼續」不吃停點：標了做完給我看的步驟照樣停下來給人看', async () => {
+  // 2026-09-19 真 AI 補驗輪實走抓到：dataAccept 無條件把步驟標 done，stop_point: always
+  // 的那一步被直接跳過往下跑——使用者選的是「用現有資料做」，不是「不用給我看」
+  const def = structuredClone(LINEAR3);
+  def.nodes[0].stop_point = 'always';
+  const { adapter, runner } = setup(def);
+  adapter.executeNode = async ({ nodeId }) => (nodeId === 'a' ? '【資料不全】缺 7 月\n（部分資料表）' : `產出:${nodeId}`);
+  const run = runner.startRun('測試', 'wf', {});
+  let r = await runner.runUntilPause('測試', 'wf', run.run_id);
+  assert.equal(r.steps.a.status, 'waiting_data');
+  runner.dataAccept('測試', 'wf', run.run_id, 'a');
+  r = await runner.runUntilPause('測試', 'wf', run.run_id);
+  assert.equal(r.steps.a.status, 'waiting_review', '停點還在：帶標注續跑也要先給人過目');
+  assert.ok(r.steps.a.output.includes('已標注'), '成品仍留標注');
+  assert.equal(r.steps.b.status, 'pending', '人還沒核可，下游不准先跑');
+  runner.approve('測試', 'wf', run.run_id, 'a');
+  r = await runner.runUntilPause('測試', 'wf', run.run_id);
+  assert.equal(r.status, 'done');
+});
+
+test('資料不全「就這樣繼續」：沒設停點的步驟照舊直接往下跑', async () => {
+  const { adapter, runner } = setup(LINEAR3); // a 的 stop_point 是 never
+  adapter.executeNode = async ({ nodeId }) => (nodeId === 'a' ? '【資料不全】缺 7 月\n（部分資料表）' : `產出:${nodeId}`);
+  const run = runner.startRun('測試', 'wf', {});
+  await runner.runUntilPause('測試', 'wf', run.run_id);
+  runner.dataAccept('測試', 'wf', run.run_id, 'a');
+  const r = await runner.runUntilPause('測試', 'wf', run.run_id);
+  assert.equal(r.status, 'done');
+  assert.equal(r.steps.a.status, 'done');
 });
 
 test('中斷恢復：模擬跑到一半掛掉（步驟卡在 running），新 runner 從 checkpoint 續跑', async () => {
@@ -733,7 +771,9 @@ test('長欄位不代進句子：卷宗（renderPrompt 存的 prompt）含「# �
     const child = new EventEmitter();
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
-    child.stdin = { write() {}, end() {} };
+    child.stdout.setEncoding = () => {};
+    child.stderr.setEncoding = () => {};
+    child.stdin = { write() {}, end() {}, on() {} };
     child.kill = () => {};
     setImmediate(() => {
       child.stdout.emit('data', '產出文字');
@@ -1561,7 +1601,7 @@ test('M2 startRun：memoryPicks／memoryChanged／memoryIdentity 寫進 run.memo
 test('M2 記路①：同一個值非預設連兩趟開跑→一張習慣卡（用在這條流程、出處 run-params）＋通知 card；第一趟、等於預設、已有同卡都不記', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bojian-runner-'));
   const store = createStore(dir);
-  store.writeWorkflow('測試', 'wf', LINEAR3);
+  store.writeWorkflow('測試', 'wf', { ...LINEAR3, params: [{ key: 'range', label: '年度區間', default: '本季' }] }); // 刻意用出廠詞典沒有的欄位名，才驗得到「不在詞典就先長出來」
   const adapter = fakeAdapter();
   const memory = createMemory({ store, adapter });
   const runner = createRunner({ store, adapter, memory });
@@ -1572,14 +1612,14 @@ test('M2 記路①：同一個值非預設連兩趟開跑→一張習慣卡（�
   const cards = store.listCards('habit');
   assert.equal(cards.length, 1, '連兩趟同值→一張');
   const c = cards[0];
-  assert.equal(c.field, '範圍');
+  assert.equal(c.field, '年度區間');
   assert.equal(c.text, '今年');
   assert.deepEqual(c.scope, { level: 'workflow', category: '測試', workflow: 'wf' });
   assert.equal(c.source.kind, 'run-params');
   assert.equal(c.source.run, r2.run_id);
-  assert.equal(c.source.quote, '（開跑表單）範圍：今年');
+  assert.equal(c.source.quote, '（開跑表單）年度區間：今年');
   assert.ok(c.route_reason, '程式判的寫固定句');
-  assert.ok(store.readDict().fields.some((f) => f.name === '範圍'), '欄位不在詞典就先長出來');
+  assert.deepEqual(store.readDict().fields.find((f) => f.name === c.field)?.origin, { category: '測試', workflow: 'wf' }, '欄位不在出廠詞典就先長出來，origin 記它從哪條流程長的');
   assert.equal(r2.memory.notices.length, 1);
   assert.equal(r2.memory.notices[0].kind, 'card');
   assert.equal(r2.memory.notices[0].card, c.id);
@@ -1925,11 +1965,11 @@ test('U1b ④：attachments 混型——字串走流程參考檔、{scope} 走�
   const tail = (p) => p.replace(/\\/g, '/').split('/').slice(-4).join('/');
   assert.deepEqual(a.attachments.map(tail), ['測試/wf/files/a.txt', 'shared/_company/files/b.md', 'shared/測試/files/c.md'], '各對各層；不存在的不列');
   const ck = checkCalls(adapter, 'a')[0].checkPrompt;
-  assert.ok(ck.includes('【參考檔：a.txt】\n流程層內容') && ck.includes('【參考檔：b.md（公司）】\n公司層內容') && ck.includes('【參考檔：c.md（部門）】\n部門層內容'), ck);
+  assert.ok(ck.includes('【參考檔：a.txt】\n流程層內容') && ck.includes('【參考檔：b.md（組織）】\n公司層內容') && ck.includes('【參考檔：c.md（分類）】\n部門層內容'), ck);
   assert.ok(!ck.includes('[object Object]'));
   const brief = adapter.calls.find((c) => c.meta?.kind === 'supervisor' && c.meta.phase === 'brief').prompt;
-  assert.ok(brief.includes('【參考檔：a.txt】\n流程層內容') && brief.includes('【參考檔：b.md（公司）】\n公司層內容') && brief.includes('【參考檔：c.md（部門）】\n部門層內容'), brief);
-  assert.ok(brief.includes('【參考檔：沒有的.md（公司）】') && !brief.includes('[object Object]'), '讀不到的只列名字');
+  assert.ok(brief.includes('【參考檔：a.txt】\n流程層內容') && brief.includes('【參考檔：b.md（組織）】\n公司層內容') && brief.includes('【參考檔：c.md（分類）】\n部門層內容'), brief);
+  assert.ok(brief.includes('【參考檔：沒有的.md（組織）】') && !brief.includes('[object Object]'), '讀不到的只列名字');
   assert.deepEqual(r.steps.a.memory.shared, {
     company: [], dept: [],
     refs: [{ scope: 'company', name: 'b.md', chars: '公司層內容'.length }, { scope: 'category', name: 'c.md', chars: '部門層內容'.length }], // U1a 修正輪：md／txt 參考的 chars＝字元數（5），不是位元組
@@ -1964,7 +2004,9 @@ test('U1b 卷宗：真 host-adapter → prompts/a.txt 有「# 公司規範」「
     const child = new EventEmitter();
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
-    child.stdin = { write() {}, end() {} };
+    child.stdout.setEncoding = () => {};
+    child.stderr.setEncoding = () => {};
+    child.stdin = { write() {}, end() {}, on() {} };
     child.kill = () => {};
     setImmediate(() => {
       child.stdout.emit('data', '產出文字');
@@ -1983,4 +2025,431 @@ test('U1b 卷宗：真 host-adapter → prompts/a.txt 有「# 公司規範」「
   assert.ok(at('# 關於你') < at('# 公司規範') && at('# 公司規範') < at('# 部門規範') && at('# 部門規範') < at('# 分類守則（分類「測試」，一定要守）'), '順序：關於你→…→公司→部門→分類守則');
   const ck = store.readPromptRecord('測試', 'wf', run.run_id, 'a.check1.txt');
   assert.ok(ck.includes('# 公司／部門規範（一定要守）\n## 公司規範：手冊.md\n語氣要親切。') && ck.includes('違反規範歸 must'), ck);
+});
+
+// ===== 拆法輪 B1：執行端沿路全帶（契約 C）——每一步的輸入＝全部祖先 task 的產出，最近在前、80,000 整段截斷、並行點不轉運 =====
+import { capUpstream, UPSTREAM_CAP } from '../src/runner.js';
+
+const PREFACE = '（沿路全部產出，最近的在前）';
+
+test('B1 ①：三步直線 a→b→c——c 的 upstream 含【A】【B】兩段、B 在前 A 在後、首行前言；b 只拿 a 原文不加標頭', async () => {
+  const { runner, adapter } = setup(LINEAR3);
+  const run = runner.startRun('測試', 'wf', {});
+  await runner.runUntilPause('測試', 'wf', run.run_id);
+  const b = workerCalls(adapter, 'b')[0].upstream;
+  const c = workerCalls(adapter, 'c')[0].upstream;
+  assert.equal(b, '產出:a', '一個祖先＝原文不加標頭（現況不變）');
+  assert.ok(c.startsWith(PREFACE + '\n'), `首行前言：${c}`);
+  assert.ok(c.includes('【B】\n產出:b') && c.includes('【A】\n產出:a'), c);
+  assert.ok(c.indexOf('【B】') < c.indexOf('【A】'), '最近的在前');
+  assert.ok(!c.includes('已截斷'), '沒超量就沒有截斷句');
+});
+
+test('B1 ②：a→fork→{b,c}→d——d 的 upstream 含 a、b、c 各一次、無【並行】、a 只出現一次；fork 步的 output 為空字串', async () => {
+  const def = {
+    format: 1, name: 'fk', params: [],
+    nodes: [
+      { id: 'a', title: 'A', executor: 'ai', stop_point: 'never', instruction: '做', next: ['fk'] },
+      { id: 'fk', title: '並行', kind: 'fork', next: ['b', 'c'] },
+      { id: 'b', title: 'B', executor: 'ai', stop_point: 'never', instruction: '做', next: ['d'] },
+      { id: 'c', title: 'C', executor: 'ai', stop_point: 'never', instruction: '做', next: ['d'] },
+      { id: 'd', title: 'D', executor: 'ai', stop_point: 'never', instruction: '做', next: [] },
+    ],
+  };
+  const { runner, adapter } = setup(def);
+  const run = runner.startRun('測試', 'wf', {});
+  const r = await runner.runUntilPause('測試', 'wf', run.run_id);
+  assert.equal(r.status, 'done');
+  assert.equal(r.steps.fk.status, 'done');
+  assert.equal(r.steps.fk.output, '', '並行點不再轉運：產出記空字串');
+  assert.equal(r.steps.fk.check.status, 'skipped');
+  const d = workerCalls(adapter, 'd')[0].upstream;
+  for (const id of ['a', 'b', 'c']) assert.equal(d.split(`產出:${id}`).length - 1, 1, `${id} 恰出現一次：${d}`);
+  assert.ok(!d.includes('【並行】'), `並行點不算祖先：${d}`);
+  assert.ok(d.startsWith(PREFACE), d);
+  assert.ok(d.indexOf('【A】') > d.indexOf('【B】') && d.indexOf('【A】') > d.indexOf('【C】'), '最遠的 A 在最後');
+  // b 的輸入不經並行點轉手：就是 a 原文（一個祖先不加標頭）
+  assert.equal(workerCalls(adapter, 'b')[0].upstream, '產出:a');
+});
+
+test('B1 ③：截斷——a 產出 70,000 字、b 產出 20,000 字 → c 的 upstream 含 b 全文、不含 a 正文、尾句「更早的產出已截斷：A」、總長 ≤ 80,000＋前後言', async () => {
+  const { runner, adapter } = setup(LINEAR3);
+  const bigA = 'A'.repeat(70000);
+  const bigB = 'B'.repeat(20000);
+  adapter.setOutput('a', bigA);
+  adapter.setOutput('b', bigB);
+  const run = runner.startRun('測試', 'wf', {});
+  await runner.runUntilPause('測試', 'wf', run.run_id);
+  const c = workerCalls(adapter, 'c')[0].upstream;
+  assert.ok(c.includes('【B】\n' + bigB), 'b 全文在');
+  assert.ok(!c.includes('AAAAAAAAAA'), 'a 正文整段丟');
+  assert.ok(c.endsWith('（更早的產出已截斷：A）'), `尾句記名：${c.slice(-60)}`);
+  assert.ok(c.startsWith(PREFACE), c.slice(0, 40));
+  assert.ok(c.length <= UPSTREAM_CAP + PREFACE.length + '（更早的產出已截斷：A）'.length + 4, `總長 ${c.length}`);
+  assert.equal(UPSTREAM_CAP, 80000);
+  // 純函式直測：由遠而近整段丟、多個被丟的一起記名；沒超量原樣、最近那段永遠留著
+  const parts = [{ title: '近', text: 'x'.repeat(50) }, { title: '中', text: 'y'.repeat(50) }, { title: '遠', text: 'z'.repeat(50) }];
+  const capped = capUpstream(parts, 120);
+  assert.ok(capped.includes('【近】') && capped.includes('【中】') && !capped.includes('zzz'), capped);
+  assert.ok(capped.endsWith('（更早的產出已截斷：遠）'), capped);
+  assert.ok(capUpstream(parts, 60).endsWith('（更早的產出已截斷：中、遠）'), '多個被丟的一起記名');
+  assert.ok(capUpstream(parts, 1).includes('【近】\n' + 'x'.repeat(50)), '最近那段再大也留著');
+  assert.ok(!capUpstream(parts, 100000).includes('已截斷'), '沒超量沒有截斷句');
+});
+
+test('B1 ④：跳過的分岔支線（status skipped）與空產出的祖先不進 upstream；走到的人做步驟產出照帶', async () => {
+  // 路 2（五千以下）：boss-sign 跳過 → scan 只拿 fill；路 1：boss-sign 人做交出內容 → scan 含【主管簽核】＋【填報帳單】
+  const { adapter, runner } = setup(DAG_DEF);
+  adapter.setHandoffReply('{"route":"2"}');
+  const run = runner.startRun('測試', 'wf', {});
+  const done = await runner.runUntilPause('測試', 'wf', run.run_id);
+  assert.equal(done.steps['boss-sign'].status, 'skipped');
+  assert.equal(done.steps['amount-check'].output, '', '分岔也不轉運');
+  const scan = workerCalls(adapter, 'scan')[0].upstream;
+  assert.equal(scan, '產出:fill', `跳過的支線不進、單一祖先不加標頭：${scan}`);
+  const { adapter: ad2, runner: r2 } = setup(DAG_DEF);
+  ad2.setHandoffReply('{"route":"1"}');
+  const run2 = r2.startRun('測試', 'wf', {});
+  await r2.runUntilPause('測試', 'wf', run2.run_id);
+  r2.completeHuman('測試', 'wf', run2.run_id, 'boss-sign', null, '簽好了');
+  const done2 = await r2.runUntilPause('測試', 'wf', run2.run_id);
+  assert.equal(done2.status, 'done');
+  const scan2 = workerCalls(ad2, 'scan')[0].upstream;
+  assert.ok(scan2.includes('【主管簽核】\n簽好了') && scan2.includes('【填報帳單】\n產出:fill'), scan2);
+  assert.ok(scan2.indexOf('【主管簽核】') < scan2.indexOf('【填報帳單】'), '最近在前');
+  assert.ok(!scan2.includes('【簽核匯合】') && !scan2.includes('【同時進行】') && !scan2.includes('【金額分流】'), '結構節點不算祖先');
+  // 空產出的祖先不進：a 交白卷 → b 沒輸入、c 只拿 b
+  const { adapter: ad3, runner: r3 } = setup(LINEAR3);
+  ad3.setOutput('a', '');
+  const run3 = r3.startRun('測試', 'wf', {});
+  await r3.runUntilPause('測試', 'wf', run3.run_id);
+  assert.equal(workerCalls(ad3, 'b')[0].upstream, '');
+  assert.equal(workerCalls(ad3, 'c')[0].upstream, '產出:b');
+});
+
+test('B1 ⑤：supplied_input 仍排最前「【你補的資料】」，沿路全帶的段落跟在「【上一步的產出】」後', async () => {
+  const { runner, adapter } = setup(LINEAR3);
+  adapter.setCheckResponse(CHECK_PASS);
+  adapter.setOutput('c', '【資料不全】少了明細。\n（骨架）');
+  const run = runner.startRun('測試', 'wf', {});
+  let r = await runner.runUntilPause('測試', 'wf', run.run_id);
+  assert.equal(r.steps.c.status, 'waiting_data');
+  runner.dataSupply('測試', 'wf', run.run_id, 'c', '明細如下：帽子 6 件');
+  r = await runner.runUntilPause('測試', 'wf', run.run_id);
+  const c2 = workerCalls(adapter, 'c')[1].upstream;
+  assert.ok(c2.startsWith('【你補的資料】\n明細如下：帽子 6 件\n\n【上一步的產出】\n' + PREFACE), c2);
+  assert.ok(c2.includes('【B】\n產出:b') && c2.includes('【A】\n產出:a'), c2);
+});
+
+test('B1 ⑧：舊 run（並行點產出仍是舊式轉運文字、run.yaml 無新欄位）續跑不炸；並行點的舊產出不進下游、上游步驟只出現一次', async () => {
+  const def = structuredClone(PAR_DEF);
+  def.nodes[2].stop_point = 'always'; // t-a 停一下，好在中途改 run.yaml
+  const { runner, adapter, store } = setup(def);
+  const run = runner.startRun('測試', 'wf', {});
+  let r = await runner.runUntilPause('測試', 'wf', run.run_id);
+  assert.equal(r.steps['t-a'].status, 'waiting_review');
+  // 模擬舊版 runner 寫的 run.yaml：並行點 output＝上游原樣（舊式轉運）
+  r.steps.fk.output = '產出:start';
+  store.writeRun('測試', 'wf', run.run_id, r);
+  runner.approve('測試', 'wf', run.run_id, 't-a');
+  const done = await runner.runUntilPause('測試', 'wf', run.run_id);
+  assert.equal(done.status, 'done');
+  assert.equal(done.steps.fk.output, '產出:start', '舊 run 的並行點產出保持原樣不回改（報備 4）');
+  const fin = workerCalls(adapter, 'final')[0].upstream;
+  assert.equal(fin.split('產出:start').length - 1, 1, `起步只出現一次：${fin}`);
+  assert.ok(!fin.includes('【同時做】') && !fin.includes('【會合】'), fin);
+  assert.ok(fin.includes('【做A】\n產出:t-a') && fin.includes('【做B】\n產出:t-b') && fin.includes('【起步】\n產出:start'), fin);
+});
+
+// ---- 排版輪 L11：本次補充（題 3f）與本次上傳（題 2 A） ----
+const UPLOAD_RUN_DEF = {
+  format: 1, name: '上傳月報',
+  params: [{ key: 'src', label: '原始資料', default: '', input: 'file', required: true }, { key: 'range', label: '範圍', default: '本季' }],
+  nodes: [
+    { id: 'a', title: 'A', executor: 'ai', stop_point: 'never', instruction: '整理上傳的資料，範圍 {{range}}', next: ['b'] },
+    { id: 'b', title: 'B', executor: 'ai', stop_point: 'never', instruction: '做B', next: [] },
+  ],
+};
+test('排版輪 L11 ③④⑤：run.note 存下、每個 AI 步驟 upstream 接「【你這次的補充】」；上傳檔只掛在沒有 AI 祖先的 AI 步驟（工作單路徑＝該趟 in/）', async () => {
+  const { runner, adapter, store } = setup(UPLOAD_RUN_DEF);
+  const run = runner.startRun('測試', 'wf', { src: '三月.csv' }, { note: '留意新品類' });
+  assert.equal(run.note, '留意新品類');
+  assert.equal(run.params.src, '三月.csv');
+  const inDir = store.runInDir('測試', 'wf', run.run_id);
+  fs.writeFileSync(path.join(inDir, '三月.csv'), 'a,b\n1,2');
+  await runner.runUntilPause('測試', 'wf', run.run_id);
+  const a = adapter.calls.find((c) => c.nodeId === 'a');
+  const b = adapter.calls.find((c) => c.nodeId === 'b');
+  assert.equal(a.upstream, '【你這次的補充】\n留意新品類', '第一步沒有上游：只有補充');
+  assert.equal(b.upstream, '產出:a\n\n【你這次的補充】\n留意新品類', '補充接在上游之後');
+  assert.deepEqual(a.attachments, [path.join(inDir, '三月.csv')], '第一個 AI 步驟讀檔');
+  assert.deepEqual(b.attachments, [], '後面靠沿路全帶，不重複掛檔');
+  assert.equal(store.readRun('測試', 'wf', run.run_id).note, '留意新品類');
+});
+
+test('排版輪 L11 ⑥：不帶 note／上傳的 run 沒有新鍵、upstream 與現況逐字相同；必填上傳欄位沒檔（排程觸發）→ startRun 擋下並說明，不靜默跑', async () => {
+  const { runner, adapter } = setup();
+  const run = runner.startRun('測試', 'wf', {});
+  assert.ok(!('note' in run), 'run 沒有 note 鍵');
+  await runner.runUntilPause('測試', 'wf', run.run_id);
+  assert.equal(adapter.calls.find((c) => c.nodeId === 'a').upstream, '');
+  assert.equal(adapter.calls.find((c) => c.nodeId === 'b').upstream, '產出:a');
+  const up = setup(UPLOAD_RUN_DEF);
+  assert.throws(() => up.runner.startRun('測試', 'wf', {}, { source: 'schedule' }),
+    (e) => e.message.includes('原始資料') && e.message.includes('上傳') && e.message.includes('本次資料'));
+  assert.equal(up.store.listRuns('測試', 'wf').length, 0, '擋下的不落地');
+});
+
+// ===== 排版輪 L13（題 1 A）：入口「任一條到」＝nodes[].merge:'any'——第一條線做完就開始，其他線照跑完但產出不再送進這張卡（與它的下游） =====
+import { exportText, parseImport } from '../src/porter.js';
+
+const ANY_DEF = {
+  format: 1, name: '誰先好用誰', params: [],
+  check: { enabled: false }, supervisor: { enabled: false },
+  nodes: [
+    { id: 'a', title: '起頭', executor: 'ai', stop_point: 'never', instruction: '起', next: ['b', 'c'] },
+    { id: 'b', title: '快的', executor: 'ai', stop_point: 'never', instruction: '快', next: ['d'] },
+    { id: 'c', title: '慢的', executor: 'ai', stop_point: 'never', instruction: '慢', next: ['d'] },
+    { id: 'd', title: '會合', executor: 'ai', stop_point: 'never', instruction: '合', next: ['e'], merge: 'any' },
+    { id: 'e', title: '收尾', executor: 'ai', stop_point: 'never', instruction: '收', next: [] },
+  ],
+};
+const callsOf = (adapter, id) => adapter.calls.filter((c) => c.nodeId === id);
+const spanOf = (adapter, id) => adapter.spans.find((s) => s.nodeId === id);
+// 快的先到：d 在 c 還沒做完時就開始、只吃 b（與更早的 a）；c 照跑完、不再觸發 d；e 也看不到 c
+function assertFastWins(adapter, done, { fast = 'b', slow = 'c' } = {}) {
+  assert.equal(done.status, 'done', JSON.stringify(Object.fromEntries(Object.entries(done.steps).map(([k, v]) => [k, v.status]))));
+  assert.equal(done.steps[slow].status, 'done', '慢的那條照跑完');
+  assert.equal(callsOf(adapter, 'd').length, 1, 'd 只開始一次（慢的做完不再觸發）');
+  assert.ok(spanOf(adapter, 'd').start < spanOf(adapter, slow).end, `d 要在慢的做完之前開始：${JSON.stringify(adapter.spans)}`);
+  const d = callsOf(adapter, 'd')[0].upstream;
+  assert.ok(d.includes(`產出:${fast}`) && d.includes('產出:a') && !d.includes(`產出:${slow}`), `d 工作單只含先到的線與更早祖先：${d}`);
+  assert.deepEqual(done.steps.d.merge_from, [fast], '記下開始當下已到的線');
+  const e = callsOf(adapter, 'e')[0].upstream;
+  assert.ok(!e.includes(`產出:${slow}`) && e.includes('產出:d'), `下游也不收沒趕上的線：${e}`);
+}
+
+test('排版輪 L13 引擎②：a→{b,c}→d（任一條到，b 快 c 慢）→b 完成即開 d、d 只吃 b 與 a、c 之後完成不再觸發 d、run 正常結束', async () => {
+  const { adapter, runner } = setup(ANY_DEF);
+  adapter.setDelayFor('b', 5);
+  adapter.setDelayFor('c', 120);
+  const run = runner.startRun('測試', 'wf', {});
+  const done = await runner.runUntilPause('測試', 'wf', run.run_id);
+  assertFastWins(adapter, done);
+});
+
+test('排版輪 L13 引擎③：缺省（等全部）行為與現況相同——d 等兩條都完成才開、吃兩條、步驟不多 merge_from 鍵', async () => {
+  const def = structuredClone(ANY_DEF);
+  delete def.nodes[3].merge;
+  const { adapter, runner } = setup(def);
+  adapter.setDelayFor('b', 5);
+  adapter.setDelayFor('c', 60);
+  const run = runner.startRun('測試', 'wf', {});
+  const done = await runner.runUntilPause('測試', 'wf', run.run_id);
+  assert.equal(done.status, 'done');
+  assert.ok(spanOf(adapter, 'd').start > spanOf(adapter, 'c').end, 'd 等 c 做完');
+  const d = callsOf(adapter, 'd')[0].upstream;
+  assert.ok(d.includes('產出:b') && d.includes('產出:c') && d.includes('產出:a'), d);
+  for (const s of Object.values(done.steps)) assert.ok(!('merge_from' in s), '等全部不寫 merge_from');
+});
+
+test('排版輪 L13 引擎④：擇一（藏起來的分岔）後會合——沒走的線 skipped，會合卡等全部與任一條到都只跑一次、吃走到的那條', async () => {
+  for (const merge of [undefined, 'any']) {
+    const def = {
+      format: 1, name: '擇一會合', params: [], check: { enabled: false },
+      nodes: [
+        { id: 'a', title: '看', executor: 'ai', stop_point: 'never', instruction: '看', next: ['B'] },
+        { id: 'B', title: '看・擇一', kind: 'branch', instruction: '依每條線上的條件，挑符合的一條走', next: [], branches: [{ label: '大', next: 'x' }, { label: '小', next: 'y' }] },
+        { id: 'x', title: 'X', executor: 'ai', stop_point: 'never', instruction: 'x', next: ['m'] },
+        { id: 'y', title: 'Y', executor: 'ai', stop_point: 'never', instruction: 'y', next: ['m'] },
+        { id: 'm', title: 'M', executor: 'ai', stop_point: 'never', instruction: 'm', next: [], ...(merge ? { merge } : {}) },
+      ],
+    };
+    const { adapter, runner } = setup(def);
+    adapter.setHandoffReply('{"note":"","tier":null,"web":null,"route":"1"}');
+    const run = runner.startRun('測試', 'wf', {});
+    const done = await runner.runUntilPause('測試', 'wf', run.run_id);
+    assert.equal(done.status, 'done', String(merge));
+    assert.equal(done.steps.y.status, 'skipped', String(merge));
+    assert.equal(callsOf(adapter, 'm').length, 1, String(merge));
+    assert.ok(callsOf(adapter, 'm')[0].upstream.includes('產出:x') && !callsOf(adapter, 'm')[0].upstream.includes('產出:y'), String(merge));
+    if (merge) assert.deepEqual(done.steps.m.merge_from, ['x']);
+  }
+});
+
+test('排版輪 L13 引擎⑦：舊 fork／join 檔——join 帶 merge:any 也照「任一條到」；不帶的舊檔照舊等全部', async () => {
+  const def = structuredClone(PAR_DEF);
+  def.check = { enabled: false };
+  def.supervisor = { enabled: false };
+  def.nodes.find((n) => n.id === 'jn').merge = 'any';
+  const { adapter, runner } = setup(def);
+  adapter.setDelayFor('t-a', 5);
+  adapter.setDelayFor('t-b', 120);
+  const run = runner.startRun('測試', 'wf', {});
+  const done = await runner.runUntilPause('測試', 'wf', run.run_id);
+  assert.equal(done.status, 'done');
+  assert.deepEqual(done.steps.jn.merge_from, ['t-a']);
+  const fin = callsOf(adapter, 'final')[0];
+  assert.ok(fin.upstream.includes('產出:t-a') && !fin.upstream.includes('產出:t-b'), fin.upstream);
+  assert.ok(spanOf(adapter, 'final').start < spanOf(adapter, 't-b').end);
+  const old = setup(PAR_DEF);
+  old.adapter.setDelayFor('t-b', 40);
+  const r2 = old.runner.startRun('測試', 'wf', {});
+  const d2 = await old.runner.runUntilPause('測試', 'wf', r2.run_id);
+  assert.ok(callsOf(old.adapter, 'final')[0].upstream.includes('產出:t-b'), '舊檔照等全部');
+  assert.ok(!('merge_from' in d2.steps.jn));
+});
+
+test('排版輪 L13 引擎⑧：匯入檔（匯出→解析）保留 merge 並照任一條到跑；排程開跑與補跑（source／makeup）同一套', async () => {
+  const back = parseImport(exportText(ANY_DEF)).def;
+  assert.equal(back.nodes.find((n) => n.id === 'd').merge, 'any', '匯出檔帶著 merge');
+  const imp = setup(back);
+  imp.adapter.setDelayFor('b', 5);
+  imp.adapter.setDelayFor('c', 120);
+  const r1 = imp.runner.startRun('測試', 'wf', {});
+  assertFastWins(imp.adapter, await imp.runner.runUntilPause('測試', 'wf', r1.run_id));
+  const sch = setup(ANY_DEF);
+  sch.adapter.setDelayFor('b', 120);
+  sch.adapter.setDelayFor('c', 5);
+  const r2 = sch.runner.startRun('測試', 'wf', {}, { source: 'schedule', makeup: true });
+  const d2 = await sch.runner.runUntilPause('測試', 'wf', r2.run_id);
+  assert.equal(d2.source, 'schedule');
+  assert.equal(d2.makeup, true);
+  assertFastWins(sch.adapter, d2, { fast: 'c', slow: 'b' });
+});
+
+test('排版輪 L13 引擎⑨：重跑——會合卡出錯後「重試這步」沿用開始當下那條線（慢的早已做完也不加進來）', async () => {
+  const { adapter, runner } = setup(ANY_DEF);
+  adapter.setDelayFor('b', 5);
+  adapter.setDelayFor('c', 120);
+  adapter.setFailOn('d', 1);
+  const run = runner.startRun('測試', 'wf', {});
+  const paused = await runner.runUntilPause('測試', 'wf', run.run_id);
+  assert.equal(paused.status, 'paused');
+  assert.equal(paused.steps.d.status, 'failed');
+  assert.equal(paused.steps.c.status, 'done', '慢的那條照跑完');
+  runner.retry('測試', 'wf', run.run_id, 'd');
+  const done = await runner.runUntilPause('測試', 'wf', run.run_id);
+  assert.equal(done.status, 'done');
+  const calls = callsOf(adapter, 'd');
+  assert.equal(calls.length, 2);
+  assert.ok(!calls[1].upstream.includes('產出:c') && calls[1].upstream.includes('產出:b'), calls[1].upstream);
+  assert.deepEqual(done.steps.d.merge_from, ['b']);
+});
+
+test('排版輪 L13 引擎⑩：停點中的並行支線——快的那條停在等你過目（不算到），慢的做完就開 d；之後核可快的不再觸發 d', async () => {
+  const def = structuredClone(ANY_DEF);
+  def.nodes[1].stop_point = 'always';
+  const { adapter, runner } = setup(def);
+  adapter.setDelayFor('b', 5);
+  adapter.setDelayFor('c', 60);
+  const run = runner.startRun('測試', 'wf', {});
+  const paused = await runner.runUntilPause('測試', 'wf', run.run_id);
+  assert.equal(paused.status, 'paused');
+  assert.equal(paused.steps.b.status, 'waiting_review');
+  assert.equal(paused.steps.d.status, 'done', '等你過目的不算到，另一條到了就開');
+  assert.deepEqual(paused.steps.d.merge_from, ['c']);
+  runner.approve('測試', 'wf', run.run_id, 'b');
+  const done = await runner.runUntilPause('測試', 'wf', run.run_id);
+  assert.equal(done.status, 'done');
+  assert.equal(callsOf(adapter, 'd').length, 1);
+  assert.ok(!callsOf(adapter, 'd')[0].upstream.includes('產出:b'));
+});
+
+test('排版輪 L13 引擎⑥：舊 run 續跑不炸——伺服器重啟時 d 卡在 running（已記 merge_from）只吃那條；沒記過的照開始當下已到的算', async () => {
+  const { dir, store, runner } = setup(ANY_DEF);
+  const run = runner.startRun('測試', 'wf', {});
+  const crashed = store.readRun('測試', 'wf', run.run_id);
+  crashed.steps.a = { ...crashed.steps.a, status: 'done', output: '產出:a' };
+  crashed.steps.b = { ...crashed.steps.b, status: 'done', output: '產出:b' };
+  crashed.steps.c = { ...crashed.steps.c, status: 'running' };
+  crashed.steps.d = { ...crashed.steps.d, status: 'running', merge_from: ['b'] };
+  store.writeRun('測試', 'wf', run.run_id, crashed);
+  const adapter2 = fakeAdapter();
+  adapter2.setDelayFor('c', 5);
+  adapter2.setDelayFor('d', 60);
+  const done = await createRunner({ store: createStore(dir), adapter: adapter2 }).runUntilPause('測試', 'wf', run.run_id);
+  assert.equal(done.status, 'done');
+  assert.ok(!callsOf(adapter2, 'd')[0].upstream.includes('產出:c'), callsOf(adapter2, 'd')[0].upstream);
+  // 沒記過 merge_from（兩條都已做完才重啟）→ 兩條都算到
+  const again = runner.startRun('測試', 'wf', {});
+  const st = store.readRun('測試', 'wf', again.run_id);
+  for (const k of ['a', 'b', 'c']) st.steps[k] = { ...st.steps[k], status: 'done', output: `產出:${k}` };
+  store.writeRun('測試', 'wf', again.run_id, st);
+  const adapter3 = fakeAdapter();
+  const done3 = await createRunner({ store: createStore(dir), adapter: adapter3 }).runUntilPause('測試', 'wf', again.run_id);
+  assert.deepEqual(done3.steps.d.merge_from, ['b', 'c']);
+  assert.ok(callsOf(adapter3, 'd')[0].upstream.includes('產出:c'));
+});
+
+// ── 2026-09-18 審查修正輪 ──────────────────────────────────────────────
+
+test('必填上傳欄位：留著舊的預設文字也不算有檔，開跑要直接擋下來', () => {
+  const { runner, store } = setup({
+    format: 1,
+    name: '月報',
+    // 原本是文字欄位、後來勾成「每次上傳檔案」——default 的說明文字還留著（UI 不會清）
+    params: [{ key: 'data', label: '銷售明細', default: '貼上上個月的明細', required: true, input: 'file' }],
+    nodes: [{ id: 'a', title: '整理', executor: 'ai', stop_point: 'never', instruction: '整理 {{data}}', next: [] }],
+  });
+  assert.throws(
+    () => runner.startRun('測試', 'wf', {}),
+    (e) => e.message.includes('上傳'),
+    '退回 default 文字＝守門打不到＝AI 拿零資料還報完成',
+  );
+  assert.equal(store.listRuns('測試', 'wf').length, 0);
+});
+
+test('同名步驟的產出不准寫進同一個檔；標題結尾的句點不准算出「..」', async () => {
+  const { runner, store, adapter } = setup({
+    format: 1,
+    name: '兩份報告',
+    params: [],
+    nodes: [
+      { id: 'n1', title: '報告', executor: 'ai', stop_point: 'never', instruction: '一', output_file: 'md', next: ['n2'] },
+      { id: 'n2', title: '報告', executor: 'ai', stop_point: 'never', instruction: '二', output_file: 'md', next: ['n3'] },
+      { id: 'n3', title: '整理資料.', executor: 'ai', stop_point: 'never', instruction: '三', output_file: 'md', next: [] },
+    ],
+  });
+  adapter.setOutput('n1', '第一份');
+  adapter.setOutput('n2', '第二份');
+  const run = runner.startRun('測試', 'wf', {});
+  const done = await runner.runUntilPause('測試', 'wf', run.run_id);
+
+  assert.equal(done.steps.n3.status, 'done', '標題結尾句點不該讓這步失敗：' + (done.steps.n3.error ?? ''));
+  const files = [done.steps.n1.file, done.steps.n2.file, done.steps.n3.file];
+  assert.equal(new Set(files).size, 3, `三步要有三個不同的檔：${JSON.stringify(files)}`);
+  assert.ok(!files.some((f) => String(f).includes('..')), `檔名不能含「..」：${JSON.stringify(files)}`);
+  // 各自的內容要是自己的，不是對方的
+  assert.equal(store.readArtifact('測試', 'wf', run.run_id, path.basename(done.steps.n1.file)).toString('utf8'), '第一份');
+  assert.equal(store.readArtifact('測試', 'wf', run.run_id, path.basename(done.steps.n2.file)).toString('utf8'), '第二份');
+});
+
+// 2026-09-18 二次審查：撞名判斷原本比「標題」，但檔名是淨化過的——標題不同、檔名同樣會撞
+test('淨化之後才同名的標題也算撞名：「月報/初稿」與「月報_初稿」、「結案.」與「結案」', async () => {
+  const { runner, store, adapter } = setup({
+    format: 1,
+    name: '月報',
+    params: [],
+    nodes: [
+      { id: 'n1', title: '月報/初稿', executor: 'ai', stop_point: 'never', instruction: '一', output_file: 'md', next: ['n2'] },
+      { id: 'n2', title: '月報_初稿', executor: 'ai', stop_point: 'never', instruction: '二', output_file: 'md', next: ['n3'] },
+      { id: 'n3', title: '結案.', executor: 'ai', stop_point: 'never', instruction: '三', output_file: 'md', next: ['n4'] },
+      { id: 'n4', title: '結案', executor: 'ai', stop_point: 'never', instruction: '四', output_file: 'md', next: [] },
+    ],
+  });
+  adapter.setOutput('n1', '第一份');
+  adapter.setOutput('n2', '第二份');
+  adapter.setOutput('n3', '第三份');
+  adapter.setOutput('n4', '第四份');
+  const run = runner.startRun('測試', 'wf', {});
+  const done = await runner.runUntilPause('測試', 'wf', run.run_id);
+
+  const files = [done.steps.n1.file, done.steps.n2.file, done.steps.n3.file, done.steps.n4.file];
+  assert.equal(new Set(files).size, 4, `四步要有四個不同的檔：${JSON.stringify(files)}`);
+  const read = (f) => store.readArtifact('測試', 'wf', run.run_id, path.basename(f)).toString('utf8');
+  assert.equal(read(done.steps.n1.file), '第一份');
+  assert.equal(read(done.steps.n2.file), '第二份', '後一步不准蓋掉前一步的檔');
+  assert.equal(read(done.steps.n3.file), '第三份');
+  assert.equal(read(done.steps.n4.file), '第四份', '只差一個結尾句點同樣是撞名');
 });

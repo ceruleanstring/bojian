@@ -34,13 +34,18 @@ const PROFILE_INPUT = {
 
 // ---- 詞典常數 ----
 
-test('詞典常數：六類封閉、出廠七條、語氣的同義詞含口吻', () => {
+test('詞典常數：六類封閉、出廠十條（拆法輪加型態／分段／範圍）、語氣的同義詞含口吻', () => {
   assert.deepEqual(FIELD_KINDS, { appearance: '產出的樣子', audience: '對象', time: '時間', range: '範圍', limits: '資源與限制', method: '做法' });
   assert.equal(FACTORY_DICT.version, 1);
-  assert.equal(FACTORY_DICT.fields.length, 7);
-  assert.deepEqual(FACTORY_DICT.fields.map((f) => f.name), ['語氣', '長度', '格式', '讀者', '語言', '截止日', '產出檔類型']);
+  assert.equal(FACTORY_DICT.fields.length, 10);
+  assert.deepEqual(FACTORY_DICT.fields.map((f) => f.name), ['語氣', '長度', '格式', '讀者', '語言', '截止日', '產出檔類型', '型態', '分段', '範圍']);
   assert.ok(FACTORY_DICT.fields.every((f) => f.origin === 'factory' && Object.keys(FIELD_KINDS).includes(f.kind)));
   assert.ok(FACTORY_DICT.fields[0].synonyms.includes('口吻'));
+  // 拆法輪 B4 ⑥／契約 F：三條的 kind 與同義詞（型態／分段歸「產出的樣子」、範圍歸「範圍」，六類不加新類）
+  const byName = Object.fromEntries(FACTORY_DICT.fields.map((f) => [f.name, f]));
+  assert.deepEqual([byName['型態'].kind, byName['型態'].synonyms], ['appearance', ['成品類型', '做成什麼']]);
+  assert.deepEqual([byName['分段'].kind, byName['分段'].synonyms], ['appearance', ['段落', '章節']]);
+  assert.deepEqual([byName['範圍'].kind, byName['範圍'].synonyms], ['range', ['期間', '涵蓋']]);
   assert.equal(DORMANT_STREAK, 5);
 });
 
@@ -106,10 +111,15 @@ test('validateCard：合法卡回空清單；七種錯各自一句人話', () =>
   assert.deepEqual(validateCard(makeCard(PROFILE_INPUT)), []);
   assert.ok(validateCard(makeCard({ ...HABIT_INPUT, text: '  ' })).includes('卡要有內容'));
   assert.ok(validateCard(makeCard({ ...HABIT_INPUT, field: null })).includes('習慣卡要對到詞典裡的欄位'));
-  assert.ok(validateCard(makeCard({ ...HABIT_INPUT, scope: { level: 'team' } })).includes('用在哪只能是全部、分類、流程'));
+  assert.ok(validateCard(makeCard({ ...HABIT_INPUT, scope: { level: 'team' } })).includes('用在哪只能是全部、分類、Workflow'));
+  assert.ok(validateCard(makeCard({ ...HABIT_INPUT, scope: { level: 'workflow', category: '旅遊' } })).includes('用在 Workflow 時要指定分類和 Workflow'));
+  assert.ok(validateCard(makeCard({ ...HABIT_INPUT, scope: { level: 'category' } })).includes('用在分類時要指定分類'));
+  assert.throws(() => widenScope(makeCard(HABIT_INPUT), { level: 'workflow' }), /範圍只能往外擴（分類、全部）/);
   assert.ok(validateCard(makeCard({ ...HABIT_INPUT, source: { kind: 'run-params' } })).includes('沒有出處的卡不存在'));
   assert.ok(validateCard(makeCard({ ...HABIT_INPUT, expires: '明天' })).includes('有效期要是 YYYY-MM-DD'));
-  assert.ok(validateCard(makeCard({ ...PROFILE_INPUT, source: { kind: 'feedback', quote: '民宿太遠' } })).includes('認識卡的來源只限你打的字'));
+  // 反例要用「不是他自己打的字」那種出處：feedback（跑完丟的一句）2026-09-19 起是合法的認識卡來源
+  assert.ok(validateCard(makeCard({ ...PROFILE_INPUT, source: { kind: 'run-params', quote: '一天 3 個點' } })).includes('認識卡的來源只限你打的字'));
+  assert.deepEqual(validateCard(makeCard({ ...PROFILE_INPUT, source: { kind: 'feedback', quote: '民宿太遠' } })), [], 'feedback 也是他自己打的字');
   // 認識卡的層級只准 expression／content；habit 沒有 layer 不驗
   const LAYER_MSG = '認識卡的層級只能是表達層或內容層';
   assert.ok(validateCard(makeCard({ ...PROFILE_INPUT, layer: 'x' })).includes(LAYER_MSG));
@@ -140,8 +150,8 @@ test('ensureFields：對不上的 label 新建一條（kind 沒給＝method、or
   const { dict: next, added } = ensureFields(dict, [{ label: '旅行節奏', kind: 'method' }, { label: '篇幅' }], { category: '旅遊', workflow: 'wf-1' });
   assert.equal(added.length, 1);
   assert.equal(added[0].name, '旅行節奏');
-  assert.equal(next.fields.length, 8);
-  assert.equal(dict.fields.length, 7, '原詞典不被改');
+  assert.equal(next.fields.length, 11);
+  assert.equal(dict.fields.length, 10, '原詞典不被改');
   const f = matchField(next, '旅行節奏');
   assert.equal(f.kind, 'method');
   assert.deepEqual(f.synonyms, []);
@@ -253,7 +263,7 @@ test('widenScope：流程→分類、分類→全部，scope_log 記 from/to/why
   assert.equal(all.scope_log.length, 2);
   assert.equal(all.scope_log[1].why, '跨分類也選了');
   assert.equal(widenScope(wider, {}).scope.level, 'all', '沒給分類＝再往外一圈');
-  assert.throws(() => widenScope(card, { level: 'team' }), /用在哪只能是全部、分類、流程/);
+  assert.throws(() => widenScope(card, { level: 'team' }), /用在哪只能是全部、分類、Workflow/);
 });
 
 test('tickShown：沒被選五次→休眠；被選→連續未選歸零、被選次數加一、last_used_at 更新；不改原卡', () => {
@@ -636,7 +646,7 @@ test('onRunStart 範圍靠證據擴大：probes 中被選→流程→分類、sc
   assert.equal(n1.kind, 'widen');
   assert.equal(n1.card, 'h-b');
   assert.equal(n1.undone, false);
-  assert.equal(n1.text, '「一天 5 個點」的範圍從「大阪行程」擴大到旅遊分類：你在第二條流程也選了它。仍是選項，沒有升格');
+  assert.equal(n1.text, '「一天 5 個點」的範圍從「大阪行程」擴大到旅遊分類：你在第二條 Workflow 也選了它。仍是選項，沒有升格');
   // 同分類再選：已經涵蓋，不再擴、不再通知
   const r2 = start('旅遊', 'wf-a', { picks: { pace: 'h-b' } });
   assert.equal(store.readCard('habit', 'h-b').scope.level, 'category');
@@ -648,7 +658,7 @@ test('onRunStart 範圍靠證據擴大：probes 中被選→流程→分類、sc
   assert.equal(c3.scope_log.length, 2);
   assert.equal(r3.memory.notices.length, 1);
   assert.equal(r3.memory.notices[0].kind, 'widen');
-  assert.equal(r3.memory.notices[0].text, '「一天 5 個點」的範圍從旅遊分類擴大到全部流程：你在別的分類也選了它。仍是選項，沒有升格');
+  assert.equal(r3.memory.notices[0].text, '「一天 5 個點」的範圍從旅遊分類擴大到全部 Workflow：你在別的分類也選了它。仍是選項，沒有升格');
   // 全部尺度的再選：沒得擴
   const r4 = start('工作', 'wf-c', { picks: { pace: 'h-b' } });
   assert.deepEqual(r4.memory.notices, []);
@@ -698,7 +708,7 @@ test('onRunStart 一開始就跨分類的 workflow 尺度卡被選：一步直�
   assert.equal(r.memory.notices.length, 1);
   assert.equal(r.memory.notices[0].kind, 'widen');
   assert.equal(r.memory.notices[0].card, 'h-c');
-  assert.equal(r.memory.notices[0].text, '「一天 5 個點」的範圍從「出差」擴大到全部流程：你在別的分類也選了它。仍是選項，沒有升格');
+  assert.equal(r.memory.notices[0].text, '「一天 5 個點」的範圍從「出差」擴大到全部 Workflow：你在別的分類也選了它。仍是選項，沒有升格');
 });
 
 test('onRunStart 認識卡：帶進工作單的寫 last_used_at；整層暫停或身分沒列的不寫；被外圈蓋掉的不寫', () => {
@@ -724,6 +734,41 @@ test('onRunStart 認識卡：帶進工作單的寫 last_used_at；整層暫停�
   start('旅遊', 'wf-a', {});
   assert.equal(store.readCard('profile', 'p-5').last_used_at, null, '整層暫停：關於你不帶');
   assert.ok(memory.forWorkflow('旅遊', 'wf-a').paused);
+});
+
+test('落地：路由發明出來的新欄位不做成習慣卡（沒有 chip 的位置），降成認識卡內容層；詞典照樣長那一格', async () => {
+  // 2026-09-19 劇本實走抓到：跑完回報「民宿太遠」長出習慣卡、欄位「住宿位置」，
+  // 但沒有任何流程有這個欄位＝開跑表單上沒有它的 chip，通知卻已經說「下次開跑當選項」。
+  const { store, memory } = facadeSetup();
+  const say = (json) => createMemory({ store, adapter: { async complete() { return json; } } });
+  const m = say('{"cards":[{"bucket":"habit","field":"住宿位置","kind":"appearance","text":"住宿選靠市區的","reason":"換個場合會填別的"}]}');
+  const def = store.readWorkflow('旅遊', 'wf-a');
+  const run = {
+    run_id: 'r-land-1', workflow: { category: '旅遊', id: 'wf-a', name: def.name }, def, status: 'done', params: {},
+    started_at: new Date().toISOString(), finished_at: null,
+    memory: { identity: null, picks: {}, changed: [], prev_run: null, notices: [] },
+    steps: { a: { status: 'done', output: 'x' } },
+  };
+  store.writeRun('旅遊', 'wf-a', run.run_id, run);
+  const notice = await m.onFeedback({ category: '旅遊', id: 'wf-a', runId: run.run_id, text: '民宿太遠了，下次找靠市區的' });
+
+  const landed = store.listCards().filter((c) => c.source?.kind !== 'intro');
+  assert.equal(landed.length, 1);
+  assert.equal(landed[0].bucket, 'profile', '沒有欄位家的卡不做成習慣卡');
+  assert.equal(landed[0].layer, 'content', '它講的是他的偏好，按場合帶');
+  assert.equal(landed[0].field, '住宿位置', '對到哪一格還是留著，記憶頁看得到');
+  assert.ok(notice.text.includes('認識卡'), `通知要講認識卡，不能說「下次開跑當選項」：${notice.text}`);
+  assert.ok(!notice.text.includes('下次開跑當選項'));
+  assert.ok((store.readDict().fields ?? []).some((f) => f.name === '住宿位置'), '詞典照樣長那一格，拆解器以後拆得出這個欄位');
+
+  // 對照組：欄位詞典裡已經有的格（長度＝出廠詞典就有）照舊做成習慣卡
+  const m2 = say('{"cards":[{"bucket":"habit","field":"長度","text":"寫 200 字以內","reason":"換個場合會填別的"}]}');
+  const run2 = { ...run, run_id: 'r-land-2', memory: { ...run.memory, notices: [] } };
+  store.writeRun('旅遊', 'wf-a', run2.run_id, run2);
+  const n2 = await m2.onFeedback({ category: '旅遊', id: 'wf-a', runId: run2.run_id, text: '下次寫短一點，200 字以內' });
+  const habit = store.listCards('habit').find((c) => c.text === '寫 200 字以內');
+  assert.ok(habit, '詞典有這一格：照舊是習慣卡');
+  assert.ok(n2.text.includes('下次開跑當選項'));
 });
 
 test('forWorkflow.options：跟 habitOptions 同一份（本流程 covers、同分類別條 probes 帶流程名）', () => {

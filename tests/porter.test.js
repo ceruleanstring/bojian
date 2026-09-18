@@ -27,7 +27,7 @@ test('匯出→解析 roundtrip：定義一致、不含履歷與 run；排程節
 });
 
 test('壞檔／不認得的格式版本 → 人話錯誤', () => {
-  assert.throws(() => parseImport('{{{亂七八糟'), (e) => e instanceof PorterError && e.message.includes('不是剝繭流程檔'));
+  assert.throws(() => parseImport('{{{亂七八糟'), (e) => e instanceof PorterError && e.message.includes('不是剝繭 Workflow 檔'));
   assert.throws(() => parseImport('bojian_export: 99\nworkflow: {}'), (e) => e instanceof PorterError && e.message.includes('版本'));
   assert.throws(() => parseImport('bojian_export: 1\nworkflow:\n  format: 1\n  name: x\n  params: []\n  nodes: []'),
     PorterError, '定義不合法也要擋');

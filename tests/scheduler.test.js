@@ -23,7 +23,16 @@ function setup(nowIso) {
   const runner = createRunner({ store, adapter, now: () => clock.t });
   const kicks = [];
   const scheduler = createScheduler({ store, runner, kick: (...a) => kicks.push(a), now: () => clock.t });
-  return { store, runner, scheduler, clock, kicks };
+  return { dir, store, runner, scheduler, clock, kicks };
+}
+
+// 把某一趟的 run.yaml 弄壞（手動改壞／寫到一半斷電）。先斷言檔案真的在那裡——
+// store 沒有對外暴露 run 目錄，路徑是自己組的，組錯就會靜靜地寫到別的地方、測試假通過
+function corruptRun(dir, category, id, runId) {
+  const f = path.join(dir, 'workflows', category, id, 'runs', runId, 'run.yaml');
+  assert.ok(fs.existsSync(f), `run.yaml 不在假設的路徑上：${f}`);
+  fs.writeFileSync(f, 'a: [這不是合法 yaml\n  b: "', 'utf8');
+  return f;
 }
 
 const WEEKLY = { id: 's1', name: '例行週會', workflow_id: '工作/meet', freq: 'weekly', weekday: 1, time: '08:00', enabled: true, auto_makeup: false, remind_leads: [], overrides: {} };
@@ -211,4 +220,55 @@ test('複查 M4：落盤的非法排程——隔離不跑、發一次修復提�
   const inv = store.readNotices().filter((n) => n.type === 'invalid_schedule');
   assert.equal(inv.length, 1, '修復提示一次、指紋去重');
   assert.ok(inv[0].desc.includes('時間'));
+});
+
+// ── 2026-09-18 審查修正輪 ──────────────────────────────────────────────
+
+test('每月 31 號：短月份夾到當月最後一天，不准整個月靜默不跑', () => {
+  const m31 = { ...WEEKLY, freq: 'monthly', day: 31, time: '09:00' };
+  // 2026 年 2 月只有 28 天：要在 2/28 觸發，而不是整個二月沒有 occurrence
+  assert.equal(fmtLocal(nextDue(m31, new Date('2026-02-01T00:00').getTime())), '2026-02-28T09:00');
+  assert.equal(fmtLocal(nextDue(m31, new Date('2026-04-01T00:00').getTime())), '2026-04-30T09:00', '4 月只有 30 天');
+  assert.equal(fmtLocal(nextDue(m31, new Date('2026-03-01T00:00').getTime())), '2026-03-31T09:00', '長月份照原本的日子');
+  // 夾出來的那一天要算「真實的一次」，否則指紋與覆寫都對不上
+  assert.equal(isOccurrence(m31, '2026-02-28T09:00'), true);
+  assert.equal(isOccurrence(m31, '2026-02-27T09:00'), false);
+  // 30 號的排程在 2 月同樣夾到 28
+  const m30 = { ...WEEKLY, freq: 'monthly', day: 30, time: '09:00' };
+  assert.equal(fmtLocal(nextDue(m30, new Date('2026-02-01T00:00').getTime())), '2026-02-28T09:00');
+});
+
+test('一個壞掉的 run.yaml 不准癱瘓整輪 tick：等時刻步驟照樣醒', () => {
+  const { dir, store, scheduler, clock, kicks } = setup('2026-08-24T08:00:30');
+  // 先寫壞的那一趟（id 排在前面，掃描時會先碰到它），再寫等時刻、已經到點的那一趟
+  store.writeRun('工作', 'meet', 'r-aaa-bad', { run_id: 'r-aaa-bad', status: 'paused', steps: {} });
+  corruptRun(dir, '工作', 'meet', 'r-aaa-bad');
+  store.writeRun('工作', 'meet', 'r-zzz-good', {
+    run_id: 'r-zzz-good', status: 'paused', source: 'manual', workflow: { name: '例行週會' }, def: DEF,
+    steps: { a: { status: 'waiting_time', wake_at: new Date(clock.t - 60e3).toISOString() } },
+  });
+
+  scheduler.tickOnce();
+
+  const after = store.readRun('工作', 'meet', 'r-zzz-good');
+  assert.notEqual(after.steps.a.status, 'waiting_time', '壞檔把整輪 tick 弄死了，到點的步驟沒醒');
+  assert.ok(kicks.some(([, , rid]) => rid === 'r-zzz-good'), '醒來後要推進');
+});
+
+test('排程開跑也要過健檢：手動會被擋的流程，到點不准靜默跑掉', () => {
+  const { store, scheduler } = setup('2026-08-24T08:00:30');
+  // 必填的上傳欄位——排程沒辦法替你上傳，健檢 R6 要擋
+  store.writeWorkflow('工作', 'meet', {
+    ...DEF,
+    params: [{ key: 'data', label: '銷售明細', default: '貼上上個月的明細', required: true, input: 'file' }],
+    nodes: [{ id: 'a', title: '整理', executor: 'ai', stop_point: 'never', instruction: '整理 {{data}}', next: [] }],
+  });
+  store.writeSchedules([structuredClone(WEEKLY)]);
+
+  scheduler.tickOnce();
+
+  assert.equal(store.listRuns('工作', 'meet').length, 0, '健檢擋下的流程不准開跑');
+  const failed = store.readNotices().filter((n) => n.type === 'start_failed');
+  assert.equal(failed.length, 1, '要發通知說明為什麼沒跑，不是靜默跳過');
+  assert.ok(failed[0].desc.includes('健檢'), failed[0].desc);
 });

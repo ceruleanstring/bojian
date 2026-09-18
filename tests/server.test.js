@@ -5,10 +5,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import http from 'node:http';
 import yaml from 'js-yaml';
-import { createApp } from '../src/server.js';
+import { createApp, freeOrgId, previewArtifact } from '../src/server.js';
 import { createStore } from '../src/store.js';
-import { makeCard } from '../src/memory.js';
+import { makeCard, ensureFields } from '../src/memory.js';
 
 function fakeAdapter() {
   const calls = [];
@@ -19,9 +20,13 @@ function fakeAdapter() {
   let routeResponses = []; // 記憶輪 M2：三問路由（kind='memory'）自己一條隊列；缺省 ''＝路由解析失敗＝「這句沒記成」，不擋任何流程
   let available = true;
   const completes = []; // 監工輪 K5：通用補全的 meta（連接器例外要看得到 mcp）
+  let usageSink = null; // 拆法輪 B4 ⑦：比照 host-adapter.settleParsed 記帳（at＋meta 展開）；只在測試明叫 enableUsage() 才記，別的測試帳本照舊空
+  let usageOn = false;
   return {
     calls,
     completes,
+    setUsageSink(fn) { usageSink = fn; },
+    enableUsage() { usageOn = true; },
     setCompleteResponses(rs) { completeResponses = rs; },
     // 交貨查核輪：查核／擬規則各自一條隊列，跟一般 complete()（分岔、compose…）分開——kind 對不上就照舊
     setCheckResponses(rs) { checkResponses = rs; },
@@ -31,6 +36,7 @@ function fakeAdapter() {
     setAvailable(v) { available = v; },
     async complete({ meta, prompt } = {}) {
       completes.push({ meta, prompt });
+      if (usageOn && usageSink) usageSink({ at: new Date().toISOString(), ...(meta ?? {}), input_tokens: 1, output_tokens: 1 });
       if (meta?.kind === 'memory') {
         const r = routeResponses.length > 1 ? routeResponses.shift() : routeResponses[0] ?? '';
         return typeof r === 'function' ? r(meta, prompt) : r;
@@ -43,20 +49,22 @@ function fakeAdapter() {
       return completeResponses.length > 1 ? completeResponses.shift() : completeResponses[0] ?? '';
     },
     async checkAvailable() { return available; },
-    async executeNode({ nodeId, instruction, upstream, editRules, meta }) {
-      calls.push({ nodeId, instruction, upstream, editRules, meta });
+    async executeNode({ nodeId, instruction, upstream, editRules, meta, attachments }) {
+      calls.push({ nodeId, instruction, upstream, editRules, meta, attachments }); // 排版輪 L11：多記 attachments（本次上傳掛在哪一步）
       return `產出:${nodeId}`;
     },
   };
 }
 
 async function startApp() {
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bojian-server-'));
+  // 多組織：createApp 收的是「資料根」，各組織的一整套資料在 root/orgs/<id>/。
+  // 底下所有測試的 dataDir 一律指預設組織夾（main），路徑斷言完全不用改。
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bojian-server-'));
   const adapter = fakeAdapter();
-  const app = createApp({ dataDir, adapter });
+  const app = createApp({ dataDir: root, adapter });
   await app.start(0); // 動態埠
   const base = `http://127.0.0.1:${app.port()}`;
-  return { app, base, adapter, dataDir };
+  return { app, base, adapter, dataDir: path.join(root, 'orgs', 'main'), root };
 }
 
 async function api(base, method, p, body) {
@@ -177,14 +185,191 @@ test('server：compose 端點回覆＋草稿；連兩次壞 → 400 人話', asy
   try {
     const def = { format: 1, name: '訂餐廳', params: [], nodes: [{ id: 'a', title: '找店', executor: 'ai', stop_point: 'always', instruction: '列三家', next: [] }] };
     adapter.setCompleteResponses([`拆好了\n\`\`\`yaml\n${JSON.stringify(def)}\n\`\`\``]);
-    const res = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '訂餐廳' }] });
+    // 拆法輪 B4 ⑧：沒帶 phase＝第一趟（出格子），舊測改成明帶 phase:'draft' 續綠
+    const res = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '訂餐廳' }], phase: 'draft' });
     assert.equal(res.status, 200);
     assert.equal(res.json.draft.name, '訂餐廳');
     assert.ok(res.json.reply.includes('拆好了'));
     adapter.setCompleteResponses(['亂七八糟']);
-    const bad = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '拆' }] });
+    const bad = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '拆' }], phase: 'draft' });
     assert.equal(bad.status, 400);
     assert.ok(bad.json.error.includes('換個說法'));
+  } finally {
+    await app.stop();
+  }
+});
+
+// —— 拆法輪 B4：/api/compose 兩趟（契約 A 伺服器側）——
+const B4_DEF = { format: 1, name: '週報', params: [], nodes: [{ id: 'a', title: '查新聞', executor: 'ai', stop_point: 'always', instruction: '查近 7 天', next: [] }] };
+const B4_SHAPE_REPLY = '先猜是週報\n```json\n{"shape":{"deliverable":{"value":"週報","basis":"你說的"},"type":{"value":"文章","basis":"預設"}},"sources":[{"name":"本週新聞","from":"web","note":"近 7 天"}],"category":"旅遊"}\n```';
+const B4_DRAFT_REPLY = `落地了\n\`\`\`yaml\n${JSON.stringify(B4_DEF)}\n\`\`\``;
+const composeCalls = (adapter) => adapter.completes.filter((c) => c.meta?.kind === 'compose');
+
+test('B4 ①：POST /api/compose {messages}（無 phase、無 draft）→第一趟：宿主收到「第一趟」prompt、回 phase shape 含 shape／sources／category、無 draft、不記路', async () => {
+  const { app, base, adapter } = await startApp();
+  try {
+    await api(base, 'POST', '/api/categories', { name: '旅遊' });
+    adapter.setCompleteResponses([B4_SHAPE_REPLY]);
+    const res = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '每週整理新聞' }] });
+    assert.equal(res.status, 200, JSON.stringify(res.json));
+    assert.equal(res.json.phase, 'shape');
+    assert.equal(res.json.reply, '先猜是週報');
+    assert.equal(res.json.shape.deliverable.value, '週報');
+    assert.deepEqual(res.json.shape.range, { value: '', basis: '預設' }, '缺格補齊');
+    assert.deepEqual(res.json.sources, [{ name: '本週新聞', from: 'web', note: '近 7 天' }]);
+    assert.equal(res.json.category, '旅遊');
+    assert.equal('draft' in res.json, false);
+    assert.equal('memory_notice' in res.json, false, '第一趟不記路');
+    const calls = composeCalls(adapter);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].meta.phase, 'shape');
+    assert.ok(calls[0].prompt.includes('# 這一趟\n第一趟：定成品。'));
+    assert.ok(!calls[0].prompt.includes('\n# 已確認的成品格子\n'), '規矩 13 條文提到那段名字，只驗段標題行不在');
+    assert.ok(!adapter.completes.some((c) => c.meta?.kind === 'memory'), 'memory.onChat 第一趟不叫');
+    // 拆解器建議的分類不存在→null
+    adapter.setCompleteResponses([B4_SHAPE_REPLY.replace('"category":"旅遊"', '"category":"火星"')]);
+    const r2 = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '每週整理新聞' }] });
+    assert.equal(r2.json.category, null);
+    // 「未分類」合法
+    adapter.setCompleteResponses([B4_SHAPE_REPLY.replace('"category":"旅遊"', '"category":"未分類"')]);
+    const r3 = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '每週整理新聞' }] });
+    assert.equal(r3.json.category, '未分類');
+  } finally {
+    await app.stop();
+  }
+});
+
+test('B4 ②：第二趟 {phase:draft, shape, sources, category:旅遊}→draft.category 覆寫、phase draft、memory_notice 有鍵；category 不存在→draft.category 無', async () => {
+  const { app, base, adapter } = await startApp();
+  try {
+    await api(base, 'POST', '/api/categories', { name: '旅遊' });
+    adapter.setCompleteResponses([B4_DRAFT_REPLY]);
+    const shape = { deliverable: { value: '週報', basis: '你說的' } };
+    const sources = [{ name: '本週新聞', from: 'web', note: '近 7 天' }];
+    const res = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '每週整理新聞' }], phase: 'draft', shape, sources, category: '旅遊' });
+    assert.equal(res.status, 200, JSON.stringify(res.json));
+    assert.equal(res.json.phase, 'draft');
+    assert.equal(res.json.draft.category, '旅遊');
+    assert.equal(res.json.draft.name, '週報');
+    assert.equal(res.json.reply, '落地了');
+    assert.ok('memory_notice' in res.json);
+    const calls = composeCalls(adapter);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].meta.phase, 'draft');
+    assert.ok(calls[0].prompt.includes('# 已確認的成品格子\n- 成品：週報（你說的）'));
+    assert.ok(calls[0].prompt.includes('# 資料來源\n- 本週新聞：AI 上網查（近 7 天）'));
+    assert.ok(calls[0].prompt.includes('- 分類：旅遊'));
+    assert.ok(adapter.completes.some((c) => c.meta?.kind === 'memory'), 'memory.onChat 第二趟才叫');
+    // 覆核該修：拆解器自己在 yaml 寫了 category（亂寫）——body 分類不合法→鍵刪掉（不漏 AI 髒值、也不寫 null，validateWorkflow 對 null 會報「要是文字」）；合法→蓋成 body 的
+    const DIRTY_REPLY = `落地了\n\`\`\`yaml\n${JSON.stringify({ ...B4_DEF, category: '亂寫' })}\n\`\`\``;
+    adapter.setCompleteResponses([DIRTY_REPLY]);
+    const bad = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '每週整理新聞' }], phase: 'draft', shape, sources, category: '不存在' });
+    assert.equal(bad.status, 200);
+    assert.equal('category' in bad.json.draft, false, '不合法的分類→AI 自寫的也不採，鍵刪掉');
+    adapter.setCompleteResponses([DIRTY_REPLY]);
+    const over = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '每週整理新聞' }], phase: 'draft', shape, sources, category: '旅遊' });
+    assert.equal(over.json.draft.category, '旅遊', 'AI 寫錯也不採，蓋成 body 的');
+    // 對話修改（current_draft 帶已存在的分類、body 沒帶）：退到 current_draft 驗過的分類，不吃 AI 亂寫
+    adapter.setCompleteResponses([DIRTY_REPLY]);
+    const edit = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '改一下' }], current_draft: { ...B4_DEF, category: '旅遊' } });
+    assert.equal(edit.json.draft.category, '旅遊', '對話修改沿用 current_draft 的分類');
+    adapter.setCompleteResponses([DIRTY_REPLY]);
+    const editNone = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '改一下' }], current_draft: B4_DEF });
+    assert.equal('category' in editNone.json.draft, false, '草稿沒分類、body 沒帶→鍵刪掉');
+    // 「未分類」合法
+    adapter.setCompleteResponses([B4_DRAFT_REPLY]);
+    const un = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '每週整理新聞' }], phase: 'draft', shape, sources, category: '未分類' });
+    assert.equal(un.json.draft.category, '未分類');
+  } finally {
+    await app.stop();
+  }
+});
+
+test('B4 ③：PUT settings compose.confirm_shape=false→POST {messages} 一次回 draft＋shape＋auto:true；宿主叫兩次；卷宗 -shape／-draft 各一對', async () => {
+  const { app, base, adapter, dataDir } = await startApp();
+  try {
+    await api(base, 'POST', '/api/categories', { name: '旅遊' });
+    const put = await api(base, 'PUT', '/api/settings', { compose: { confirm_shape: false } });
+    assert.equal(put.status, 200, JSON.stringify(put.json));
+    assert.equal(put.json.compose.confirm_shape, false);
+    adapter.setCompleteResponses([B4_SHAPE_REPLY, B4_DRAFT_REPLY]);
+    const res = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '每週整理新聞' }] });
+    assert.equal(res.status, 200, JSON.stringify(res.json));
+    assert.equal(res.json.phase, 'draft');
+    assert.equal(res.json.auto, true);
+    assert.equal(res.json.draft.name, '週報');
+    assert.equal(res.json.draft.category, '旅遊', '第一趟建議的分類進第二趟');
+    assert.equal(res.json.shape.deliverable.value, '週報');
+    assert.equal(res.json.sources[0].from, 'web');
+    assert.ok('memory_notice' in res.json);
+    const calls = composeCalls(adapter);
+    assert.deepEqual(calls.map((c) => c.meta.phase), ['shape', 'draft']);
+    assert.ok(calls[1].prompt.includes('# 已確認的成品格子\n- 成品：週報（你說的）'), '第二趟用第一趟結果');
+    const logs = fs.readdirSync(path.join(dataDir, 'logs', 'compose')).sort();
+    assert.equal(logs.length, 4, logs.join(','));
+    assert.equal(logs.filter((f) => /-shape\.txt$/.test(f)).length, 1);
+    assert.equal(logs.filter((f) => /-shape\.reply\.txt$/.test(f)).length, 1);
+    assert.equal(logs.filter((f) => /-draft\.txt$/.test(f)).length, 1);
+    assert.equal(logs.filter((f) => /-draft\.reply\.txt$/.test(f)).length, 1);
+    // 明帶 phase:'shape' 時開關不管用（前端「重擬」）：只跑第一趟
+    adapter.setCompleteResponses([B4_SHAPE_REPLY]);
+    const re = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '每週整理新聞' }], phase: 'shape' });
+    assert.equal(re.json.phase, 'shape');
+    assert.equal('draft' in re.json, false);
+    assert.equal(composeCalls(adapter).length, 3);
+  } finally {
+    await app.stop();
+  }
+});
+
+test('B4 ④：{current_draft} 無 phase→直接第二趟：宿主一次、prompt 含「# 現有草稿」不含「已確認的成品格子」、meta.phase draft', async () => {
+  const { app, base, adapter } = await startApp();
+  try {
+    adapter.setCompleteResponses([B4_DRAFT_REPLY]);
+    const res = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '第一步改成查三天' }], current_draft: B4_DEF });
+    assert.equal(res.status, 200, JSON.stringify(res.json));
+    assert.equal(res.json.phase, 'draft');
+    assert.equal(res.json.draft.name, '週報');
+    assert.equal('auto' in res.json, false);
+    const calls = composeCalls(adapter);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].meta.phase, 'draft');
+    assert.ok(calls[0].prompt.includes('# 現有草稿'));
+    assert.ok(!calls[0].prompt.includes('\n# 已確認的成品格子\n'), '規矩 13 條文提到那段名字，只驗段標題行不在');
+  } finally {
+    await app.stop();
+  }
+});
+
+test('B4 ⑤：GET /api/settings 舊檔（沒 compose）回 compose.confirm_shape:true；PUT {compose:{confirm_shape:"x"}} 400 人話', async () => {
+  const { app, base, dataDir } = await startApp();
+  try {
+    fs.writeFileSync(path.join(dataDir, 'settings.json'), JSON.stringify({ version: 1, memory: { paused: false } }), 'utf8');
+    const got = (await api(base, 'GET', '/api/settings')).json;
+    assert.deepEqual(got.compose, { confirm_shape: true });
+    const bad = await api(base, 'PUT', '/api/settings', { compose: { confirm_shape: 'x' } });
+    assert.equal(bad.status, 400);
+    assert.ok(bad.json.error.includes('拆之前先確認成品長相要是開或關'), bad.json.error);
+    assert.equal((await api(base, 'GET', '/api/settings')).json.compose.confirm_shape, true, '錯的不落地');
+  } finally {
+    await app.stop();
+  }
+});
+
+test('B4 ⑦：usage.jsonl 兩趟各一行 kind compose、phase 各異', async () => {
+  const { app, base, adapter, dataDir } = await startApp();
+  try {
+    adapter.enableUsage();
+    await api(base, 'POST', '/api/categories', { name: '旅遊' });
+    adapter.setCompleteResponses([B4_SHAPE_REPLY]);
+    const first = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '每週整理新聞' }] });
+    assert.equal(first.status, 200);
+    adapter.setCompleteResponses([B4_DRAFT_REPLY]);
+    const second = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '每週整理新聞' }], phase: 'draft', shape: first.json.shape, sources: first.json.sources, category: first.json.category });
+    assert.equal(second.status, 200);
+    const rows = fs.readFileSync(path.join(dataDir, 'usage.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)).filter((u) => u.kind === 'compose');
+    assert.equal(rows.length, 2);
+    assert.deepEqual(rows.map((u) => u.phase), ['shape', 'draft']);
   } finally {
     await app.stop();
   }
@@ -364,7 +549,7 @@ test('server：匯出下載→匯入掃描（可疑標黃）→確認入庫「�
     // 壞檔
     const bad = await api(base, 'POST', '/api/import/scan', { content: '{{{亂' });
     assert.equal(bad.status, 400);
-    assert.ok(bad.json.error.includes('不是剝繭流程檔'));
+    assert.ok(bad.json.error.includes('不是剝繭 Workflow 檔'));
   } finally {
     await app.stop();
   }
@@ -394,7 +579,7 @@ test('server：PUT 定義（畫布編輯）記進版本履歷；提議目標被�
     const before = (await api(base, 'GET', `${wfP}/versions`)).json.length;
     const acc = await api(base, 'POST', '/api/proposals/p-test-1/accept', {});
     assert.equal(acc.status, 400);
-    assert.ok(acc.json.error.includes('已經不在'), `要人話：${JSON.stringify(acc.json)}`);
+    assert.ok(acc.json.error.includes('已經不在') && acc.json.error.includes('（Workflow 後來改過）'), `要人話：${JSON.stringify(acc.json)}`);
     assert.equal((await api(base, 'GET', `${wfP}/versions`)).json.length, before, '失敗不准升版');
     assert.deepEqual((await api(base, 'GET', `${wfP}/proposals`)).json.pending, [], '作廢的提議不再出現');
   } finally {
@@ -610,7 +795,7 @@ test('資料通道輪：POST /api/preflight 回 issues/inputs/unused_params；PO
     const pf = await api(base, 'POST', '/api/preflight', { def });
     assert.equal(pf.status, 200);
     assert.ok(pf.json.issues.some((i) => i.level === 'block' && i.code === 'no-input' && i.node === 'classify'));
-    assert.equal(pf.json.inputs.classify[0].kind, 'human');
+    assert.equal(pf.json.inputs.src[pf.json.inputs.pred.classify[0]].h, 1); // L14b：不重複的寫法——classify 的來源是人做步驟
     assert.deepEqual(pf.json.unused_params, []);
     const bad = await api(base, 'POST', '/api/preflight', { def: { nope: true } });
     assert.equal(bad.status, 400, '壞定義回 400 人話');
@@ -1182,7 +1367,7 @@ test('K5：用講的建流程／匯入掃描／行事曆快照都留工作單（
   try {
     const draft = { format: 1, name: '訂餐廳', params: [], nodes: [{ id: 'a', title: '找店', executor: 'ai', stop_point: 'always', instruction: '列三家', next: [] }] };
     adapter.setCompleteResponses([`拆好了\n\`\`\`yaml\n${JSON.stringify(draft)}\n\`\`\``]);
-    await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '訂餐廳' }] });
+    await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '訂餐廳' }], phase: 'draft' });
     let p = logPair(dataDir, 'compose');
     assert.equal(p.asked.length, 1, `建流程的指示要留一份：${JSON.stringify(logFiles(dataDir, 'compose'))}`);
     assert.equal(p.replied.length, 1, '回覆也要留一份');
@@ -1290,7 +1475,7 @@ test('M1b：存新流程→詞典長出新欄位（origin 記流程）、頂層 
     assert.equal(made.status, 200, JSON.stringify(made.json));
     assert.deepEqual(made.json.dict_similar, []);
     const dict = (await api(base, 'GET', '/api/memory/dict')).json;
-    assert.equal(dict.fields.length, 8, '口吻是語氣的同義詞，不長；旅行節奏長一條');
+    assert.equal(dict.fields.length, 11, '口吻是語氣的同義詞，不長；旅行節奏長一條（出廠十條＋一）');
     const f = dict.fields.find((x) => x.name === '旅行節奏');
     assert.equal(f.kind, 'method');
     assert.deepEqual(f.origin, { category: '測試', workflow: made.json.id });
@@ -1413,7 +1598,7 @@ test('M1b：記憶卡 API——手動新增與人話驗證、取代鏈、退休�
     assert.equal((await api(base, 'POST', `/api/memory/cards/${p.json.id}/extend`, { expires: null })).json.expires, null, '空＝永久');
     const badScope = await api(base, 'POST', `/api/memory/cards/${p.json.id}/scope`, { level: 'team' });
     assert.equal(badScope.status, 400);
-    assert.equal(badScope.json.error, '用在哪只能是全部、分類、流程');
+    assert.equal(badScope.json.error, '用在哪只能是全部、分類、Workflow');
     const scoped = (await api(base, 'POST', `/api/memory/cards/${p.json.id}/scope`, { level: 'all' })).json;
     assert.deepEqual(scoped.scope, { level: 'all', category: null, workflow: null });
     assert.equal(scoped.scope_log.at(-1).from.level, 'category');
@@ -1451,7 +1636,7 @@ test('M1b：記憶卡 API——手動新增與人話驗證、取代鏈、退休�
     assert.equal(sum.intro_done, false);
     assert.equal(sum.paused, false);
     assert.deepEqual(sum.sensitive, { health: false, politics: false, religion: false, finance: false });
-    assert.deepEqual(sum.counts, { profile: 2, habit: 3, groups: 0, dict: 7 });
+    assert.deepEqual(sum.counts, { profile: 2, habit: 3, groups: 0, dict: 10 });
     assert.ok(sum.exceptions.expired.some((c) => c.id === 'p-old00000-aaaa'), JSON.stringify(sum.exceptions));
     assert.equal(sum.exceptions.expired.some((c) => c.id === p.json.id), false, '還沒到期的不算');
     assert.deepEqual(sum.exceptions.dormant.map((c) => c.id), ['h-dorm0000-aaaa']);
@@ -1461,7 +1646,7 @@ test('M1b：記憶卡 API——手動新增與人話驗證、取代鏈、退休�
     const cleared = await api(base, 'POST', '/api/memory/clear', {});
     assert.equal(cleared.status, 200);
     assert.equal(cleared.json.moved, 5);
-    assert.deepEqual((await api(base, 'GET', '/api/memory/summary')).json.counts, { profile: 0, habit: 0, groups: 0, dict: 7 });
+    assert.deepEqual((await api(base, 'GET', '/api/memory/summary')).json.counts, { profile: 0, habit: 0, groups: 0, dict: 10 });
     assert.equal((await api(base, 'GET', '/api/memory/trash')).json.length, 5);
   } finally {
     await app.stop();
@@ -1469,8 +1654,9 @@ test('M1b：記憶卡 API——手動新增與人話驗證、取代鏈、退休�
 });
 
 test('M1b：設定——PUT 逐欄人話、部分送只改送的鍵、GET 帶 data_dir 與 version、新流程吃 defaults；備份 POST／GET', async () => {
-  const { app, base, dataDir } = await startApp();
-  const backupsRoot = path.join(path.dirname(dataDir), `${path.basename(dataDir)}-backups`);
+  const { app, base, dataDir, root } = await startApp();
+  // 多組織：備份備的是整個資料根（全部組織一起），所以備份夾在 root 旁邊、內容多一層 orgs/main/
+  const backupsRoot = path.join(path.dirname(root), `${path.basename(root)}-backups`);
   try {
     const bad = await api(base, 'PUT', '/api/settings', { defaults: { check_facts: 'maybe' } });
     assert.equal(bad.status, 400);
@@ -1507,7 +1693,7 @@ test('M1b：設定——PUT 逐欄人話、部分送只改送的鍵、GET 帶 da
     assert.equal(bk.status, 200, JSON.stringify(bk.json));
     assert.ok(fs.existsSync(bk.json.path));
     assert.ok(bk.json.at);
-    assert.ok(fs.existsSync(path.join(bk.json.path, 'settings.json')), '備份含設定檔');
+    assert.ok(fs.existsSync(path.join(bk.json.path, 'orgs', 'main', 'settings.json')), '備份含設定檔');
     const list = (await api(base, 'GET', '/api/backup')).json;
     assert.equal(list.length, 1);
     assert.equal(list[0].name, path.basename(bk.json.path));
@@ -1518,8 +1704,8 @@ test('M1b：設定——PUT 逐欄人話、部分送只改送的鍵、GET 帶 da
 });
 
 test('M1b 修正輪：備份失敗只回人話——不透傳原始錯誤碼與本機路徑', async () => {
-  const { app, base, dataDir } = await startApp();
-  const backupsRoot = path.join(path.dirname(dataDir), `${path.basename(dataDir)}-backups`);
+  const { app, base, dataDir, root } = await startApp();
+  const backupsRoot = path.join(path.dirname(root), `${path.basename(root)}-backups`); // 多組織：備份夾跟著資料根
   try {
     fs.writeFileSync(backupsRoot, 'x'); // 備份夾的位置先被一個檔案佔住→複製一定失敗
     const res = await api(base, 'POST', '/api/backup', {});
@@ -1574,7 +1760,7 @@ test('M1b 修正輪：scope 路由存檔前驗卡——流程層缺分類或流�
     const p = `/api/memory/cards/${made.json.id}`;
     const bad = await api(base, 'POST', `${p}/scope`, { level: 'workflow' });
     assert.equal(bad.status, 400);
-    assert.ok(bad.json.error.includes('用在流程時要指定分類和流程'), bad.json.error);
+    assert.ok(bad.json.error.includes('用在 Workflow 時要指定分類和 Workflow'), bad.json.error);
     const after = (await api(base, 'GET', p)).json;
     assert.deepEqual(after.scope, { level: 'all', category: null, workflow: null }, '沒過驗證的不落地');
     assert.deepEqual(after.scope_log ?? [], [], '沒過驗證也不記 scope_log');
@@ -1595,7 +1781,7 @@ test('M1b：詞典 API——改性質與同義詞、六類之外擋、合併把�
   const { app, base, dataDir } = await startApp();
   try {
     const store = createStore(dataDir);
-    assert.equal((await api(base, 'GET', '/api/memory/dict')).json.fields.length, 7);
+    assert.equal((await api(base, 'GET', '/api/memory/dict')).json.fields.length, 10);
     const badKind = await api(base, 'PUT', `/api/memory/dict/${enc('語氣')}`, { kind: '色彩' });
     assert.equal(badKind.status, 400);
     assert.equal(badKind.json.error, '性質只能是六類之一');
@@ -1753,7 +1939,8 @@ test('M1b：伺服器啟動時清 30 天前的記憶垃圾桶（跟流程垃圾�
   const app = createApp({ dataDir, adapter: fakeAdapter() });
   await app.start(0);
   try {
-    assert.deepEqual(store.listMemoryTrash().map((t) => t.key), [newKey]);
+    // 多組織：createApp 會把舊扁平版面搬進 orgs/main/，所以要從搬完的位置看（順帶證明搬家沒掉東西）
+    assert.deepEqual(createStore(path.join(dataDir, 'orgs', 'main')).listMemoryTrash().map((t) => t.key), [newKey]);
   } finally {
     await app.stop();
   }
@@ -1768,7 +1955,7 @@ test('M1c：compose 帶分類→指示含分類清單、欄位詞典、該分類
     await api(base, 'POST', '/api/categories', { name: '工作' });
     await api(base, 'PUT', `/api/memory/groups/${enc('旅遊')}`, { text: '語氣：輕鬆\n不提競品' });
     const prompt = (i) => readLogFile(dataDir, 'compose', logPair(dataDir, 'compose').asked[i]);
-    const r1 = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '訂餐廳' }], category: '旅遊' });
+    const r1 = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '訂餐廳' }], category: '旅遊', phase: 'draft' });
     assert.equal(r1.status, 200, JSON.stringify(r1.json));
     const p1 = prompt(0);
     assert.ok(p1.includes('# 分類守則\n- 語氣：輕鬆\n- 不提競品'), p1);
@@ -1788,18 +1975,59 @@ test('M1c：compose 帶分類→指示含分類清單、欄位詞典、該分類
     assert.ok(prompt(2).includes('- 不提競品'));
     // 再存一次少一行 → 退休的條不進指示
     await api(base, 'PUT', `/api/memory/groups/${enc('旅遊')}`, { text: '不提競品' });
-    const r4 = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '再來' }], category: '旅遊' });
+    const r4 = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '再來' }], category: '旅遊', phase: 'draft' });
     assert.equal(r4.status, 200);
     const p4 = prompt(3);
     assert.ok(p4.includes('# 分類守則\n- 不提競品') && !p4.includes('語氣：輕鬆'), p4);
     // 分類不存在／沒給分類 →（無）且不寫「已經放在」，照樣拆
-    const r5 = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '拆' }], category: '沒有的' });
+    const r5 = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '拆' }], category: '沒有的', phase: 'draft' });
     assert.equal(r5.status, 200);
     const p5 = prompt(4);
     assert.ok(p5.includes('# 分類守則\n（無）') && !p5.includes('已經放在'), p5);
-    const r6 = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '拆' }] });
+    const r6 = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '拆' }], phase: 'draft' });
     assert.equal(r6.status, 200);
     assert.ok(prompt(5).includes('# 你的分類') && !prompt(5).includes('已經放在'));
+  } finally {
+    await app.stop();
+  }
+});
+
+// ---- 拆法輪 B2（契約 D）：compose 帶「# 關於你」（表達層認識卡）與「# 你能派工人做什麼」（設定組字） ----
+
+test('B2 ④：表達層認識卡→compose 指示含「# 關於你」與卡文；memory.paused 後不含；exec.web:false 後能耐表寫「不可以」；舊資料（沒 memory/）照拆', async () => {
+  const { app, base, adapter, dataDir } = await startApp();
+  try {
+    const def = { format: 1, name: '訂餐廳', params: [], nodes: [{ id: 'a', title: '找店', executor: 'ai', stop_point: 'always', instruction: '列三家', next: [] }] };
+    adapter.setCompleteResponses([`拆好了\n\`\`\`yaml\n${JSON.stringify(def)}\n\`\`\``]);
+    const prompt = (i) => readLogFile(dataDir, 'compose', logPair(dataDir, 'compose').asked[i]);
+    // 舊資料：還沒有任何記憶卡 → 沒有「# 關於你」、能耐表照印（預設可查網、預設可寫檔）
+    const r0 = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '訂餐廳' }], phase: 'draft' });
+    assert.equal(r0.status, 200, JSON.stringify(r0.json));
+    const p0 = prompt(0);
+    assert.ok(!p0.includes('# 關於你'), p0);
+    assert.ok(p0.includes('# 你能派工人做什麼（拆步驟時照這張表安排誰做）\n- 上網查與讀網頁：可以（設定→執行與排程→AI 工人）'), p0);
+    assert.ok(p0.includes('- 在產出資料夾寫檔：新流程預設可以'), p0);
+    // 放一張表達層認識卡
+    const made = await api(base, 'POST', '/api/memory/cards', { bucket: 'profile', text: '偏好先結論再細節', layer: 'expression', scope: { level: 'all' } });
+    assert.equal(made.status, 200, JSON.stringify(made.json));
+    const r1 = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '訂餐廳' }], phase: 'draft' });
+    assert.equal(r1.status, 200, JSON.stringify(r1.json));
+    const p1 = prompt(1);
+    assert.ok(p1.includes('# 關於你（拆的時候把這些當已知；不用問）\n- 偏好先結論再細節'), p1);
+    assert.ok(p1.indexOf('# 關於你') < p1.indexOf('# 你的分類'), '關於你在你的分類之前');
+    // 暫停記憶 → 整段不印
+    const paused = await api(base, 'PUT', '/api/settings', { memory: { paused: true } });
+    assert.equal(paused.status, 200, JSON.stringify(paused.json));
+    const r2 = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '訂餐廳' }], phase: 'draft' });
+    assert.equal(r2.status, 200);
+    assert.ok(!prompt(2).includes('# 關於你') && !prompt(2).includes('偏好先結論'), prompt(2));
+    // 關查網 → 能耐表第一行換字
+    const web = await api(base, 'PUT', '/api/settings', { exec: { web: false } });
+    assert.equal(web.status, 200, JSON.stringify(web.json));
+    const r3 = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '訂餐廳' }], phase: 'draft' });
+    assert.equal(r3.status, 200);
+    assert.ok(prompt(3).includes('- 上網查與讀網頁：不可以（設定關了；資料要做成欄位讓使用者貼）'), prompt(3));
+    assert.ok(!prompt(3).includes('：可以（設定→執行與排程'));
   } finally {
     await app.stop();
   }
@@ -1822,6 +2050,17 @@ function seedFlow(dataDir, { category = '旅遊', id = 'tokyo', stop = 'never', 
   return `/api/workflows/${enc(category)}/${enc(id)}`;
 }
 
+// 讓某一格「有家」：習慣卡只在對得上的欄位底下出 chip，所以要驗「照舊成習慣卡」的案例，
+// 必須真的有一條流程的開跑表單有這個欄位（光把詞典撐出那一格不算——那正是 2026-09-19 修掉的後門）
+function seedFieldHome(dataDir, label, { category = '旅遊', id = 'has-field', kind = 'method' } = {}) {
+  const store = createStore(dataDir);
+  store.writeWorkflow(category, id, {
+    format: 1, name: `有「${label}」欄位的流程`, params: [{ key: 'f', label, kind, default: '' }],
+    nodes: [{ id: 'a', title: '一步', executor: 'ai', stop_point: 'never', instruction: '做 {{f}}', next: [] }],
+  });
+  store.writeDict(ensureFields(store.readDict(), [{ label, kind }], { category, workflow: id }).dict);
+}
+
 test('M2 記路③：跑完回饋→路由成習慣卡（出處 feedback、用在這條流程、route_reason）＋memory_notice card＋run 通知＋logs/memory 兩檔；詞典長出新欄位；判 none 不成卡', async () => {
   const { app, base, adapter, dataDir } = await startApp();
   try {
@@ -1830,6 +2069,7 @@ test('M2 記路③：跑完回饋→路由成習慣卡（出處 feedback、用�
     assert.equal(started.status, 200, JSON.stringify(started.json));
     const runPath = `${wfP}/runs/${started.json.run_id}`;
     await pollRun(base, runPath, (r) => r.status === 'done');
+    seedFieldHome(dataDir, '住宿');
     adapter.setRouteResponses([ROUTE_HABIT]);
     const fb = await api(base, 'POST', `${runPath}/run-feedback`, { text: '民宿太遠了，以後選市區的' });
     assert.equal(fb.status, 200, JSON.stringify(fb.json));
@@ -1851,7 +2091,7 @@ test('M2 記路③：跑完回饋→路由成習慣卡（出處 feedback、用�
     assert.equal(c.source.run, started.json.run_id);
     assert.deepEqual(c.scope, { level: 'workflow', category: '旅遊', workflow: 'tokyo' });
     assert.equal(c.route_reason, '換個場合會填別的');
-    assert.equal((await api(base, 'GET', '/api/memory/dict')).json.fields.find((f) => f.name === '住宿')?.kind, 'method', '詞典沒有的欄位先長出來');
+    assert.equal((await api(base, 'GET', '/api/memory/dict')).json.fields.find((f) => f.name === '住宿')?.kind, 'method', '詞典有這一格，所以照舊成習慣卡');
     const run = (await api(base, 'GET', runPath)).json;
     assert.equal(run.feedback, '民宿太遠了，以後選市區的', '回饋本身照舊存');
     assert.deepEqual(run.memory.notices.map((x) => x.kind), ['card']);
@@ -1865,7 +2105,7 @@ test('M2 記路③：跑完回饋→路由成習慣卡（出處 feedback、用�
     assert.ok(routePrompt.includes('# 這條流程的欄位\n- 旅行節奏'));
     const routeCall = memoryCalls(adapter)[0];
     assert.equal(routeCall.prompt, routePrompt, '存的全文＝送出的全文');
-    assert.deepEqual(routeCall.meta, { kind: 'memory', phase: 'route', category: '旅遊', workflow: 'tokyo', run: started.json.run_id, node: '_memory' });
+    assert.deepEqual(routeCall.meta, { kind: 'memory', phase: 'route', category: '旅遊', workflow: 'tokyo', run: started.json.run_id, node: '_memory', org: 'main' });
     // 路由判 none → 通知 none、不成卡
     adapter.setRouteResponses([ROUTE_NONE]);
     const fb2 = await api(base, 'POST', `${runPath}/run-feedback`, { text: '這趟還不錯' });
@@ -1878,7 +2118,7 @@ test('M2 記路③：跑完回饋→路由成習慣卡（出處 feedback、用�
   }
 });
 
-test('M2 記路③：回饋路由成認識卡→200、memory_notice card、卡落 profile/、出處 chat、用在這個分類、route_reason 非空；habit 一張都不長', async () => {
+test('M2 記路③：回饋路由成認識卡→200、memory_notice card、卡落 profile/、出處 feedback、用在這個分類、route_reason 非空；habit 一張都不長', async () => {
   const { app, base, adapter, dataDir } = await startApp();
   try {
     const wfP = seedFlow(dataDir);
@@ -1898,7 +2138,7 @@ test('M2 記路③：回饋路由成認識卡→200、memory_notice card、卡�
     assert.equal(c.id, n.card);
     assert.equal(c.layer, 'content');
     assert.equal(c.text, '我常去日本');
-    assert.equal(c.source.kind, 'chat', '認識卡的來源只限你打的字，回饋路由出的寫 chat');
+    assert.equal(c.source.kind, 'feedback', '這句話是跑完丟的一句結果，出處就寫 feedback，不要標成聊天');
     assert.equal(c.source.run, started.json.run_id);
     assert.equal(c.source.quote, '我常去日本');
     assert.deepEqual(c.scope, { level: 'category', category: '旅遊', workflow: null }, '有分類＝用在這個分類');
@@ -1957,6 +2197,7 @@ test('M2 記路②：停點第一趟改→first-edit 通知不記不問；第二
       await pollRun(base, runPath, (r) => r.status === 'done');
       return { runPath, run_id: started.json.run_id };
     };
+    seedFieldHome(dataDir, '住宿');
     // 第一趟：first-edit 通知（門面另起一條，稍後才寫）
     const r1 = await runOnce(wfP, '', ROUTE_HABIT);
     const run1 = await pollRun(base, r1.runPath, (r) => (r.memory?.notices ?? []).length > 0);
@@ -2017,7 +2258,7 @@ test('M2 記路④：聊天→compose 成功後只路由最後一句使用者話
     const def = { format: 1, name: '訂餐廳', params: [], nodes: [{ id: 'a', title: '找店', executor: 'ai', stop_point: 'always', instruction: '列三家', next: [] }] };
     adapter.setCompleteResponses([`拆好了\n\`\`\`yaml\n${JSON.stringify(def)}\n\`\`\``]);
     adapter.setRouteResponses([ROUTE_PROFILE_CTX]);
-    const r1 = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '我常去日本，幫我排行程' }] });
+    const r1 = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '我常去日本，幫我排行程' }], phase: 'draft' });
     assert.equal(r1.status, 200, JSON.stringify(r1.json));
     assert.equal(r1.json.draft.name, '訂餐廳');
     const n1 = r1.json.memory_notice;
@@ -2030,13 +2271,13 @@ test('M2 記路④：聊天→compose 成功後只路由最後一句使用者話
     assert.equal(c1.source.quote, '我常去日本，幫我排行程');
     assert.deepEqual(c1.scope, { level: 'all', category: null, workflow: null }, '新草稿＝全部');
     const call = memoryCalls(adapter)[0];
-    assert.deepEqual(call.meta, { kind: 'memory', phase: 'route', category: null, workflow: null, run: null, node: '_memory' });
+    assert.deepEqual(call.meta, { kind: 'memory', phase: 'route', category: null, workflow: null, run: null, node: '_memory', org: 'main' });
     assert.ok(call.prompt.includes('# 他說的話\n我常去日本，幫我排行程') && call.prompt.includes('這句是聊天，通常記成認識卡'));
     assert.equal(logPair(dataDir, 'memory').asked.length, 1);
     // 已存流程所在分類：scope=category；只路由最後一句使用者話
     await api(base, 'POST', '/api/categories', { name: '旅遊' });
     adapter.setRouteResponses([ROUTE_PROFILE_EXP]);
-    const r2 = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '第一句' }, { role: 'ai', text: '好' }, { role: 'user', text: '以後不要客套' }], category: '旅遊' });
+    const r2 = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '第一句' }, { role: 'ai', text: '好' }, { role: 'user', text: '以後不要客套' }], category: '旅遊', phase: 'draft' });
     assert.equal(r2.status, 200, JSON.stringify(r2.json));
     assert.equal(r2.json.memory_notice.kind, 'card');
     const c2 = (await api(base, 'GET', `/api/memory/cards/${r2.json.memory_notice.card}`)).json;
@@ -2048,11 +2289,11 @@ test('M2 記路④：聊天→compose 成功後只路由最後一句使用者話
     assert.ok(call2.prompt.includes('# 他說的話\n以後不要客套') && !call2.prompt.includes('第一句'));
     // none → null；路由壞 → fail 但拆流程照樣 200
     adapter.setRouteResponses([ROUTE_NONE]);
-    const r3 = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '第 2 步加停點' }] });
+    const r3 = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '第 2 步加停點' }], phase: 'draft' });
     assert.equal(r3.status, 200);
     assert.equal(r3.json.memory_notice, null);
     adapter.setRouteResponses([() => { throw new Error('連不上 Claude（測試注入）'); }]);
-    const r4 = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '再改' }] });
+    const r4 = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '再改' }], phase: 'draft' });
     assert.equal(r4.status, 200, JSON.stringify(r4.json));
     assert.equal(r4.json.draft.name, '訂餐廳');
     assert.equal(r4.json.memory_notice.kind, 'fail');
@@ -2061,7 +2302,7 @@ test('M2 記路④：聊天→compose 成功後只路由最後一句使用者話
     // 拆流程本身失敗→不路由（沒有回應可掛通知）
     const before = memoryCalls(adapter).length;
     adapter.setCompleteResponses(['亂七八糟']);
-    assert.equal((await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '拆' }] })).status, 400);
+    assert.equal((await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '拆' }], phase: 'draft' })).status, 400);
     assert.equal(memoryCalls(adapter).length, before);
   } finally {
     await app.stop();
@@ -2170,7 +2411,7 @@ test('M3b POST /runs：memory_picks→run.memory.picks＋picked_count；memory_c
     const widen = s2.json.memory.notices.filter((n) => n.kind === 'widen');
     assert.equal(widen.length, 1, JSON.stringify(s2.json.memory.notices));
     assert.equal(widen[0].card, 'h-osaka');
-    assert.equal(widen[0].text, '「一天 8 個點」的範圍從「大阪行程」擴大到旅遊分類：你在第二條流程也選了它。仍是選項，沒有升格');
+    assert.equal(widen[0].text, '「一天 8 個點」的範圍從「大阪行程」擴大到旅遊分類：你在第二條 Workflow 也選了它。仍是選項，沒有升格');
     const hO2 = (await api(base, 'GET', '/api/memory/cards/h-osaka')).json;
     assert.deepEqual(hO2.scope, { level: 'category', category: '旅遊', workflow: null });
     assert.equal(hO2.scope_log.length, 1);
@@ -2364,7 +2605,7 @@ test('U1a ③：共用檔 API——空夾不是 404；規範三份 2000／3000�
     assert.equal(dupRef.status, 409);
     assert.equal((await api(base, 'POST', sharedPath('行銷'), { name: '手冊.md', kind: 'rule', content_b64: b64('部門版') })).status, 200);
     assert.deepEqual((await api(base, 'GET', sharedPath('行銷'))).json.rules.map((f) => f.name).sort(), ['剛好.md', '手冊.md']);
-    assert.equal((await api(base, 'GET', sharedPath('_company'))).json.rules.find((f) => f.name === '手冊.md').chars, 2000, '公司那份沒被部門覆蓋');
+    assert.equal((await api(base, 'GET', sharedPath('_company'))).json.rules.find((f) => f.name === '手冊.md').chars, 2000, '公司那份沒被分類覆蓋');
 
     // index.yaml 落地形狀（U1a 分身看的那份）
     const idx = yaml.load(fs.readFileSync(path.join(dataDir, 'shared', '_company', 'index.yaml'), 'utf8'));
@@ -2409,7 +2650,7 @@ test('U1a ④：刪共用檔順帶清掉步驟勾選——unlinked_steps＝2、�
     def.nodes[0].next = ['b'];
     def.nodes[1].next = ['c'];
     store.writeWorkflow('行銷', 'wf1', def);
-    store.writeWorkflow('客服', 'wf2', { ...def, nodes: [node('a', [{ scope: 'category', name: '範本.docx' }])] }); // 別的分類的同名部門檔，不該被動到
+    store.writeWorkflow('客服', 'wf2', { ...def, nodes: [node('a', [{ scope: 'category', name: '範本.docx' }])] }); // 別的分類的同名分類檔，不該被動到
     await api(base, 'POST', sharedPath('行銷'), { name: '範本.docx', kind: 'ref', content_b64: b64('x') });
     await api(base, 'POST', sharedPath('_company'), { name: '範本.docx', kind: 'ref', content_b64: b64('x') });
     assert.equal((await api(base, 'GET', `/api/workflows/${enc('行銷')}/wf1/versions`)).json.length, 1);
@@ -2448,7 +2689,7 @@ test('U1a ⑥⑦：PUT /api/settings company_name 存得進、GET 回、61 字 4
     assert.equal(createStore(dataDir).readSettings().company_name, '赫');
     const bad = await api(base, 'PUT', '/api/settings', { company_name: '赫'.repeat(61) });
     assert.equal(bad.status, 400);
-    assert.equal(bad.json.error, '公司名稱要是文字、60 字內');
+    assert.equal(bad.json.error, '組織名稱要是文字、60 字內');
     assert.equal((await api(base, 'GET', '/api/settings')).json.company_name, '赫', '錯的不落地');
     assert.equal((await api(base, 'PUT', '/api/settings', { company_name: '' })).status, 200, '清空退回缺省');
     assert.equal((await api(base, 'GET', '/api/settings')).json.company_name, '', '清空後 GET 回空字串');
@@ -2517,21 +2758,21 @@ test('U1b ⑦ server：compose 帶分類 → 指示含「# 公司規範」「# �
     adapter.setCompleteResponses([`拆好了\n\`\`\`yaml\n${JSON.stringify(def)}\n\`\`\``]);
     const prompt = (i) => readLogFile(dataDir, 'compose', logPair(dataDir, 'compose').asked[i]);
     // 沒有 data/shared/ → 兩段（無）
-    const r0 = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '拆' }] });
+    const r0 = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '拆' }], phase: 'draft' });
     assert.equal(r0.status, 200, JSON.stringify(r0.json));
     assert.ok(prompt(0).includes('# 公司規範（跟分類守則一樣當已知條件）\n（無）') && prompt(0).includes('# 部門規範（同上）\n（無）'), prompt(0));
     await api(base, 'POST', '/api/categories', { name: '旅遊' });
     assert.equal((await api(base, 'POST', sharedPath('_company'), { name: '手冊.md', kind: 'rule', content_b64: b64('語氣要親切。') })).status, 200);
     assert.equal((await api(base, 'POST', sharedPath('旅遊'), { name: '部門.md', kind: 'rule', content_b64: b64('報價含稅。') })).status, 200);
     assert.equal((await api(base, 'POST', sharedPath('旅遊'), { name: '範本.docx', kind: 'ref', content_b64: b64('x') })).status, 200, '參考類不進規範段');
-    const r1 = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '訂餐廳' }], category: '旅遊' });
+    const r1 = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '訂餐廳' }], category: '旅遊', phase: 'draft' });
     assert.equal(r1.status, 200, JSON.stringify(r1.json));
     const p1 = prompt(1);
     assert.ok(p1.includes('# 公司規範（跟分類守則一樣當已知條件）\n## 手冊.md\n語氣要親切。'), p1);
     assert.ok(p1.includes('# 部門規範（同上）\n## 部門.md\n報價含稅。'), p1);
     assert.ok(!p1.includes('範本.docx'), '參考類不帶');
     assert.ok(p1.indexOf('# 部門規範') < p1.indexOf('# 分類守則'), '外圈在前');
-    const r2 = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '拆' }] });
+    const r2 = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '拆' }], phase: 'draft' });
     assert.equal(r2.status, 200);
     assert.ok(prompt(2).includes('## 手冊.md') && prompt(2).includes('# 部門規範（同上）\n（無）'), prompt(2));
   } finally {
@@ -2663,4 +2904,906 @@ test('U4a ⑤：一個 run.yaml 壞掉→detail=1 那筆標讀不到（不炸整
   } finally {
     await app.stop();
   }
+});
+
+// —— 拆法輪 B0：PUT /api/categories/:name 改名（八處同步、歷史留舊名）＋復原擋門＋流程改名版本註記 ——
+const B0_DEF = { format: 1, name: '訂機票', params: [], nodes: [{ id: 'a', title: '查航班', executor: 'ai', stop_point: 'never', instruction: '查', next: [] }] };
+
+test('B0 ⑥：PUT /api/categories/:name → 200 含 moved；新路徑讀得到、舊路徑 404；儀表板與行事曆的 category 來自路徑（run.yaml 留舊名）；排程跟著改；未分類 400、沒有的 404、撞名 409、空名／同名／_company 400', async () => {
+  const { app, base, dataDir } = await startApp();
+  try {
+    const store = createStore(dataDir);
+    store.writeWorkflow('旅遊', 'a', B0_DEF);
+    store.createCategory('工作');
+    store.createCategory('未分類');
+    const rid = 'r-20260910-090000-b0';
+    store.writeRun('旅遊', 'a', rid, {
+      run_id: rid, workflow: { category: '旅遊', id: 'a', name: '訂機票' }, def: B0_DEF,
+      status: 'paused', source: 'manual', started_at: '2026-09-10T09:00:00.000Z',
+      steps: { a: { status: 'waiting_time', wake_at: '2099-01-15T09:00:00.000Z' } },
+    });
+    const sched = await api(base, 'POST', '/api/schedules', { workflow_id: '旅遊/a', freq: 'daily', time: '08:00' });
+    assert.equal(sched.status, 200, JSON.stringify(sched.json));
+    // 第九處（覆核該修）：未讀通知的 run.category 要跟著改，否則「重試」拿舊分類找 run 回莫名的 404
+    store.writeNotices([
+      { id: 'n1', type: 'step_failed', status: 'unread', title: '這步失敗了', actions: ['retry'], run: { category: '旅遊', id: 'a', run_id: rid, node: 'a' } },
+      { id: 'n2', type: 'step_failed', status: 'done', title: '處理過了', actions: [], run: { category: '旅遊', id: 'a', run_id: rid, node: 'a' } },
+    ]);
+
+    const ok = await api(base, 'PUT', `/api/categories/${encodeURIComponent('旅遊')}`, { name: '出差' });
+    assert.equal(ok.status, 200, JSON.stringify(ok.json));
+    assert.equal(ok.json.ok, true);
+    assert.deepEqual(ok.json.moved, { workflows: 1, schedules: 1, proposals: 0, cards: 0, identities: 0, notices: 1, trash: 0 });
+    assert.equal((await api(base, 'GET', `/api/workflows/${encodeURIComponent('出差')}/a`)).json.name, '訂機票');
+    assert.equal((await api(base, 'GET', `/api/workflows/${encodeURIComponent('旅遊')}/a`)).status, 404);
+    const cats = (await api(base, 'GET', '/api/categories')).json;
+    assert.ok(cats.includes('出差') && !cats.includes('旅遊'), `categories=${cats}`);
+    // 儀表板／行事曆的 category 來自路徑，不是 run.yaml
+    assert.equal(store.readRun('出差', 'a', rid).workflow.category, '旅遊', 'run.yaml 留舊名');
+    const card = (await api(base, 'GET', '/api/dashboard?limit=5')).json.recent.find((r) => r.run_id === rid);
+    assert.ok(card, '儀表板要列到這筆 run');
+    assert.equal(card.category, '出差');
+    const cal = (await api(base, 'GET', '/api/calendar?month=2099-01')).json;
+    const ev = cal.events.find((e) => e.run?.run_id === rid);
+    assert.ok(ev, '等時刻步驟要出現在行事曆');
+    assert.equal(ev.run.category, '出差');
+    assert.ok(cal.events.some((e) => e.sid === sched.json.id), '排程場次仍在行事曆');
+    const back = (await api(base, 'GET', '/api/schedules')).json.find((s) => s.id === sched.json.id);
+    assert.equal(back.workflow_id, '出差/a');
+    // 擋門
+    const cases = [
+      [encodeURIComponent('未分類'), { name: 'x' }, 400, '「未分類」不能改名'],
+      [encodeURIComponent('沒有的'), { name: 'x' }, 404, null],
+      [encodeURIComponent('出差'), { name: '工作' }, 409, '已有同名分類'],
+      [encodeURIComponent('出差'), { name: '' }, 400, '名稱不可留空'],
+      [encodeURIComponent('出差'), {}, 400, '名稱不可留空'],
+      [encodeURIComponent('出差'), { name: '出差' }, 400, '新舊名稱相同'],
+      [encodeURIComponent('出差'), { name: '_company' }, 400, '_company'],
+      [encodeURIComponent('出差'), { name: '未分類' }, 400, '「未分類」不能改名'],
+    ];
+    for (const [seg, body, status, msg] of cases) {
+      const r = await api(base, 'PUT', `/api/categories/${seg}`, body);
+      assert.equal(r.status, status, `${seg} ${JSON.stringify(body)} → ${JSON.stringify(r.json)}`);
+      if (msg) assert.ok(r.json.error.includes(msg), `${seg} ${JSON.stringify(body)}：${r.json.error}`);
+    }
+    assert.equal((await api(base, 'GET', '/api/categories/ghost')).status, 404, 'GET 單一分類仍 404');
+    assert.deepEqual((await api(base, 'GET', '/api/categories')).json.sort(), ['出差', '工作', '未分類', '範例'], '擋下的一個都沒落地（範例＝啟動播種）');
+  } finally {
+    await app.stop();
+  }
+});
+
+test('B0 ⑦：PUT /api/workflows/:cat/:id 改 def.name → 履歷新一版 note「改名：「舊」→「新」」（不併入十分鐘合併）；只改指示不改名 → 仍「手動編輯（畫布／欄位）」', async () => {
+  const { app, base } = await startApp();
+  try {
+    const wfP = `/api/workflows/${encodeURIComponent('範例')}/quarterly-report`;
+    let def = (await api(base, 'GET', wfP)).json;
+    const oldName = def.name;
+    def.nodes[0].instruction += '（改指示）';
+    assert.equal((await api(base, 'PUT', wfP, { def })).status, 200);
+    let versions = (await api(base, 'GET', `${wfP}/versions`)).json;
+    assert.equal(versions.at(-1).diff_note, '手動編輯（畫布／欄位）');
+    const r1 = await api(base, 'PUT', wfP, { def: { ...def, name: '季報新名' } });
+    assert.equal(r1.status, 200, JSON.stringify(r1.json));
+    versions = (await api(base, 'GET', `${wfP}/versions`)).json;
+    assert.equal(versions.length, 3, '改名一定另記一版，不併入十分鐘內的手動編輯');
+    assert.equal(versions.at(-1).diff_note, `改名：「${oldName}」→「季報新名」`);
+    assert.equal(versions.at(-1).source, 'manual');
+    assert.equal((await api(base, 'GET', wfP)).json.name, '季報新名');
+    assert.equal((await api(base, 'GET', '/api/workflows')).json.find((w) => w.id === 'quarterly-report').name, '季報新名', '清單同步');
+    def = (await api(base, 'GET', wfP)).json;
+    assert.equal((await api(base, 'PUT', wfP, { def: { ...def, name: '季報二' } })).status, 200);
+    versions = (await api(base, 'GET', `${wfP}/versions`)).json;
+    assert.equal(versions.length, 4);
+    assert.equal(versions.at(-1).diff_note, '改名：「季報新名」→「季報二」');
+    assert.equal(r1.json.version, 3);
+  } finally {
+    await app.stop();
+  }
+});
+
+test('B0 修正輪 server（第九處）：moved.notices 數到未讀通知；GET /api/notices 的 unread 那筆 run.category 是新名、已處理的留痕不動', async () => {
+  const { app, base, dataDir } = await startApp();
+  try {
+    const store = createStore(dataDir);
+    store.writeWorkflow('旅遊', 'a', B0_DEF);
+    const rid = 'r-20260910-093000-b0n';
+    store.writeRun('旅遊', 'a', rid, { run_id: rid, workflow: { category: '旅遊', id: 'a', name: '訂機票' }, def: B0_DEF, status: 'paused', steps: {} });
+    store.writeNotices([
+      { id: 'n1', type: 'step_failed', status: 'unread', title: '這步失敗了', actions: ['retry'], run: { category: '旅遊', id: 'a', run_id: rid, node: 'a' } },
+      { id: 'n2', type: 'step_failed', status: 'done', title: '處理過了', actions: [], run: { category: '旅遊', id: 'a', run_id: rid, node: 'a' } },
+      { id: 'n3', type: 'snapshot_failed', status: 'unread', title: '快照抓不到', actions: ['retry'] },
+    ]);
+    const ok = await api(base, 'PUT', `/api/categories/${encodeURIComponent('旅遊')}`, { name: '出差' });
+    assert.equal(ok.status, 200, JSON.stringify(ok.json));
+    assert.equal(ok.json.moved.notices, 1, '只數未讀且指到這個分類的');
+    const got = (await api(base, 'GET', '/api/notices')).json;
+    assert.equal(got.unread.find((n) => n.id === 'n1').run.category, '出差', '未讀通知指到新分類');
+    assert.equal(got.done.find((n) => n.id === 'n2').run.category, '旅遊', '已處理的通知留痕不動');
+    assert.ok(got.unread.some((n) => n.id === 'n3'), '沒有 run 欄位的通知不受影響');
+    assert.equal(createStore(dataDir).readNotices().find((n) => n.id === 'n1').run.category, '出差', '真的落地');
+  } finally {
+    await app.stop();
+  }
+});
+
+test('B0 ⑨ server：改名後垃圾桶列顯示新分類、復原落在新分類底下；原分類已不在的那筆 POST /api/trash/:key/restore → 409 且 error 含「已經不在了」、那筆還在', async () => {
+  const { app, base, dataDir } = await startApp();
+  try {
+    createStore(dataDir).writeWorkflow('旅遊', 'a', B0_DEF);
+    const del = await api(base, 'DELETE', `/api/workflows/${encodeURIComponent('旅遊')}/a`);
+    assert.equal(del.status, 200);
+    const { key } = del.json;
+    const ren = await api(base, 'PUT', `/api/categories/${encodeURIComponent('旅遊')}`, { name: '出差' });
+    assert.equal(ren.status, 200, JSON.stringify(ren.json));
+    assert.equal(ren.json.moved.trash, 1);
+    assert.equal((await api(base, 'GET', '/api/trash')).json.find((t) => t.key === key).category, '出差');
+    const key2 = 'zz-消失的-x';
+    fs.mkdirSync(path.join(dataDir, 'trash', key2), { recursive: true });
+    fs.writeFileSync(path.join(dataDir, 'trash', key2, 'workflow.yaml'), 'format: 1\nname: 舊的\nparams: []\nnodes: []\n', 'utf8');
+    fs.writeFileSync(path.join(dataDir, 'trash', key2, 'meta.yaml'), 'category: 消失的\nid: x\nname: 舊的\ntrashed_at: 2026-09-01T00:00:00.000Z\n', 'utf8');
+    const bad = await api(base, 'POST', `/api/trash/${encodeURIComponent(key2)}/restore`, {});
+    assert.equal(bad.status, 409, JSON.stringify(bad.json));
+    assert.ok(bad.json.error.includes('已經不在了') && bad.json.error.includes('消失的'), bad.json.error);
+    assert.ok(!fs.existsSync(path.join(dataDir, 'workflows', '消失的')), '不靜默新建分類');
+    assert.ok((await api(base, 'GET', '/api/trash')).json.some((t) => t.key === key2), '那筆還在');
+    const good = await api(base, 'POST', `/api/trash/${encodeURIComponent(key)}/restore`, {});
+    assert.equal(good.status, 200, JSON.stringify(good.json));
+    assert.equal(good.json.category, '出差');
+    assert.equal((await api(base, 'GET', `/api/workflows/${encodeURIComponent('出差')}/${encodeURIComponent(good.json.id)}`)).json.name, '訂機票');
+    assert.ok(!fs.existsSync(path.join(dataDir, 'workflows', '旅遊')), '舊分類沒復活');
+  } finally {
+    await app.stop();
+  }
+});
+
+// ===== 拆法輪 B1 修正輪：終點是 next:[] 的 join（並行點產出改空字串後）成品要含匯進它的每一支 task =====
+
+test('B1 修正：a→fork→{scan,mail}→join(next:[]) 跑完 → GET /api/dashboard recent 該趟 finals 含 scan 與 mail 兩支、無 join；GET /runs?detail=1 同一份；終點人做回退走拓樸序', async () => {
+  const { app, base, dataDir } = await startApp();
+  try {
+    const store = createStore(dataDir);
+    const def = {
+      format: 1, name: '會合收尾', params: [], check: { enabled: false },
+      nodes: [
+        { id: 'a', title: '起步', executor: 'ai', stop_point: 'never', instruction: '起', next: ['fk'] },
+        { id: 'fk', title: '同時做', kind: 'fork', next: ['scan', 'mail'] },
+        { id: 'scan', title: '掃描存檔', executor: 'ai', stop_point: 'never', instruction: '掃', next: ['jn'] },
+        { id: 'mail', title: '寄出正本', executor: 'ai', stop_point: 'never', instruction: '寄', next: ['jn'] },
+        { id: 'jn', title: '收齊', kind: 'join', next: [] },
+      ],
+    };
+    store.writeWorkflow('測試', 'join-end', def);
+    const wf = `/api/workflows/${encodeURIComponent('測試')}/join-end`;
+    const started = await api(base, 'POST', `${wf}/runs`, {});
+    assert.equal(started.status, 200, JSON.stringify(started.json));
+    const rid = started.json.run_id;
+    const run = await pollRun(base, `${wf}/runs/${rid}`, (r) => r.status === 'done');
+    assert.equal(run.steps.jn.output, '', '並行點／會合點不轉運（B1）');
+    const dash = (await api(base, 'GET', '/api/dashboard?limit=5&days=30')).json;
+    const card = dash.recent.find((r) => r.run_id === rid);
+    assert.ok(card, '最近完成要有這趟');
+    assert.deepEqual(card.finals.map((f) => [f.node, f.title, f.preview]), [['scan', '掃描存檔', '產出:scan'], ['mail', '寄出正本', '產出:mail']], JSON.stringify(card.finals));
+    assert.ok(!card.finals.some((f) => f.node === 'jn' || f.node === 'a'), '會合點與起步都不是成品');
+    const [item] = (await api(base, 'GET', `${wf}/runs?detail=1`)).json;
+    assert.equal(item.run_id, rid);
+    assert.deepEqual(item.finals, card.finals, 'detail=1 與儀表板同一份');
+    // 備援走拓樸序：終點是人做（沒交內容）、def.nodes 陣列序故意把最深的 AI 步排前面 → 仍回退到拓樸最深的那步
+    const def2 = {
+      format: 1, name: '人做收尾', params: [],
+      nodes: [
+        { id: 'b', title: '寫信', executor: 'ai', stop_point: 'never', instruction: '寫', next: ['c'] },
+        { id: 'a', title: '起步', executor: 'ai', stop_point: 'never', instruction: '起', next: ['b'] },
+        { id: 'c', title: '寄出', executor: 'human', stop_point: 'never', instruction: '寄', next: [] },
+      ],
+    };
+    store.writeWorkflow('測試', 'human-end', def2);
+    const rid2 = 'r-20260917-100000-h';
+    store.writeRun('測試', 'human-end', rid2, {
+      run_id: rid2, workflow: { category: '測試', id: 'human-end', name: def2.name }, def: def2,
+      status: 'done', started_at: '2026-09-17T10:00:00.000Z', finished_at: '2026-09-17T10:05:00.000Z',
+      steps: { a: { status: 'done', output: 'A產出' }, b: { status: 'done', output: '成品信' }, c: { status: 'done', output: '' } },
+    });
+    const [item2] = (await api(base, 'GET', `/api/workflows/${encodeURIComponent('測試')}/human-end/runs?detail=1`)).json;
+    assert.deepEqual(item2.finals.map((f) => [f.node, f.preview]), [['b', '成品信']], JSON.stringify(item2.finals));
+  } finally {
+    await app.stop();
+  }
+});
+
+test('排版輪 L5 ⑥：GET /api/workflows 每筆帶 steps／human_steps（照定義數一般步驟與你來）；category／id／name 原樣；壞檔 null 不擋清單', async () => {
+  const { app, base, dataDir } = await startApp();
+  try {
+    const list = (await api(base, 'GET', '/api/workflows')).json;
+    for (const w of list) {
+      assert.deepEqual(Object.keys(w), ['category', 'id', 'name', 'steps', 'human_steps'], `欄位只加不改：${JSON.stringify(w)}`);
+      const def = (await api(base, 'GET', `/api/workflows/${encodeURIComponent(w.category)}/${w.id}`)).json;
+      const tasks = def.nodes.filter((n) => (n.kind ?? 'task') === 'task');
+      assert.equal(w.steps, tasks.length, `${w.id} 步數`);
+      assert.equal(w.human_steps, tasks.filter((n) => n.executor === 'human').length, `${w.id} 你來步數`);
+    }
+    assert.ok(list.some((w) => w.steps > 0 && w.human_steps > 0), '範例至少一條有你來的步驟');
+    fs.writeFileSync(path.join(dataDir, 'workflows', '範例', 'quarterly-report', 'workflow.yaml'), 'a: [壞', 'utf8');
+    const res = await api(base, 'GET', '/api/workflows');
+    assert.equal(res.status, 200);
+    const bad = res.json.find((w) => w.id === 'quarterly-report');
+    assert.equal(bad.steps, null); assert.equal(bad.human_steps, null);
+  } finally {
+    await app.stop();
+  }
+});
+
+// ---- 排版輪 L7（上桌題 3b）：共用檔唯讀查看 GET /api/shared/:scope/files/:name/view ----
+test('L7 ⑤：共用檔查看——md／txt 回原文、docx 回排版 HTML、pdf 等 415；不存在 404；路徑穿越／反斜線／壞編碼 400；只准讀清單裡的檔（夾裡野檔、結尾點 404）；檔名 NFC 正規化；舊資料沒有共用夾＝404 且不建夾；既有下載不變', async () => {
+  const { app, base, dataDir } = await startApp();
+  const view = (scope, rawName) => fetch(`${base}/api/shared/${encodeURIComponent(scope)}/files/${rawName}/view`).then(async (r) => ({ status: r.status, json: await r.json() }));
+  try {
+    const old = await view('_company', enc('手冊.md'));
+    assert.equal(old.status, 404, '舊資料沒有共用夾');
+    assert.equal(fs.existsSync(path.join(dataDir, 'shared')), false, '查看不建夾');
+
+    await api(base, 'POST', sharedPath('_company'), { name: '手冊.md', kind: 'rule', content_b64: b64('# 手冊\n<b>語氣</b>要親切') });
+    await api(base, 'POST', sharedPath('_company'), { name: '說明.txt', kind: 'ref', content_b64: b64('純文字參考') });
+    const doc = new Document({ sections: [{ children: [new Paragraph({ children: [new TextRun('員工手冊第一章')] })] }] });
+    await api(base, 'POST', sharedPath('_company'), { name: '範本.docx', kind: 'ref', content_b64: (await Packer.toBuffer(doc)).toString('base64') });
+    await api(base, 'POST', sharedPath('_company'), { name: '報告.pdf', kind: 'ref', content_b64: b64('%PDF-1.4') });
+    await api(base, 'POST', sharedPath('_company'), { name: 'café.md', kind: 'ref', content_b64: b64('NFC 名') }); // 'café' NFC
+
+    const md = await view('_company', enc('手冊.md'));
+    assert.equal(md.status, 200);
+    assert.deepEqual(md.json, { name: '手冊.md', kind: 'text', text: '# 手冊\n<b>語氣</b>要親切' }, 'md 回原文（不轉 HTML，前端 <pre> 跳脫顯示）');
+    assert.deepEqual((await view('_company', enc('說明.txt'))).json, { name: '說明.txt', kind: 'text', text: '純文字參考' });
+    const docx = await view('_company', enc('範本.docx'));
+    assert.equal(docx.status, 200);
+    assert.equal(docx.json.kind, 'html');
+    assert.ok(docx.json.html.includes('<p>員工手冊第一章</p>'), docx.json.html);
+    const pdf = await view('_company', enc('報告.pdf'));
+    assert.equal(pdf.status, 415);
+    assert.ok(pdf.json.error.includes('下載'), pdf.json.error);
+    assert.equal((await view('_company', enc('沒有.md'))).status, 404);
+
+    // 路徑穿越與名稱正規化
+    fs.writeFileSync(path.join(dataDir, 'secret.md'), '不該被讀到');
+    fs.writeFileSync(path.join(dataDir, 'shared', '_company', 'files', '野檔.md'), '沒登記在清單');
+    for (const raw of [enc('../../secret.md'), enc('..\\..\\secret.md'), enc('..x'), '%E0%A4', enc('a:b.md'), enc('CON.md')]) {
+      const r = await view('_company', raw);
+      assert.equal(r.status, 400, `${raw} 該 400：${JSON.stringify(r.json)}`);
+      assert.ok(!JSON.stringify(r.json).includes('不該被讀到'));
+    }
+    assert.equal((await view('..', enc('secret.md'))).status, 404, 'scope 不是組織也不是現有分類');
+    assert.equal((await view('_company', enc('野檔.md'))).status, 404, '只准讀清單裡登記的檔');
+    assert.equal((await view('_company', enc('手冊.md.'))).status, 404, '結尾點（Windows 會對到手冊.md）不算同名');
+    const nfd = await view('_company', enc('café.md'.normalize('NFD')));
+    assert.equal(nfd.status, 200, '檔名 NFD 送來也對得到');
+    assert.equal(nfd.json.text, 'NFC 名');
+
+    const dl = await fetch(base + sharedPath('_company', '手冊.md'));
+    assert.equal(dl.headers.get('content-type'), 'application/octet-stream', '既有下載原樣');
+  } finally {
+    await app.stop();
+  }
+});
+
+// ---- 排版輪 L11（題 2 A／3f）：本次上傳暫存端點、開跑收 uploads 與 note ----
+test('排版輪 L11 ②③④⑤：run-uploads 檔名／副檔名／大小護欄；開跑缺必填檔 409；uploads 搬進 runs/<rid>/in/、run.params＝檔名、token 用過即失效；note 進 run.note 與每步 upstream、超過 2,000 字 400', async () => {
+  const { app, base, dataDir, adapter } = await startApp();
+  try {
+    const store = createStore(dataDir);
+    const def = {
+      format: 1, name: '上傳月報',
+      params: [{ key: 'src', label: '原始資料', default: '', input: 'file', required: true }, { key: 'range', label: '範圍', default: '本季' }],
+      nodes: [
+        { id: 'a', title: '整理', executor: 'ai', stop_point: 'never', instruction: '整理上傳的資料，範圍 {{range}}', next: ['b'] },
+        { id: 'b', title: '寫報告', executor: 'ai', stop_point: 'never', instruction: '依上一步寫報告', next: [] },
+      ],
+      check: { enabled: false }, supervisor: { enabled: false },
+    };
+    store.writeWorkflow('測試', 'up', def);
+    const wfp = `/api/workflows/${encodeURIComponent('測試')}/up`;
+    const b64 = (s) => Buffer.from(s).toString('base64');
+    const upload = (name, content_b64) => api(base, 'POST', `${wfp}/run-uploads`, { name, content_b64 });
+    // 護欄：路徑符號／保留字 400、副檔名白名單（沿用參考檔 accept）400、空檔 400、超過 10MB 413；擋下的不落地
+    for (const bad of ['../x.csv', '..\\x.csv', 'a/b.csv', 'CON.csv']) assert.equal((await upload(bad, b64('1'))).status, 400, bad);
+    const exe = await upload('病毒.exe', b64('1'));
+    assert.equal(exe.status, 400);
+    assert.ok(exe.json.error.includes('csv'), exe.json.error);
+    assert.equal((await upload('空.csv', '')).status, 400);
+    assert.equal((await upload('大.csv', Buffer.alloc(10 * 1024 * 1024 + 1).toString('base64'))).status, 413);
+    assert.ok(!fs.existsSync(path.join(dataDir, 'uploads')) || fs.readdirSync(path.join(dataDir, 'uploads')).length === 0, '擋下的不落地');
+    assert.equal((await api(base, 'POST', `/api/workflows/${encodeURIComponent('測試')}/沒有/run-uploads`, { name: 'a.csv', content_b64: b64('1') })).status, 404, '沒有的 Workflow');
+    const ok = await upload('三月.csv', b64('a,b\n1,2'));
+    assert.equal(ok.status, 200, JSON.stringify(ok.json));
+    assert.equal(ok.json.name, '三月.csv');
+    assert.equal(ok.json.size, 7);
+    const { token } = ok.json;
+    // 開跑：沒給必填檔＝409 健檢句；token 不存在／放到文字欄位＝400；補充超過 2,000 字＝400
+    const miss = await api(base, 'POST', `${wfp}/runs`, { overrides: { src: '假裝有.csv' } });
+    assert.equal(miss.status, 409, '文字覆寫不能冒充上傳');
+    assert.deepEqual(miss.json.issues.filter((i) => i.level === 'block').map((i) => i.code), ['upload-missing']);
+    assert.equal((await api(base, 'POST', `${wfp}/runs`, { uploads: { src: 'f'.repeat(24) } })).status, 400, 'token 不存在');
+    assert.equal((await api(base, 'POST', `${wfp}/runs`, { uploads: { src: '../x' } })).status, 400, 'token 路徑符號');
+    assert.equal((await api(base, 'POST', `${wfp}/runs`, { uploads: { src: token, range: token } })).status, 400, '不是上傳欄位');
+    assert.equal((await api(base, 'POST', `${wfp}/runs`, { uploads: { src: token }, note: '字'.repeat(2001) })).status, 400, '補充太長');
+    assert.equal((await api(base, 'POST', `${wfp}/runs`, { uploads: { src: token }, note: 3 })).status, 400, '補充要是文字');
+    assert.equal(store.listRuns('測試', 'up').length, 0, '擋下的都沒開跑');
+    const started = await api(base, 'POST', `${wfp}/runs`, { overrides: { range: 'Q3' }, uploads: { src: token }, note: '字'.repeat(1999) + '尾' });
+    assert.equal(started.status, 200, JSON.stringify(started.json));
+    const rid = started.json.run_id;
+    assert.equal(started.json.params.src, '三月.csv');
+    assert.equal(started.json.note.length, 2000);
+    const inFile = path.join(dataDir, 'workflows', '測試', 'up', 'runs', rid, 'in', '三月.csv');
+    assert.equal(fs.readFileSync(inFile, 'utf8'), 'a,b\n1,2', '檔跟著這一趟存');
+    assert.ok(!fs.existsSync(path.join(dataDir, 'uploads', token)), '暫存用過即刪');
+    assert.equal((await api(base, 'POST', `${wfp}/runs`, { uploads: { src: token } })).status, 400, '同一個 token 不能再用');
+    assert.deepEqual(store.listRefFiles('測試', 'up'), [], '不進 Workflow 參考檔');
+    const run = await pollRun(base, `${wfp}/runs/${rid}`, (r) => r.status === 'done');
+    assert.ok(run.note.endsWith('尾'));
+    const a = adapter.calls.find((c) => c.nodeId === 'a');
+    const bb = adapter.calls.find((c) => c.nodeId === 'b');
+    assert.ok(a.upstream.startsWith('【你這次的補充】\n') && bb.upstream.startsWith('產出:a\n\n【你這次的補充】\n'), `${a.upstream.slice(0, 30)}｜${bb.upstream.slice(0, 30)}`);
+    assert.deepEqual(a.attachments, [inFile], '第一個 AI 步驟讀檔');
+    assert.deepEqual(bb.attachments, [], '後面靠沿路全帶');
+  } finally {
+    await app.stop();
+  }
+});
+
+test('排版輪 L13 附帶：暫存代碼綁定發放的 Workflow——拿 A 的代碼去開 B 擋 400、檔還在 A 可用；檔名含 NUL 400 人話；伺服器讀寫檔的例外不把絕對路徑透給前端', async () => {
+  const { app, base, dataDir } = await startApp();
+  try {
+    const store = createStore(dataDir);
+    const mk = (name) => ({
+      format: 1, name, params: [{ key: 'src', label: '原始資料', default: '', input: 'file', required: true }],
+      nodes: [{ id: 'a', title: '整理', executor: 'ai', stop_point: 'never', instruction: '整理上傳的資料', next: [] }],
+      check: { enabled: false }, supervisor: { enabled: false },
+    });
+    store.writeWorkflow('測試', 'wa', mk('A'));
+    store.writeWorkflow('測試', 'wb', mk('B'));
+    const pa = `/api/workflows/${encodeURIComponent('測試')}/wa`;
+    const pb = `/api/workflows/${encodeURIComponent('測試')}/wb`;
+    const b64 = (s) => Buffer.from(s).toString('base64');
+    const up = await api(base, 'POST', `${pa}/run-uploads`, { name: '三月.csv', content_b64: b64('1,2') });
+    assert.equal(up.status, 200, JSON.stringify(up.json));
+    const steal = await api(base, 'POST', `${pb}/runs`, { uploads: { src: up.json.token } });
+    assert.equal(steal.status, 400, '跨 Workflow 挪用擋下');
+    assert.ok(steal.json.error.includes('別條 Workflow'), steal.json.error);
+    assert.equal(store.listRuns('測試', 'wb').length, 0);
+    const own = await api(base, 'POST', `${pa}/runs`, { uploads: { src: up.json.token } });
+    assert.equal(own.status, 200, '發放的那條照用');
+    // 檔名含 NUL：人話 400、不帶伺服器路徑
+    const nul = await api(base, 'POST', `${pa}/run-uploads`, { name: `a${String.fromCharCode(0)}.pdf`, content_b64: b64('1') });
+    assert.equal(nul.status, 400);
+    assert.ok(nul.json.error.includes('控制字元') && !nul.json.error.includes(dataDir) && !/[A-Za-z]:\\/.test(nul.json.error), nul.json.error);
+    // 系統層讀寫例外（暫存根被一個檔佔住，清暫存時 readdir 炸 ENOTDIR）：回人話，不透出絕對路徑
+    fs.rmSync(path.join(dataDir, 'uploads'), { recursive: true, force: true });
+    fs.writeFileSync(path.join(dataDir, 'uploads'), 'x');
+    const sys = await api(base, 'POST', `${pa}/run-uploads`, { name: 'b.csv', content_b64: b64('1') });
+    assert.ok(sys.status >= 400, String(sys.status));
+    assert.ok(!sys.json.error.includes(dataDir) && !/[A-Za-z]:\\/.test(sys.json.error) && !sys.json.error.includes('ENOTDIR'), sys.json.error);
+    assert.ok(sys.json.error.includes('讀寫檔案'), sys.json.error);
+  } finally {
+    await app.stop();
+  }
+});
+
+test('L13b：上傳後把 Workflow 移到別分類、或分類改名，用同一代碼開跑照常 200；跨 Workflow 仍 400「別條」；過期被清掉仍原訊息', async () => {
+  const { app, base, dataDir } = await startApp();
+  try {
+    const store = createStore(dataDir);
+    const def = {
+      format: 1, name: 'A', params: [{ key: 'src', label: '原始資料', default: '', input: 'file', required: true }],
+      nodes: [{ id: 'a', title: '整理', executor: 'ai', stop_point: 'never', instruction: '整理上傳的資料', next: [] }],
+      check: { enabled: false }, supervisor: { enabled: false },
+    };
+    store.writeWorkflow('部門A', 'wa', def);
+    store.writeWorkflow('部門A', 'wb', { ...def, name: 'B' });
+    const p = (cat, id) => `/api/workflows/${encodeURIComponent(cat)}/${id}`;
+    const b64 = (s) => Buffer.from(s).toString('base64');
+    const upload = async (cat, id) => (await api(base, 'POST', `${p(cat, id)}/run-uploads`, { name: '三月.csv', content_b64: b64('1,2') })).json.token;
+    // 移分類
+    const t1 = await upload('部門A', 'wa');
+    assert.equal((await api(base, 'POST', `${p('部門A', 'wa')}/move`, { to: '部門B' })).status, 200);
+    const r1 = await api(base, 'POST', `${p('部門B', 'wa')}/runs`, { uploads: { src: t1 } });
+    assert.equal(r1.status, 200, JSON.stringify(r1.json));
+    // 分類改名
+    const t2 = await upload('部門B', 'wa');
+    assert.equal((await api(base, 'PUT', `/api/categories/${encodeURIComponent('部門B')}`, { name: '部門C' })).status, 200);
+    const r2 = await api(base, 'POST', `${p('部門C', 'wa')}/runs`, { uploads: { src: t2 } });
+    assert.equal(r2.status, 200, JSON.stringify(r2.json));
+    // 跨 Workflow 挪用
+    const t3 = await upload('部門C', 'wa');
+    const steal = await api(base, 'POST', `${p('部門A', 'wb')}/runs`, { uploads: { src: t3 } });
+    assert.equal(steal.status, 400);
+    assert.ok(steal.json.error.includes('別條 Workflow') && !steal.json.error.includes('24 小時'), steal.json.error);
+    // 過期被清掉
+    const t4 = await upload('部門A', 'wb');
+    fs.rmSync(path.join(dataDir, 'uploads', t4), { recursive: true, force: true });
+    const gone = await api(base, 'POST', `${p('部門A', 'wb')}/runs`, { uploads: { src: t4 } });
+    assert.equal(gone.status, 400);
+    assert.equal(gone.json.error, '上傳的檔案找不到了（可能超過 24 小時被清掉），請重新選檔');
+  } finally {
+    await app.stop();
+  }
+});
+
+test('排版輪 L11 ⑥⑦：舊定義不帶 uploads／note 開跑照舊（run 沒有新鍵）；24 小時沒用掉的暫存上傳在下次上傳時清掉', async () => {
+  const { app, base, dataDir } = await startApp();
+  try {
+    const store = createStore(dataDir);
+    const def = { format: 1, name: '舊', params: [], nodes: [{ id: 'a', title: 'A', executor: 'ai', stop_point: 'never', instruction: '寫一句問候', next: [] }] };
+    store.writeWorkflow('測試', 'old', def);
+    const wfp = `/api/workflows/${encodeURIComponent('測試')}/old`;
+    const started = await api(base, 'POST', `${wfp}/runs`, {});
+    assert.equal(started.status, 200);
+    assert.ok(!('note' in started.json), 'run 沒有 note');
+    assert.ok(!fs.existsSync(path.join(dataDir, 'workflows', '測試', 'old', 'runs', started.json.run_id, 'in')), '沒有 in/ 夾');
+    const b64 = Buffer.from('1').toString('base64');
+    const first = await api(base, 'POST', `${wfp}/run-uploads`, { name: 'a.txt', content_b64: b64 });
+    const past = new Date(Date.now() - 25 * 3600e3);
+    fs.utimesSync(path.join(dataDir, 'uploads', first.json.token), past, past);
+    const second = await api(base, 'POST', `${wfp}/run-uploads`, { name: 'b.txt', content_b64: b64 });
+    assert.equal(second.status, 200);
+    assert.ok(!fs.existsSync(path.join(dataDir, 'uploads', first.json.token)), '過期的清掉');
+    assert.ok(fs.existsSync(path.join(dataDir, 'uploads', second.json.token)), '新的留著');
+  } finally {
+    await app.stop();
+  }
+});
+
+// ---- 大跑輪：本次附件（保留鍵 __run__）＝檔案版的「本次補充」，不綁欄位、每個 AI 步驟都看得到 ----
+test('大跑輪 ①：本次附件走同一條 run-uploads 通道——檔搬進 runs/<rid>/in/、記在 run.run_files、不進 run.params；每個 AI 步驟的輸入都有「【你這次的附件】」＋檔名，跟「【你這次的補充】」成對；逐欄上傳照舊只餵給引用那個欄位的步驟', async () => {
+  const { app, base, dataDir, adapter } = await startApp();
+  try {
+    const store = createStore(dataDir);
+    const def = {
+      format: 1, name: '附件月報',
+      params: [{ key: 'src', label: '原始資料', default: '', input: 'file', required: true }],
+      nodes: [
+        { id: 'a', title: '整理', executor: 'ai', stop_point: 'never', instruction: '整理 {{src}} 的內容', next: ['b'] },
+        { id: 'b', title: '寫報告', executor: 'ai', stop_point: 'never', instruction: '依上一步寫報告', next: [] },
+      ],
+      check: { enabled: false }, supervisor: { enabled: false },
+    };
+    store.writeWorkflow('測試', 'att', def);
+    const wfp = `/api/workflows/${encodeURIComponent('測試')}/att`;
+    const b64 = (s) => Buffer.from(s).toString('base64');
+    const upload = async (name, text) => (await api(base, 'POST', `${wfp}/run-uploads`, { name, content_b64: b64(text) })).json.token;
+    const fieldTok = await upload('欄位檔.csv', 'a,b\n1,2');
+    const attTok = await upload('這趟附件.md', '# 這一趟的附件');
+    const started = await api(base, 'POST', `${wfp}/runs`, { uploads: { src: fieldTok, __run__: attTok }, note: '這次特別留意新品類' });
+    assert.equal(started.status, 200, JSON.stringify(started.json));
+    const rid = started.json.run_id;
+    assert.equal(started.json.params.src, '欄位檔.csv', '逐欄上傳照舊寫進 run.params');
+    assert.ok(!('__run__' in started.json.params), '本次附件不是欄位，不進 run.params');
+    assert.deepEqual(started.json.run_files, ['這趟附件.md'], '本次附件記在 run.run_files');
+    const inDir = path.join(dataDir, 'workflows', '測試', 'att', 'runs', rid, 'in');
+    const attPath = path.join(inDir, '這趟附件.md');
+    assert.equal(fs.readFileSync(attPath, 'utf8'), '# 這一趟的附件', '附件跟著這一趟存');
+    assert.deepEqual(fs.readdirSync(inDir).sort(), ['欄位檔.csv', '這趟附件.md'].sort(), 'in/ 只有這兩個檔');
+    assert.ok(!fs.existsSync(path.join(dataDir, 'uploads', attTok)), '暫存用過即刪');
+    assert.deepEqual(store.listRefFiles('測試', 'att'), [], '不進 Workflow 參考檔');
+    await pollRun(base, `${wfp}/runs/${rid}`, (r) => r.status === 'done');
+    const a = adapter.calls.find((c) => c.nodeId === 'a');
+    const bb = adapter.calls.find((c) => c.nodeId === 'b');
+    for (const [id, c] of [['a', a], ['b', bb]]) {
+      assert.ok(c.upstream.includes('【你這次的附件】'), `${id} 步看得到本次附件：${c.upstream}`);
+      assert.ok(c.upstream.includes('這趟附件.md'), `${id} 步拿得到附件檔名：${c.upstream}`);
+      assert.ok(c.upstream.indexOf('【你這次的補充】') < c.upstream.indexOf('【你這次的附件】'), `${id} 步附件接在補充後面`);
+      assert.ok(c.attachments.includes(attPath), `${id} 步的檔案清單裡有本次附件（真的讀得到那個檔）`);
+    }
+    // 逐欄上傳不受污染：只有引用 {{src}} 的第一步拿得到那個檔，下游照舊靠沿路全帶
+    assert.deepEqual(a.attachments, [path.join(inDir, '欄位檔.csv'), attPath], '逐欄上傳只餵給引用該欄位的步驟（附件跟在後面）');
+    assert.deepEqual(bb.attachments, [attPath], '沒引用該欄位的步驟拿不到逐欄上傳的檔，只有本次附件');
+    assert.ok(!a.upstream.includes('欄位檔.csv') && !bb.upstream.includes('欄位檔.csv'), '逐欄上傳不會混進本次附件那一段');
+  } finally {
+    await app.stop();
+  }
+});
+
+test('大跑輪 ②：本次附件的護欄逐條沿用現行規則——副檔名白名單、10MB、空檔、檔名路徑符號、token 路徑穿越、代碼用過即失效、跨 Workflow 挪用；一鍵一檔，寫不到 uploads 目錄以外', async () => {
+  const { app, base, dataDir } = await startApp();
+  try {
+    const store = createStore(dataDir);
+    const mk = (name) => ({
+      format: 1, name, params: [],
+      nodes: [{ id: 'a', title: 'A', executor: 'ai', stop_point: 'never', instruction: '寫一句問候', next: [] }],
+      check: { enabled: false }, supervisor: { enabled: false },
+    });
+    store.writeWorkflow('測試', 'g1', mk('G1'));
+    store.writeWorkflow('測試', 'g2', mk('G2'));
+    const p1 = `/api/workflows/${encodeURIComponent('測試')}/g1`;
+    const p2 = `/api/workflows/${encodeURIComponent('測試')}/g2`;
+    const b64 = (s) => Buffer.from(s).toString('base64');
+    // 上傳端點的護欄與逐欄上傳同一套（同一條通道，沒有另立一套）
+    for (const bad of ['../外面.md', '..\\外面.md', 'a/b.md', 'CON.md']) {
+      assert.equal((await api(base, 'POST', `${p1}/run-uploads`, { name: bad, content_b64: b64('x') })).status, 400, bad);
+    }
+    assert.equal((await api(base, 'POST', `${p1}/run-uploads`, { name: '殼.exe', content_b64: b64('x') })).status, 400, '副檔名白名單');
+    assert.equal((await api(base, 'POST', `${p1}/run-uploads`, { name: '空.md', content_b64: '' })).status, 400, '空檔');
+    assert.equal((await api(base, 'POST', `${p1}/run-uploads`, { name: '大.md', content_b64: Buffer.alloc(10 * 1024 * 1024 + 1).toString('base64') })).status, 413, '10MB 封頂');
+    // 開跑端：保留鍵不能拿來做路徑穿越，也不能撿別條 Workflow 的代碼
+    for (const bad of ['../x', '..\\x', '/etc/passwd', 'f'.repeat(23), 'F'.repeat(24), 'g'.repeat(24)]) {
+      const r = await api(base, 'POST', `${p1}/runs`, { uploads: { __run__: bad } });
+      assert.equal(r.status, 400, `token「${bad}」該擋下`);
+      assert.ok(!r.json.error.includes(dataDir), '錯誤訊息不透絕對路徑');
+    }
+    assert.equal(store.listRuns('測試', 'g1').length, 0, '擋下的都沒開跑');
+    const tok = (await api(base, 'POST', `${p2}/run-uploads`, { name: '別條的.md', content_b64: b64('x') })).json.token;
+    const steal = await api(base, 'POST', `${p1}/runs`, { uploads: { __run__: tok } });
+    assert.equal(steal.status, 400, '別條 Workflow 發的代碼不能拿來當這條的附件');
+    assert.ok(steal.json.error.includes('別條 Workflow'), steal.json.error);
+    const own = await api(base, 'POST', `${p2}/runs`, { uploads: { __run__: tok } });
+    assert.equal(own.status, 200, JSON.stringify(own.json));
+    assert.equal((await api(base, 'POST', `${p2}/runs`, { uploads: { __run__: tok } })).status, 400, '同一個代碼不能再用');
+    // 落地的檔一律在這一趟的 in/ 底下，名字洗過（一鍵一檔：uploads 是物件，同鍵只會有一個）
+    const inDir = path.join(dataDir, 'workflows', '測試', 'g2', 'runs', own.json.run_id, 'in');
+    assert.deepEqual(fs.readdirSync(inDir), ['別條的.md']);
+    assert.deepEqual(own.json.run_files, ['別條的.md']);
+  } finally {
+    await app.stop();
+  }
+});
+
+test('大跑輪 ③：舊 run 與沒帶附件的 run 形狀一字不動——沒有 run_files 鍵、輸入逐字照舊；run_files 被手動塞了路徑符號也只會落在這一趟的 in/（讀不到＝當沒有）', async () => {
+  const { app, base, dataDir, adapter } = await startApp();
+  try {
+    const store = createStore(dataDir);
+    const def = {
+      format: 1, name: '無附件', params: [],
+      nodes: [{ id: 'a', title: 'A', executor: 'ai', stop_point: 'never', instruction: '寫一句問候', next: [] }],
+      check: { enabled: false }, supervisor: { enabled: false },
+    };
+    store.writeWorkflow('測試', 'plain', def);
+    const wfp = `/api/workflows/${encodeURIComponent('測試')}/plain`;
+    const started = await api(base, 'POST', `${wfp}/runs`, {});
+    assert.equal(started.status, 200);
+    assert.ok(!('run_files' in started.json), '沒帶附件＝不加鍵');
+    await pollRun(base, `${wfp}/runs/${started.json.run_id}`, (r) => r.status === 'done');
+    const a = adapter.calls.find((c) => c.nodeId === 'a');
+    assert.equal(a.upstream, '', '沒有附件時輸入逐字照舊（第一步空字串）');
+    // 手改壞的 run.yaml：run_files 塞路徑符號——runInputPath 會洗名，撈不到就當沒有，不會讀到 in/ 以外的東西
+    const rid2 = (await api(base, 'POST', `${wfp}/runs`, {})).json.run_id;
+    await pollRun(base, `${wfp}/runs/${rid2}`, (r) => r.status === 'done');
+    const run = store.readRun('測試', 'plain', rid2);
+    run.run_files = ['../../../../etc/passwd', '..\\..\\秘密.md'];
+    run.status = 'running';
+    run.steps.a = { ...run.steps.a, status: 'pending', output: null };
+    store.writeRun('測試', 'plain', rid2, run);
+    await api(base, 'GET', `${wfp}/runs/${rid2}`); // 卡在 running＝伺服器順手接回續跑
+    await pollRun(base, `${wfp}/runs/${rid2}`, (r) => r.status === 'done');
+    const a2 = adapter.calls.filter((c) => c.nodeId === 'a').at(-1);
+    assert.ok(!a2.upstream.includes('passwd') && !a2.upstream.includes('秘密'), `撈不到的附件當沒有：${a2.upstream}`);
+  } finally {
+    await app.stop();
+  }
+});
+
+// ================= 多組織真隔離：組織登錄＋四條路由＋單一時鐘＋用量歸戶 =================
+// 每個組織各自一整套資料（data/orgs/<id>/），切過去看到的 Workflow 與記憶完全不同；
+// 既有路由一律不加前綴，「目前組織」就是全部路由的預設對象。
+
+const orgDirOf = (root, id) => path.join(root, 'orgs', id);
+const orgWait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// 帶時鐘的啟動（排程測試要推時間）；base 每次重啟都會換埠，所以用函式取
+async function startOrgApp(nowIso = '2026-09-01T07:00', tickMs = 3600_000) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bojian-orgs-'));
+  const adapter = fakeAdapter();
+  const clock = { t: new Date(nowIso).getTime() };
+  const app = createApp({ dataDir: root, adapter, now: () => clock.t });
+  await app.start(0, { tickMs });
+  return { app, adapter, clock, root, base: () => `http://127.0.0.1:${app.port()}` };
+}
+
+test('多組織①：GET /api/orgs 回目前組織、清單與各組織的 Workflow 數（名字來自各自的 settings.json）', async () => {
+  const { app, base, root } = await startApp();
+  try {
+    const first = (await api(base, 'GET', '/api/orgs')).json;
+    assert.equal(first.current, 'main', '全新安裝＝一個 main');
+    assert.equal(first.orgs.length, 1);
+    assert.equal(first.orgs[0].id, 'main');
+    assert.equal(first.orgs[0].name, '組織', '沒取名字＝「組織」');
+    assert.equal(first.orgs[0].workflows, 2, '種了兩個範例');
+    assert.ok(first.orgs[0].created_at, '有建立時間');
+
+    await api(base, 'PUT', '/api/settings', { company_name: '明遠' });
+    await api(base, 'POST', '/api/workflows', { category: '測試', def: M1B_DEF() });
+    const made = await api(base, 'POST', '/api/orgs', { name: '第二間' });
+    const list = (await api(base, 'GET', '/api/orgs')).json;
+    assert.equal(list.current, 'main', '建完不切換');
+    assert.deepEqual(list.orgs.map((o) => o.name).sort(), ['明遠', '第二間']);
+    assert.equal(list.orgs.find((o) => o.id === 'main').workflows, 3, '主組織多了一條');
+    assert.equal(list.orgs.find((o) => o.id === made.json.id).workflows, 2, '新組織只有範例');
+    assert.ok(fs.existsSync(path.join(root, 'orgs.json')), '登錄簿落地在資料根');
+  } finally { await app.stop(); }
+});
+
+test('多組織②：POST /api/orgs 建夾＋種範例＋寫名字，不切換；名字太長 400', async () => {
+  const { app, base, root } = await startApp();
+  try {
+    const made = await api(base, 'POST', '/api/orgs', { name: '第二間' });
+    assert.equal(made.status, 200, JSON.stringify(made.json));
+    const id = made.json.id;
+    assert.equal(made.json.name, '第二間');
+    assert.ok(/^org-[a-z0-9]+-[a-z0-9]{4}$/.test(id), `新代號是 org-…：${id}`);
+    const dir = orgDirOf(root, id);
+    assert.ok(fs.existsSync(dir), '組織夾建出來了');
+    const store = createStore(dir);
+    assert.deepEqual(store.listWorkflows().map((w) => w.category), ['範例', '範例'], '新組織也有範例分類');
+    assert.equal(store.readSettings().company_name, '第二間', '名字寫進該組織的 settings.json');
+    assert.equal((await api(base, 'GET', '/api/orgs')).json.current, 'main', '目前組織沒被換掉');
+    assert.equal((await api(base, 'GET', '/api/settings')).json.company_name, '', '主組織的名字沒被寫到');
+
+    const long = await api(base, 'POST', '/api/orgs', { name: '赫'.repeat(61) });
+    assert.equal(long.status, 400);
+    assert.ok(long.json.error.includes('60 字內'), long.json.error);
+    assert.equal((await api(base, 'GET', '/api/orgs')).json.orgs.length, 2, '擋下來就不留半個夾');
+    const noName = await api(base, 'POST', '/api/orgs', {});
+    assert.equal(noName.status, 200);
+    assert.equal(noName.json.name, '組織', '沒給名字＝「組織」');
+  } finally { await app.stop(); }
+});
+
+test('多組織③：PUT /api/orgs/current 切過去，Workflow／記憶／通知／排程／設定全換一套；id 不存在 404', async () => {
+  const { app, base, root } = await startApp();
+  try {
+    // 主組織塞滿五種資料
+    const wf = await api(base, 'POST', '/api/workflows', { category: '測試', def: M1B_DEF() });
+    await api(base, 'POST', '/api/schedules', { workflow_id: `測試/${wf.json.id}`, freq: 'daily', time: '08:00' });
+    await api(base, 'PUT', '/api/settings', { company_name: '明遠' });
+    const mainStore = createStore(orgDirOf(root, 'main'));
+    mainStore.writeCard(manual({ id: 'h-main', bucket: 'habit', text: '主組織的習慣', field: '語氣', scope: { level: 'all' } }));
+    mainStore.writeNotices([{ id: 'n-main', type: 'missed', title: '主組織的通知', status: 'unread', at: '2026-09-01T00:00' }]);
+
+    const id = (await api(base, 'POST', '/api/orgs', { name: '第二間' })).json.id;
+    const missing = await api(base, 'PUT', '/api/orgs/current', { id: 'org-nope' });
+    assert.equal(missing.status, 404);
+    assert.equal((await api(base, 'GET', '/api/orgs')).json.current, 'main', '切失敗不動目前組織');
+
+    const sw = await api(base, 'PUT', '/api/orgs/current', { id });
+    assert.equal(sw.status, 200);
+    assert.deepEqual(sw.json, { ok: true, current: id });
+    assert.equal((await api(base, 'GET', '/api/workflows')).json.length, 2, '只剩範例');
+    assert.ok(!(await api(base, 'GET', '/api/workflows')).json.some((w) => w.category === '測試'));
+    assert.equal((await api(base, 'GET', '/api/memory/cards?bucket=habit')).json.length, 0, '記憶卡不跟過來');
+    assert.deepEqual((await api(base, 'GET', '/api/notices')).json.unread, [], '通知不跟過來');
+    assert.equal((await api(base, 'GET', '/api/schedules')).json.length, 0, '排程不跟過來');
+    const s = (await api(base, 'GET', '/api/settings')).json;
+    assert.equal(s.company_name, '第二間');
+    assert.equal(s.data_dir, orgDirOf(root, id), 'data_dir 指到新組織夾');
+
+    // 切回去＝原封不動
+    await api(base, 'PUT', '/api/orgs/current', { id: 'main' });
+    assert.equal((await api(base, 'GET', '/api/workflows')).json.length, 3);
+    assert.equal((await api(base, 'GET', '/api/memory/cards?bucket=habit')).json.length, 1);
+    assert.equal((await api(base, 'GET', '/api/notices')).json.unread.length, 1);
+    assert.equal((await api(base, 'GET', '/api/schedules')).json.length, 1);
+    assert.equal((await api(base, 'GET', '/api/settings')).json.company_name, '明遠');
+    assert.equal((await api(base, 'GET', '/api/settings')).json.data_dir, orgDirOf(root, 'main'));
+  } finally { await app.stop(); }
+});
+
+test('多組織④：切換之後既有路由寫進去的東西落在新組織夾，PUT /api/settings 改的是目前組織的名字', async () => {
+  const { app, base, root } = await startApp();
+  try {
+    const id = (await api(base, 'POST', '/api/orgs', { name: '第二間' })).json.id;
+    await api(base, 'PUT', '/api/orgs/current', { id });
+    const made = await api(base, 'POST', '/api/workflows', { category: '新的', def: M1B_DEF({ name: '只在第二間' }) });
+    assert.equal(made.status, 200, JSON.stringify(made.json));
+    assert.ok(fs.existsSync(path.join(orgDirOf(root, id), 'workflows', '新的', made.json.id)), '檔案落在第二間的夾裡');
+    assert.ok(!fs.existsSync(path.join(orgDirOf(root, 'main'), 'workflows', '新的')), '主組織夾沒被碰到');
+    await api(base, 'PUT', '/api/settings', { company_name: '改過的名字' });
+    const list = (await api(base, 'GET', '/api/orgs')).json;
+    assert.equal(list.orgs.find((o) => o.id === id).name, '改過的名字', '組織清單的名字跟著改');
+    assert.equal(list.orgs.find((o) => o.id === 'main').name, '組織', '主組織的名字不受影響');
+  } finally { await app.stop(); }
+});
+
+test('多組織⑤：DELETE /api/orgs/:id 是「移出」——夾搬到 orgs-trash/；目前組織 400、最後一個 400、不存在 404', async () => {
+  const { app, base, root } = await startApp();
+  try {
+    const nope = await api(base, 'DELETE', '/api/orgs/org-nope');
+    assert.equal(nope.status, 404);
+    const last = await api(base, 'DELETE', '/api/orgs/main');
+    assert.equal(last.status, 400);
+    assert.ok(last.json.error.includes('最後一個'), last.json.error);
+
+    const id = (await api(base, 'POST', '/api/orgs', { name: '第二間' })).json.id;
+    await api(base, 'PUT', '/api/orgs/current', { id });
+    const self = await api(base, 'DELETE', `/api/orgs/${id}`);
+    assert.equal(self.status, 400);
+    assert.ok(self.json.error.includes('正在用'), self.json.error);
+    assert.ok(fs.existsSync(orgDirOf(root, id)), '擋下來就不准動夾');
+
+    await api(base, 'PUT', '/api/orgs/current', { id: 'main' });
+    const out = await api(base, 'DELETE', `/api/orgs/${id}`);
+    assert.equal(out.status, 200, JSON.stringify(out.json));
+    assert.ok(!fs.existsSync(orgDirOf(root, id)), '原位置沒了');
+    const trash = fs.readdirSync(path.join(root, 'orgs-trash'));
+    assert.equal(trash.length, 1);
+    assert.ok(trash[0].startsWith(`${id}-`), '搬進 orgs-trash/<id>-<時間戳>');
+    assert.ok(fs.existsSync(path.join(root, 'orgs-trash', trash[0], 'settings.json')), '資料整套跟著搬，沒被刪');
+    const after = (await api(base, 'GET', '/api/orgs')).json;
+    assert.deepEqual(after.orgs.map((o) => o.id), ['main'], '登錄簿也拿掉了');
+    assert.equal((await api(base, 'DELETE', `/api/orgs/${id}`)).status, 404, '再刪一次＝找不到');
+  } finally { await app.stop(); }
+});
+
+test('多組織⑥：新組織代號撞到既有（大小寫不分）或夾已經在了就重抽，不覆蓋別人的夾', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bojian-orgid-'));
+  fs.mkdirSync(path.join(root, 'orgs'), { recursive: true });
+  const gen = (...ids) => { const q = [...ids]; return () => q.shift(); };
+  assert.equal(freeOrgId(root, [], gen('org-aaaa')), 'org-aaaa', '沒撞就用第一支');
+  assert.equal(freeOrgId(root, ['org-aaaa'], gen('org-aaaa', 'org-bbbb')), 'org-bbbb', '撞登錄簿→重抽');
+  assert.equal(freeOrgId(root, ['ORG-AAAA'], gen('org-aaaa', 'org-bbbb')), 'org-bbbb', 'NTFS 不分大小寫，也算撞到');
+  fs.mkdirSync(path.join(root, 'orgs', 'org-cccc'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'orgs', 'org-cccc', 'settings.json'), '{"company_name":"別人的"}');
+  assert.equal(freeOrgId(root, [], gen('org-cccc', 'org-dddd')), 'org-dddd', '夾已經在了→重抽，不沿用');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'orgs', 'org-cccc', 'settings.json'), 'utf8')).company_name, '別人的', '別人的資料原封不動');
+});
+
+test('多組織⑦：一個時鐘逐組織敲——B 的排程在目前組織＝A 的時候照樣到點開跑', async () => {
+  const ctx = await startOrgApp('2026-09-01T07:00');
+  const { app, clock, root } = ctx;
+  try {
+    // 在 B 建流程與排程，然後切回 A
+    const id = (await api(ctx.base(), 'POST', '/api/orgs', { name: 'B 公司' })).json.id;
+    await api(ctx.base(), 'PUT', '/api/orgs/current', { id });
+    const wf = await api(ctx.base(), 'POST', '/api/workflows', { category: '測試', def: M1B_DEF() });
+    const sched = await api(ctx.base(), 'POST', '/api/schedules', { workflow_id: `測試/${wf.json.id}`, freq: 'daily', time: '08:00' });
+    assert.equal(sched.status, 200, JSON.stringify(sched.json));
+    await api(ctx.base(), 'PUT', '/api/orgs/current', { id: 'main' });
+
+    clock.t = new Date('2026-09-01T08:00').getTime();
+    await app.stop();
+    await app.start(0, { tickMs: 3600_000 }); // start 內含立刻敲一輪＝逐組織 tickOnce
+    assert.equal((await api(ctx.base(), 'GET', '/api/orgs')).json.current, 'main', '目前組織還是 A');
+
+    const storeB = createStore(orgDirOf(root, id));
+    for (let i = 0; i < 100 && storeB.listRuns('測試', wf.json.id).length === 0; i += 1) await orgWait(20);
+    const runs = storeB.listRuns('測試', wf.json.id);
+    assert.equal(runs.length, 1, 'B 的排程到點自己開跑了');
+    assert.equal(storeB.readRun('測試', wf.json.id, runs[0]).source, 'schedule');
+    const storeA = createStore(orgDirOf(root, 'main'));
+    assert.deepEqual(storeA.readSchedules(), [], 'A 沒有這條排程');
+    assert.ok(!storeA.listWorkflows().some((w) => w.category === '測試'), 'A 也沒有這條流程');
+  } finally { await app.stop(); }
+});
+
+test('多組織⑧：用量各歸各的帳本——A 跑一趟、B 跑一趟，兩本 usage.jsonl 只含自己的列', async () => {
+  const { app, base, adapter, root } = await startApp();
+  try {
+    adapter.enableUsage();
+    const reply = (name) => `拆好了\n\`\`\`yaml\n${JSON.stringify({ format: 1, name, params: [], nodes: [{ id: 'a', title: 'A', executor: 'ai', stop_point: 'never', instruction: '做', next: [] }] })}\n\`\`\``;
+    adapter.setCompleteResponses([reply('A 的流程')]);
+    const rA = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: 'A 這邊' }], phase: 'draft' });
+    assert.equal(rA.status, 200, JSON.stringify(rA.json));
+
+    const id = (await api(base, 'POST', '/api/orgs', { name: 'B 公司' })).json.id;
+    await api(base, 'PUT', '/api/orgs/current', { id });
+    adapter.setCompleteResponses([reply('B 的流程')]);
+    const rB = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: 'B 這邊' }], phase: 'draft' });
+    assert.equal(rB.status, 200, JSON.stringify(rB.json));
+
+    const rows = (org) => createStore(orgDirOf(root, org)).readUsage();
+    const composeOf = (org) => rows(org).filter((u) => u.kind === 'compose');
+    assert.equal(composeOf('main').length, 1, 'A 的帳本只有 A 那一趟');
+    assert.equal(composeOf(id).length, 1, 'B 的帳本只有 B 那一趟');
+    assert.ok(rows('main').every((u) => u.org === undefined), '帳本裡不留 org 章（在誰的夾裡就是誰的）');
+    assert.ok(rows(id).every((u) => u.org === undefined));
+    // 蓋章確實有蓋：兩趟的 meta 分別標到自己的組織
+    const composeCalls = adapter.completes.filter((c) => c.meta?.kind === 'compose');
+    assert.deepEqual(composeCalls.map((c) => c.meta.org), ['main', id], '每次呼叫都蓋上所屬組織');
+  } finally { await app.stop(); }
+});
+
+test('多組織⑨：路由紀律——方法／段數對不上一律 404，不准拼錯還回 200', async () => {
+  const { app, base } = await startApp();
+  try {
+    for (const [method, p] of [['GET', '/api/orgs/main'], ['POST', '/api/orgs/current'], ['PUT', '/api/orgs'], ['DELETE', '/api/orgs'], ['GET', '/api/orgs/main/workflows']]) {
+      const r = await api(base, method, p, method === 'GET' ? undefined : {});
+      assert.equal(r.status, 404, `${method} ${p} 應該 404，實際 ${r.status}`);
+    }
+    // 既有路由沒被加上 /o/:org 前綴——多一段就是找不到
+    assert.equal((await api(base, 'GET', '/api/o/main/workflows')).status, 404);
+    assert.equal((await api(base, 'GET', '/api/workflows')).status, 200, '既有路由照舊');
+  } finally { await app.stop(); }
+});
+
+test('多組織⑩：重開還認得——orgs.json 記住目前組織與清單，範例不會再種一次', async () => {
+  const { app, base, root } = await startApp();
+  let id;
+  try {
+    id = (await api(base, 'POST', '/api/orgs', { name: '第二間' })).json.id;
+    await api(base, 'PUT', '/api/orgs/current', { id });
+    await api(base, 'POST', '/api/workflows', { category: '測試', def: M1B_DEF() });
+  } finally { await app.stop(); }
+
+  const again = createApp({ dataDir: root, adapter: fakeAdapter() });
+  await again.start(0);
+  const base2 = `http://127.0.0.1:${again.port()}`;
+  try {
+    const list = (await api(base2, 'GET', '/api/orgs')).json;
+    assert.equal(list.current, id, '重開還停在第二間');
+    assert.deepEqual(list.orgs.map((o) => o.id).sort(), ['main', id].sort());
+    assert.equal(list.orgs.find((o) => o.id === id).name, '第二間');
+    const wfs = (await api(base2, 'GET', '/api/workflows')).json;
+    assert.equal(wfs.filter((w) => w.category === '範例').length, 2, '範例沒被種成四個');
+    assert.equal(wfs.filter((w) => w.category === '測試').length, 1, '上次存的還在');
+  } finally { await again.stop(); }
+});
+
+// ── 2026-09-18 審查修正輪 ──────────────────────────────────────────────
+
+test('來源檢查：別的網站打過來一律擋，自己的畫面與 CLI 照常', async () => {
+  const { app, base } = await startApp();
+  try {
+    const port = app.port();
+    const post = (headers) => fetch(`${base}/api/workflows`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...headers },
+      body: JSON.stringify({ category: '測試', def: { format: 1, name: 'x', nodes: [] } }),
+    });
+    assert.equal((await post({ origin: 'https://evil.example' })).status, 403, '跨站 Origin 要擋');
+    assert.equal((await post({ origin: `http://127.0.0.1:${port + 1}` })).status, 403, '本機別的埠也算跨站');
+    assert.notEqual((await post({ origin: `http://127.0.0.1:${port}` })).status, 403, '自己的畫面要放行');
+    assert.notEqual((await post({})).status, 403, '不帶 Origin 的 CLI／測試要放行');
+    // 2026-09-18 二次審查：'null' 不是「沒帶」，是 sandbox iframe／data: 頁的不透明來源。
+    // 放行它＝任何網站塞一個 <iframe sandbox="allow-scripts"> 就能打進來（實測打到 200 並建出 Workflow）
+    assert.equal((await post({ origin: 'null' })).status, 403, '不透明來源（sandbox iframe）要擋');
+    // DNS rebinding：把別的網域指到 127.0.0.1，Host 就不是本機名字。
+    // 這裡得用 raw http——fetch 不讓你自己設 Host（forbidden header），設了會被丟掉。
+    const rawGet = (host) => new Promise((resolve, reject) => {
+      const r = http.request({ host: '127.0.0.1', port, path: '/api/health', method: 'GET', headers: { host } },
+        (res) => { res.resume(); resolve(res.statusCode); });
+      r.on('error', reject);
+      r.end();
+    });
+    assert.equal(await rawGet('evil.example'), 403, 'Host 不是本機名字要擋');
+    assert.equal(await rawGet(`127.0.0.1:${port}`), 200, '正常的 Host 要通');
+  } finally {
+    await app.stop();
+  }
+});
+
+test('長中文存檔不被切壞：body 跨 64KB 塊界的字要原樣落地', async () => {
+  const { app, base, dataDir } = await startApp();
+  try {
+    const long = `開頭${'繭'.repeat(40_000)}結尾`; // 120KB＞單塊 64KB，必定跨塊
+    const def = {
+      format: 1,
+      name: '長指示',
+      params: [],
+      nodes: [{ id: 'n1', title: '一', executor: 'ai', stop_point: 'never', instruction: long, next: [] }],
+    };
+    const created = await api(base, 'POST', '/api/workflows', { category: '測試', def });
+    assert.equal(created.status, 200, JSON.stringify(created.json));
+    const back = await api(base, 'GET', `/api/workflows/${encodeURIComponent('測試')}/${created.json.id}`);
+    const got = back.json.nodes[0].instruction;
+    assert.equal(got.includes('�'), false, 'body 出現 U+FFFD＝跨塊的中文被切壞了');
+    assert.equal(got, long);
+    // 落地的檔案本身也要是原文，不是只有回應對
+    const onDisk = fs.readFileSync(path.join(dataDir, 'workflows', '測試', created.json.id, 'workflow.yaml'), 'utf8');
+    assert.equal(onDisk.includes('�'), false, 'workflow.yaml 裡存進了亂碼');
+  } finally {
+    await app.stop();
+  }
+});
+
+test('xlsx 預覽：中間的空白格不會讓後面的數字往左位移', async () => {
+  const ExcelJS = (await import('exceljs')).default;
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet('表1');
+  ws.getCell('A1').value = '品名';
+  ws.getCell('C1').value = '金額'; // B1 故意留空——標題列填滿、資料列留空是最常見的表格形狀
+  ws.getCell('A2').value = '椅子';
+  ws.getCell('B2').value = '黑';
+  ws.getCell('C2').value = 1200;
+  const out = await previewArtifact(Buffer.from(await wb.xlsx.writeBuffer()), '表.xlsx');
+  const rows = out.sheets[0].html.match(/<tr>.*?<\/tr>/g);
+  const tds = (r) => (r.match(/<td>/g) ?? []).length;
+  assert.equal(tds(rows[0]), 3, '標題列要有三格（中間是空的），不能塌成兩格');
+  assert.equal(tds(rows[1]), 3);
+  assert.ok(rows[0].includes('<td></td>'), '空白格要留一個空的 td');
+  assert.ok(rows[1].includes('<td>1200</td></tr>'), '金額要留在第三欄，不能被擠到「黑」的位置');
 });

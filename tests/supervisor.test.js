@@ -358,12 +358,24 @@ test('二元組相似度：像的過半、不像的低、不足兩字回 0（永
 
 // ---- 移植合併輪 U1b：開場 prompt 的參考檔 attachments 混型（共用層 {scope,name} 用「名稱（公司）」當鍵與顯示名） ----
 
-test('U1b ⑥：開場 prompt attachments 混型——{scope,name} 顯示「名稱（公司）」「名稱（部門）」並以此當 refTexts 的鍵；不炸、無 [object Object]', () => {
+test('U1b ⑥：開場 prompt attachments 混型——{scope,name} 顯示「名稱（公司）」「名稱（分類）」並以此當 refTexts 的鍵；不炸、無 [object Object]', () => {
   const def = structuredClone(DEF);
   def.nodes[1].attachments = ['規格.md', { scope: 'company', name: '範本.md' }, { scope: 'category', name: '往期.xlsx' }];
-  const p = buildBriefPrompt({ def, params: {}, paramLabels: {}, refTexts: { '規格.md': 'y', '範本.md（公司）': '公司範本內容' } });
+  const p = buildBriefPrompt({ def, params: {}, paramLabels: {}, refTexts: { '規格.md': 'y', '範本.md（組織）': '公司範本內容' } });
   assert.ok(p.includes('【參考檔：規格.md】\ny'));
-  assert.ok(p.includes('【參考檔：範本.md（公司）】\n公司範本內容'), p);
-  assert.ok(p.includes('【參考檔：往期.xlsx（部門）】'), '讀不出文字的只列名字（標層）');
+  assert.ok(p.includes('【參考檔：範本.md（組織）】\n公司範本內容'), p);
+  assert.ok(p.includes('【參考檔：往期.xlsx（分類）】'), '讀不出文字的只列名字（標層）');
   assert.ok(!p.includes('[object Object]'));
+});
+
+// ---- 拆法輪 B2 ⑤（契約 D）：能耐表只給拆解器，監工三個 prompt 不帶 ----
+
+test('B2 ⑤：監工開場／交接／收尾 prompt 0 命中「你能派工人做什麼」與「# 關於你」', () => {
+  const brief = buildBriefPrompt({ def: DEF, params: {}, paramLabels: {}, refTexts: {} });
+  const hand = buildHandoffPrompt({ node: DEF.nodes[1], flags: { note: true, tier: true, tools: true } });
+  const rec = buildRecordPrompt({ def: DEF, table: [{ node: 'a', title: '看資料', kind: 'task' }], outputs: [] });
+  for (const p of [brief, hand, rec]) {
+    assert.equal((p.match(/你能派工人做什麼/g) ?? []).length, 0, p);
+    assert.equal((p.match(/# 關於你/g) ?? []).length, 0, p);
+  }
 });

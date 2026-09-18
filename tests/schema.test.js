@@ -36,7 +36,7 @@ test('examples/ 內每一個內建範例都通過驗證，且數量符合 US-011
 test('未接上的步驟：預設擋（開跑用）；allowFloating 放行（編輯中存檔用）', () => {
   const def = loadExample();
   def.nodes.push({ id: 'floating', title: '還沒接的一步', executor: 'ai', stop_point: 'never', instruction: '待接', next: [] });
-  assert.throws(() => validateWorkflow(def), (e) => e instanceof SchemaError && e.message.includes('還沒接進流程'));
+  assert.throws(() => validateWorkflow(def), (e) => e instanceof SchemaError && e.message.includes('還沒接進 Workflow'));
   validateWorkflow(def, { allowFloating: true }); // 不丟例外即通過
 });
 
@@ -65,7 +65,7 @@ test('輸出格式：文字通過；非文字擋下且訊息點名', () => {
 test('缺 name → 擋下且訊息點名', () => {
   const def = loadExample();
   delete def.name;
-  assert.throws(() => validateWorkflow(def), (e) => e instanceof SchemaError && e.message.includes('name'));
+  assert.throws(() => validateWorkflow(def), (e) => e instanceof SchemaError && e.message.includes('缺 name（Workflow 名稱）'));
 });
 
 test('executor 亂寫 → 擋下', () => {
@@ -106,7 +106,7 @@ test('合法分岔＋平行定義通過驗證', () => {
 test('循環 → 擋（訊息含繞圈）', () => {
   const def = structuredClone(DAG_DEF);
   def.nodes.find((n) => n.id === 'done-join').next = ['fill'];
-  assert.throws(() => validateWorkflow(def), (e) => e instanceof SchemaError && e.message.includes('繞圈'));
+  assert.throws(() => validateWorkflow(def), (e) => e instanceof SchemaError && e.message.includes('繞圈') && e.message.startsWith('Workflow 定義有問題：Workflow 有繞圈'));
 });
 
 test('分岔少於 2 支、fork 單支、branch 指向不存在 → 全擋', () => {
@@ -202,7 +202,7 @@ test('健檢 P2-04：多起點會合＝合法；孤島步驟仍算斷鏈；別�
   };
   validateWorkflow(multiRoot); // 兩顆入度 0 的起點、最後會合——嚴格模式也放行
   const island = { ...multiRoot, nodes: [...multiRoot.nodes, task('孤', [])] };
-  assert.throws(() => validateWorkflow(island), (e) => e.message.includes('還沒接進流程'));
+  assert.throws(() => validateWorkflow(island), (e) => e.message.includes('還沒接進 Workflow'));
   validateWorkflow(island, { allowFloating: true }); // 編輯中照舊放行
   const cycle = {
     format: 1, name: '他支繞圈', params: [],
@@ -331,11 +331,19 @@ test('全域設定逐欄驗證：合法回空；錯的每欄一句人話', () =>
   assert.deepEqual(validateSettings('oops'), ['設定格式不對']);
   assert.ok(validateSettings({ ...DEFAULT_SETTINGS, memory: 'x' }).includes('設定的記憶格式不對'));
   assert.ok(validateSettings({ ...DEFAULT_SETTINGS, memory: { ...DEFAULT_SETTINGS.memory, sensitive: [] } }).includes('設定的敏感類別格式不對'));
-  assert.ok(validateSettings({ ...DEFAULT_SETTINGS, defaults: null }).includes('設定的新流程預設格式不對'));
+  assert.ok(validateSettings({ ...DEFAULT_SETTINGS, defaults: null }).includes('設定的新 Workflow 預設格式不對'));
   assert.ok(validateSettings(withDefaults({ supervisor_flags: 1 })).includes('設定的監工三個勾預設格式不對'));
   assert.ok(validateSettings({ ...DEFAULT_SETTINGS, exec: 'x' }).includes('設定的執行與排程格式不對'));
   const allBad = validateSettings({ version: 1, memory: 'x', defaults: 'x', exec: 'x' });
   assert.ok(allBad.length === 3 && allBad.every((m) => !m.includes('物件')), allBad.join('；'));
+});
+
+test('B4 契約 F：validateSettings 驗 compose.confirm_shape 布林（人話）；區塊不是物件講格式不對；沒給不報', () => {
+  assert.deepEqual(validateSettings({ ...DEFAULT_SETTINGS, compose: { confirm_shape: false } }), []);
+  assert.deepEqual(validateSettings({ version: 1 }), [], '缺鍵不報');
+  assert.deepEqual(validateSettings({ ...DEFAULT_SETTINGS, compose: { confirm_shape: 'x' } }), ['拆之前先確認成品長相要是開或關']);
+  assert.deepEqual(validateSettings({ ...DEFAULT_SETTINGS, compose: { confirm_shape: 1 } }), ['拆之前先確認成品長相要是開或關']);
+  assert.deepEqual(validateSettings({ ...DEFAULT_SETTINGS, compose: 'x' }), ['設定的拆解格式不對']);
 });
 
 // ---- 移植合併輪 U1a：attachments 收 {scope, name}、設定收 company_name ----
@@ -360,7 +368,41 @@ test('U1a ⑥：company_name 要是文字、60 字內；缺省空字串合法', 
   assert.deepEqual(validateSettings({ ...DEFAULT_SETTINGS, company_name: '範例公司' }), []);
   assert.deepEqual(validateSettings({ ...DEFAULT_SETTINGS, company_name: '' }), []);
   assert.deepEqual(validateSettings({ ...DEFAULT_SETTINGS, company_name: '赫'.repeat(60) }), []);
-  assert.ok(validateSettings({ ...DEFAULT_SETTINGS, company_name: '赫'.repeat(61) }).includes('公司名稱要是文字、60 字內'));
-  assert.ok(validateSettings({ ...DEFAULT_SETTINGS, company_name: 12 }).includes('公司名稱要是文字、60 字內'));
-  assert.ok(validateSettings({ ...DEFAULT_SETTINGS, company_name: null }).includes('公司名稱要是文字、60 字內'));
+  assert.ok(validateSettings({ ...DEFAULT_SETTINGS, company_name: '赫'.repeat(61) }).includes('組織名稱要是文字、60 字內'));
+  assert.ok(validateSettings({ ...DEFAULT_SETTINGS, company_name: 12 }).includes('組織名稱要是文字、60 字內'));
+  assert.ok(validateSettings({ ...DEFAULT_SETTINGS, company_name: null }).includes('組織名稱要是文字、60 字內'));
+});
+
+// ---- 排版輪 L11（題 2 A）：欄位可設「每次上傳一個檔」——params[].input 只准 'file'；舊檔沒有這個鍵照過 ----
+test('排版輪 L11 ①：params[].input 只准 file、選填；舊定義沒有 input 照過', () => {
+  validateWorkflow(soloDef({ params: [{ key: 'a', label: 'A', default: '' }] }));
+  validateWorkflow(soloDef({ params: [{ key: 'src', label: '原始資料', default: '', input: 'file', required: true }] }));
+  for (const bad of ['text', '', 1, null]) {
+    assert.throws(() => validateWorkflow(soloDef({ params: [{ key: 'a', label: 'A', default: '', input: bad }] })),
+      (e) => e.message.includes('params[0] input 只能是 file（每次上傳一個檔）'), String(bad));
+  }
+  validateWorkflow(loadExample()); // 內建範例（沒有 input）照過
+});
+
+// ---- 排版輪 L13（題 1 A）：卡片入口「任一條到」＝nodes[].merge:'any'（選填；缺省＝等全部） ----
+test('排版輪 L13 引擎①：merge 只准 any、缺省通過（舊檔沒有這個鍵照過）', () => {
+  const def = {
+    format: 1, name: '任一條到', params: [],
+    nodes: [
+      { id: 'a', title: 'A', executor: 'ai', stop_point: 'never', instruction: '做', next: ['b', 'c'] },
+      { id: 'b', title: 'B', executor: 'ai', stop_point: 'never', instruction: '做', next: ['d'] },
+      { id: 'c', title: 'C', executor: 'ai', stop_point: 'never', instruction: '做', next: ['d'] },
+      { id: 'd', title: 'D', executor: 'ai', stop_point: 'never', instruction: '做', next: [], merge: 'any' },
+    ],
+  };
+  validateWorkflow(def);
+  const plain = structuredClone(def);
+  delete plain.nodes[3].merge;
+  validateWorkflow(plain);
+  for (const bad of ['all', 'ANY', '', true, 1, null]) {
+    const d = structuredClone(def);
+    d.nodes[3].merge = bad;
+    assert.throws(() => validateWorkflow(d), (e) => e instanceof SchemaError && e.message.includes('節點「d」merge 只能是 any（任一條到）'), String(bad));
+  }
+  validateWorkflow(loadExample());
 });

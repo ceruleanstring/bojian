@@ -5,16 +5,17 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import yaml from 'js-yaml';
 import { createStore, StoreError, deepMerge, DEFAULT_SETTINGS, safeFileName } from './store.js';
-import { extractRuleText, checkRuleLimits, SharedError, LIMITS } from './shared.js';
+import { extractRuleText, checkRuleLimits, SharedError, LIMITS, viewKind, normName } from './shared.js';
 import { createRunner } from './runner.js';
 import { createHostAdapter } from './host-adapter.js';
 import { compose, ComposeError } from './composer.js';
-import { validateWorkflow, outgoing, applyDefaults, validateSettings } from './schema.js';
+import { validateWorkflow, outgoing, nodeKind, applyDefaults, validateSettings } from './schema.js';
+import { layers } from './graph.js';
 import {
   createMemory, makeCard, validateCard, matchField, ensureFields, similarFields, mergeFields, parseGroupText,
   newId, bucketOfId, selectCore, FIELD_KINDS, SCOPE_LEVELS,
 } from './memory.js';
-import { preflight } from './preflight.js';
+import { preflight, packInputs } from './preflight.js';
 import mammoth from 'mammoth';
 import ExcelJS from 'exceljs';
 import { marked } from 'marked';
@@ -24,9 +25,15 @@ import { createScheduler, fmtLocal, validateSchedule, isOccurrence } from './sch
 import { parseWhen } from './runner.js';
 import { pushNotice, resolveNotice } from './notices.js';
 import { monthView, linkedShifts, snapshotPrompt, parseSnapshot } from './calendar.js';
+import { ensureOrgLayout, writeOrgs, orgDir, newOrgId } from './orgs.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' };
+// 本次上傳副檔名白名單（排版輪 L11）＝參考檔選檔框 index.html #ref-file 的 accept 那張
+export const RUN_UPLOAD_EXTS = ['docx', 'xlsx', 'pdf', 'md', 'txt', 'csv', 'json', 'html'];
+// 本次附件（大跑輪）：uploads 裡不綁任何欄位的保留鍵——檔案版的「本次補充」，這一趟每個 AI 步驟都看得到。
+// 走同一條 run-uploads 暫存通道（副檔名／大小／一鍵一檔的規則完全沿用），差別只在開跑時不寫進 run.params
+export const RUN_ATTACH_KEY = '__run__';
 // 剝繭版本（設定頁「關於」用）：讀不到就不顯示，不擋啟動
 let PKG_VERSION = null;
 try { PKG_VERSION = JSON.parse(fs.readFileSync(path.join(HERE, '..', 'package.json'), 'utf8')).version ?? null; } catch { /* 沒版本可顯示而已 */ }
@@ -89,7 +96,11 @@ export async function previewArtifact(buf, name) {
       let html = '<table>';
       ws.eachRow({ includeEmpty: false }, (row) => {
         if (n++ >= 500) return;
-        html += `<tr>${row.values.slice(1).map((v) => `<td>${escHtml(cellText(v))}</td>`).join('')}</tr>`;
+        // row.values 是稀疏陣列，.map 會跳過空洞＝空白格整個消失、後面的值往左位移，
+        // 於是數字排到錯的欄名底下（而查核員走 checker 的 eachCell 是對齊的，兩邊看到不同的表）
+        const cells = [];
+        row.eachCell({ includeEmpty: true }, (cell) => { cells.push(cellText(cell.value)); });
+        html += `<tr>${cells.map((c) => `<td>${escHtml(c)}</td>`).join('')}</tr>`;
       });
       sheets.push({ name: ws.name, html: `${html}</table>` });
     });
@@ -125,21 +136,43 @@ function usageByNode(allUsage, runId) {
   return out;
 }
 
-// 儀表板輪／移植合併輪 U4a：一趟執行的「成品」——終點步（沒有出線）且已完成、有內容或有檔的那些。
+// 終點 task：順著出線只穿過結構節點（並行點／會合／分岔）都到不了別的 task 的那一步。
+// 拆法輪 B1 後結構節點的 output 一律空字串（不再轉運），終點恰好是 next:[] 的 join 時，
+// 成品＝匯進它的那幾支 task（並行兩支都算），不是 join 本身、也不是備援隨手挑一支。
+function isTerminalTask(n, byId) {
+  if (nodeKind(n) !== 'task') return false;
+  const seen = new Set();
+  const reachesTask = (id) => {
+    for (const t of outgoing(byId.get(id) ?? {})) {
+      if (seen.has(t)) continue;
+      seen.add(t);
+      const m = byId.get(t);
+      if (!m) continue;
+      if (nodeKind(m) === 'task' || reachesTask(t)) return true;
+    }
+    return false;
+  };
+  return !reachesTask(n.id);
+}
+
+// 儀表板輪／移植合併輪 U4a：一趟執行的「成品」——終點 task（見 isTerminalTask）且已完成、有內容或有檔的那些。
 // 儀表板 recent[] 與 GET /runs?detail=1 共用這一支，兩邊看到的成品永遠一致。
 function finalsOf(run) {
+  const nodes = run.def?.nodes ?? [];
+  const byId = new Map(nodes.map((n) => [n.id, n]));
   const finals = [];
-  for (const n of run.def?.nodes ?? []) {
-    if (outgoing(n).length) continue; // 終點步＝沒有出線的步
+  for (const n of nodes) {
+    if (!isTerminalTask(n, byId)) continue;
     const s = run.steps?.[n.id];
     if (!s || s.status !== 'done') continue;
     const text = String(s.edited_output ?? s.output ?? '');
     if (!text && !s.file) continue;
     finals.push({ node: n.id, title: n.title, preview: text.slice(0, 400), file: s.file ?? null });
   }
-  // 資料通道輪：終點是人做步驟（沒交內容）→ 成品回退到最後一個完成的 AI 步驟，別顯示「沒有成品」
+  // 資料通道輪：終點是人做步驟（沒交內容）→ 成品回退到最後一個完成的 AI 步驟（拓樸序最深的那步，不是陣列序），別顯示「沒有成品」
   if (!finals.length && run.status === 'done') {
-    const last = [...(run.def?.nodes ?? [])].reverse().find((n) => {
+    const depth = layers({ nodes });
+    const last = [...nodes].sort((a, b) => (depth.get(a.id) ?? 0) - (depth.get(b.id) ?? 0)).reverse().find((n) => {
       const s = run.steps?.[n.id];
       return (n.kind ?? 'task') === 'task' && n.executor === 'ai' && s?.status === 'done' && (String(s.edited_output ?? s.output ?? '') || s.file);
     });
@@ -158,9 +191,25 @@ function stepCountsOf(run) {
   );
 }
 
+// 新組織的代號：撞到登錄簿既有（NTFS 不分大小寫，Main 與 main 同一夾）或夾已經在了就重抽——絕不沿用別人的夾。
+// gen 可換是為了測得到「撞了會重抽」；正常呼叫不帶。
+export function freeOrgId(root, taken = [], gen = newOrgId) {
+  const used = new Set([...taken].map((s) => String(s).toLowerCase()));
+  for (let i = 0; i < 50; i += 1) {
+    const id = gen();
+    if (used.has(String(id).toLowerCase())) continue;
+    if (fs.existsSync(orgDir(root, id))) continue;
+    return id;
+  }
+  throw new Error('抽不出新的組織代號，請稍後再試一次');
+}
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let data = '';
+    // 先定編碼：不設就是每塊各自解碼，跨塊的中文會被切成兩個 U+FFFD，而 JSON.parse 照樣成功——
+    // 亂碼會無聲無息存進 workflow.yaml（長指示／長對話史的 body 超過 64KB 就會踩到，2026-09-18 審查實測）
+    req.setEncoding('utf8');
     req.on('data', (c) => { data += c; });
     req.on('end', () => {
       try { resolve(data ? JSON.parse(data) : {}); } catch { reject(new Error('請求內容不是合法 JSON')); }
@@ -169,161 +218,276 @@ function readBody(req) {
   });
 }
 
+// 本機服務的最低防線（2026-09-18 審查）：綁 127.0.0.1 擋不住瀏覽器——使用者隨便逛到的網頁都能對
+// 127.0.0.1 發跨站請求，沒有來源檢查就等於任何網站都能驅動這支 API（建一條流程→開跑→工人帶著
+// Write／Edit／Bash 權限在這台機器上執行對方寫的指示；也能打 /api/autostart 種開機常駐）。
+// 兩道：①Host 必須是本機名字——擋「把別的網域指到 127.0.0.1」的 DNS rebinding；
+// ②帶了 Origin 就必須是自己這個 origin——瀏覽器的跨站請求一定帶 Origin，CLI 與測試不帶。
+// 「沒帶 Origin」才是 CLI。字串 'null' 不是沒帶——那是瀏覽器給不透明來源（sandbox iframe、
+// data: 頁）的 Origin，放行它等於留一道任何網站都做得出來的後門：頁面塞一個
+// <iframe sandbox="allow-scripts"> 在裡面 fetch，content-type 用 text/plain 免預檢，
+// 請求就帶著 Origin: null 抵達（2026-09-18 二次審查實測：打到 200、真的建出一條 Workflow）。
+const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
+function fromOwnUi(req) {
+  const host = req.headers.host ?? '';
+  let self;
+  try { self = new URL(`http://${host}`); } catch { return false; }
+  if (!LOCAL_HOSTS.has(self.hostname)) return false;
+  const origin = req.headers.origin;
+  if (origin === undefined) return true;
+  try {
+    const u = new URL(origin);
+    return LOCAL_HOSTS.has(u.hostname) && (u.port || '80') === (self.port || '80');
+  } catch { return false; }
+}
+
 export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'), examplesDir = path.join(HERE, '..', 'examples'), now = () => Date.now(), autostartDir } = {}) {
   // 開機自動啟動（US-043，使用者自決）：Windows＝啟動資料夾放一支 .cmd；其他平台誠實說不支援
   const startupDir = autostartDir ?? (process.platform === 'win32' && process.env.APPDATA
     ? path.join(process.env.APPDATA, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup') : null);
   const autostartFile = startupDir ? path.join(startupDir, 'bojian-autostart.cmd') : null;
-  const store = createStore(dataDir);
-  // 用量帳本（儀表板輪）：每次宿主呼叫記一行——記帳失敗只留 log，不擋任何功能
-  adapter.setUsageSink?.((u) => {
-    try { store.appendUsage(u); } catch (e) { console.error('[bojian] 用量記帳失敗：', e.message); }
-  });
-  const memory = createMemory({ store, adapter, now }); // 記憶輪：四條記路的落地（M2）；runner 開跑後叫它判「同值連兩趟」
-  const runner = createRunner({ store, adapter, now, memory });
-  const optimizer = createOptimizer({ store, adapter });
   const nowIso = () => new Date(now()).toISOString();
-  const inflight = new Set();
 
-  // 工作單留存（監工輪）：不屬於任何一次執行的四種呼叫（建流程、匯入掃描、優化、行事曆快照）沒有 run 卷宗可存，
-  // 改留在 dataDir/logs/<種類>/。一次呼叫配一組回呼：指示與回覆共用同一個檔名，回覆多一個 .reply。
-  function logPair(kind, tail = '') {
-    let name = null;
+  // 多組織：一個組織一套 store／memory／runner／optimizer／scheduler，路徑全由 orgDir 推導。
+  // store 帶 root＝資料根：備份備的是整根（全部組織一起備），不是單一組織夾。
+  function makeOrg(id, dir) {
+    const store = createStore(dir, { root: dataDir });
+    // 用量歸戶：adapter 的 usage sink 是全域單一支，第二個組織建起來就會蓋掉第一個。
+    // 改成每組織一層薄包裝，只在 meta 上蓋 org 章；sink 統一裝在 createApp，按 org 分流進各自的帳本。
+    const orgAdapter = {
+      ...adapter,
+      complete: (o) => adapter.complete({ ...o, meta: { ...(o?.meta ?? {}), org: id } }),
+      executeNode: (o) => adapter.executeNode({ ...o, meta: { ...(o?.meta ?? {}), org: id } }),
+    };
+    const memory = createMemory({ store, adapter: orgAdapter, now }); // 記憶輪：四條記路的落地（M2）；runner 開跑後叫它判「同值連兩趟」
+    const runner = createRunner({ store, adapter: orgAdapter, now, memory });
+    const optimizer = createOptimizer({ store, adapter: orgAdapter });
+    const inflight = new Set();
+
+    // 工作單留存（監工輪）：不屬於任何一次執行的四種呼叫（建流程、匯入掃描、優化、行事曆快照）沒有 run 卷宗可存，
+    // 改留在 dataDir/logs/<種類>/。一次呼叫配一組回呼：指示與回覆共用同一個檔名，回覆多一個 .reply。
+    function logPair(kind, tail = '') {
+      let name = null;
+      return {
+        onPrompt: (text) => { name = `${new Date(now()).toISOString().replace(/:/g, '-')}${tail}`; store.writeLog(kind, name, text); },
+        onReply: (text) => { if (name) store.writeLog(kind, `${name}.reply`, text); },
+      };
+    }
+
+    // 記憶輪（M1c）：拆解器的三段參考——分類清單、詞典、所在分類的群組條（只取 active）。
+    // 分類依 body.category，沒有才看草稿頂層的 category；存在的分類才算「已定」。讀不到＝當沒有，不擋建流程。
+    // 拆法輪（契約 D）：多 capabilities（設定組布林，字由 composer 組）與 coreNotes（表達層＋內容層認識卡文，同開跑 selectCore；暫停或讀不到＝[]）。
+    function composeContext(body) {
+      const ctx = { categories: [], dict: null, groupRules: [], category: null, companyRules: [], deptRules: [], capabilities: null, coreNotes: [] };
+      try {
+        const settings = store.readSettings();
+        ctx.capabilities = { web: settings.exec?.web !== false, files_default: settings.defaults?.permissions_files !== false, office: ['docx', 'xlsx'], downgrade: ['pptx', 'pdf'], refs: true, connectors: [] };
+        ctx.categories = store.listCategories();
+        ctx.dict = store.readDict();
+        ctx.companyRules = store.readSharedRuleTexts('_company'); // 三層共用檔：公司規範當已知條件（沒有夾＝空）
+        const want = typeof body.category === 'string' && body.category ? body.category
+          : (typeof body.current_draft?.category === 'string' ? body.current_draft.category : '');
+        if (want && (ctx.categories.includes(want) || want === '未分類')) {
+          ctx.category = want;
+          ctx.groupRules = (store.readGroup(want)?.rules ?? []).filter((r) => r.status === 'active').map((r) => r.text);
+          if (want !== '未分類') ctx.deptRules = store.readSharedRuleTexts(want);
+        }
+        try {
+          ctx.coreNotes = selectCore({ profileCards: store.listCards('profile'), category: ctx.category, paused: settings.memory?.paused === true }).map((c) => c.text);
+        } catch (e) {
+          console.error('[bojian] 記憶卡讀不到，這趟拆解不帶關於你：', e.message);
+        }
+      } catch (e) {
+        console.error('[bojian] 建流程的記憶參考讀不到，照樣拆：', e.message);
+      }
+      return ctx;
+    }
+
+    function kick(category, id, runId) {
+      const key = `${category}/${id}/${runId}`;
+      if (inflight.has(key)) return;
+      inflight.add(key);
+      runner.runUntilPause(category, id, runId)
+        .then((run) => {
+          // run 跑完＝優化引擎的進場時機（US-007：run 結束後出提議）
+          if (run?.status === 'done') {
+            optimizer.analyze(category, id, logPair('optimize', `-${category}-${id}`))
+              .catch((e) => console.error('[bojian] 提議產生失敗（下次一起看）：', e.message));
+          }
+        })
+        .catch((e) => console.error('[bojian] run 推進失敗：', e.message))
+        .finally(() => inflight.delete(key));
+    }
+
+    const scheduler = createScheduler({ store, runner, kick, now });
+
+    // Google 快照抓取（US-034）：任何失敗都不覆寫既有快取，回人話原因（Error Map）
+    async function refreshSnapshot(month) {
+      let out;
+      const log = logPair('snapshot', `-${month}`);
+      try {
+        const prompt = snapshotPrompt(month);
+        log.onPrompt(prompt); // store.writeLog 自己吞例外：工作單寫不進不擋抓快照
+        // 輕裝連接器例外（監工輪）：這一次呼叫要看得到使用者掛的行事曆，不推 --strict-mcp-config
+        out = await orgAdapter.complete({ prompt, meta: { kind: 'snapshot', mcp: 'calendar' } });
+        log.onReply(String(out ?? ''));
+      } catch (e) {
+        return { ok: false, reason: e.message };
+      }
+      const parsed = parseSnapshot(out);
+      if (!parsed) return { ok: false, reason: '快照回覆讀不懂——再試一次，或確認你的 Claude 掛了行事曆存取' };
+      if (parsed.error) return { ok: false, reason: parsed.error };
+      const fetched_at = new Date(now()).toISOString();
+      store.writeSnapshot({ fetched_at, status: 'ok', events: parsed.events });
+      return { ok: true, fetched_at, count: parsed.events.length };
+    }
+
+    // 待辦聚合（US-035）：等人狀態五種＋時間未定＋待核可提議＋Google 異動卡——server 一次算好，前端不做 N+1
+    function todoItems() {
+      const items = [];
+      const KINDMAP = {
+        waiting_review: ['hold', '停點：看過再往下'],
+        waiting_human: ['you', '你做的步驟——做完回來標完成'],
+        waiting_branch: ['hold', 'AI 判不出走哪條路，等你選'],
+        waiting_data: ['hold', '資料不全——重抓／續跑／擱置'],
+        time_pending: ['hold', '時間未定——等你定時刻'],
+        waiting_check: ['hold', '查核攔下——看原始資料 vs 成品再決定'],
+      };
+      for (const { category, id } of store.listWorkflows()) {
+        for (const rid of store.listRuns(category, id)) {
+          let r;
+          try { r = store.readRun(category, id, rid); } catch { continue; }
+          if (r.status === 'done') continue;
+          for (const [nodeId, step] of Object.entries(r.steps ?? {})) {
+            const km = KINDMAP[step.status];
+            if (!km) continue;
+            const node = r.def.nodes.find((n) => n.id === nodeId);
+            items.push({
+              kind: step.status, tone: km[0],
+              title: `${node?.title ?? nodeId}（${r.workflow.name}）`,
+              desc: step.status === 'time_pending' ? (step.time_note ?? km[1])
+                : step.status === 'waiting_data' ? (step.data_note ?? km[1])
+                : step.status === 'waiting_check' ? (step.check?.blocks?.[0]?.detail ?? km[1])
+                : km[1],
+              run: { category, id, run_id: rid, node: nodeId },
+            });
+          }
+        }
+      }
+      for (const p of store.readProposals().filter((x) => x.status === 'pending')) {
+        items.push({
+          kind: 'proposal', tone: 'prop',
+          title: `優化提議：${p.workflow.category}/${p.workflow.id}`,
+          desc: p.change?.summary ?? '有一條提議等你看',
+          proposal_id: p.id, workflow: p.workflow,
+        });
+      }
+      for (const s of linkedShifts(store)) {
+        items.push({ kind: 'google_shift', tone: 'prop', title: s.title, desc: s.desc, shift: { run: s.run, to: s.to } });
+      }
+      return items;
+    }
+
+    // 刪共用檔順帶清勾選（移植合併輪 U1a）：掃所有流程步驟的 attachments，拿掉指向這份檔的 {scope,name}；
+    // 公司檔＝全部流程都看，部門檔＝只看該分類；有變的流程升一版（履歷寫原因），回被清掉的步驟數。壞檔跳過不擋刪除。
+    function unlinkSharedAttachments(scope, name) {
+      const tag = scope === '_company' ? 'company' : 'category';
+      let steps = 0;
+      for (const w of store.listWorkflows()) {
+        if (tag === 'category' && w.category !== scope) continue;
+        let def;
+        try { def = store.readWorkflow(w.category, w.id); } catch { continue; }
+        let touched = 0;
+        for (const n of def.nodes ?? []) {
+          if (!Array.isArray(n.attachments)) continue;
+          const kept = n.attachments.filter((a) => !(a && typeof a === 'object' && a.scope === tag && a.name === name));
+          if (kept.length !== n.attachments.length) { n.attachments = kept; touched += 1; }
+        }
+        if (!touched) continue;
+        steps += touched;
+        store.bumpVersion(w.category, w.id, def, `共用檔「${name}」已刪除，${touched} 步的勾選一併取消`, 'manual'); // 精簡：不走 saveManualEdit 的十分鐘合併，讓履歷留下原因
+      }
+      return steps;
+    }
+
+    // 開機三件事（原本在 start()）搬進來：新建的組織一樣拿得到範例與垃圾桶清理
+    seedExamples(store, examplesDir);
+    try { store.purgeTrash(30); } catch (e) { console.error('[bojian] 垃圾桶清理失敗：', e.message); }
+    try { store.purgeMemoryTrash(30); } catch (e) { console.error('[bojian] 記憶垃圾桶清理失敗：', e.message); }
     return {
-      onPrompt: (text) => { name = `${new Date(now()).toISOString().replace(/:/g, '-')}${tail}`; store.writeLog(kind, name, text); },
-      onReply: (text) => { if (name) store.writeLog(kind, `${name}.reply`, text); },
+      id, store, memory, runner, optimizer, scheduler, kick, logPair, adapter: orgAdapter,
+      composeContext, refreshSnapshot, todoItems, unlinkSharedAttachments,
     };
   }
 
-  // 記憶輪（M1c）：拆解器的三段參考——分類清單、詞典、所在分類的群組條（只取 active）。
-  // 分類依 body.category，沒有才看草稿頂層的 category；存在的分類才算「已定」。讀不到＝當沒有，不擋建流程。
-  function composeContext(body) {
-    const ctx = { categories: [], dict: null, groupRules: [], category: null, companyRules: [], deptRules: [] };
-    try {
-      ctx.categories = store.listCategories();
-      ctx.dict = store.readDict();
-      ctx.companyRules = store.readSharedRuleTexts('_company'); // 三層共用檔：公司規範當已知條件（沒有夾＝空）
-      const want = typeof body.category === 'string' && body.category ? body.category
-        : (typeof body.current_draft?.category === 'string' ? body.current_draft.category : '');
-      if (want && (ctx.categories.includes(want) || want === '未分類')) {
-        ctx.category = want;
-        ctx.groupRules = (store.readGroup(want)?.rules ?? []).filter((r) => r.status === 'active').map((r) => r.text);
-        if (want !== '未分類') ctx.deptRules = store.readSharedRuleTexts(want);
-      }
-    } catch (e) {
-      console.error('[bojian] 建流程的記憶參考讀不到，照樣拆：', e.message);
-    }
-    return ctx;
-  }
+  // ---- 組織登錄：orgs.json 是清單的真相（在記憶體裡，寫時同步落地），名字的真相在各組織 settings.json ----
+  let state = ensureOrgLayout(dataDir); // { version, current, orgs:[{id, created_at}] }
+  const built = new Map(); // 一個組織只 makeOrg 一次（種範例／清垃圾桶都在裡面，不能每次請求重跑）
+  const orgs = {
+    currentId: () => state.current,
+    list: () => state.orgs, // 登錄簿原始列（id／created_at），不含名字
+    has: (id) => state.orgs.some((o) => o.id === id),
+    get(id) {
+      if (!orgs.has(id)) return null;
+      if (!built.has(id)) built.set(id, makeOrg(id, orgDir(dataDir, id)));
+      return built.get(id);
+    },
+    current: () => orgs.get(state.current),
+    all: () => state.orgs.map((o) => orgs.get(o.id)).filter(Boolean),
+    // 組織頁清單：名字與流程數逐組織現算（讀不到就給空值，不擋整份清單）
+    snapshot: () => ({
+      current: state.current,
+      orgs: state.orgs.map((o) => {
+        const org = orgs.get(o.id);
+        let name = '';
+        let workflows = 0;
+        try { name = org.store.readSettings().company_name ?? ''; } catch { /* 設定壞掉照樣列得出來 */ }
+        try { workflows = org.store.listWorkflows().length; } catch { /* 同上 */ }
+        return { id: o.id, name: name || '組織', created_at: o.created_at ?? null, workflows };
+      }),
+    }),
+    create(name) {
+      const id = freeOrgId(dataDir, state.orgs.map((o) => o.id));
+      fs.mkdirSync(orgDir(dataDir, id), { recursive: true });
+      state = { ...state, orgs: [...state.orgs, { id, created_at: nowIso() }] };
+      writeOrgs(dataDir, state);
+      const org = orgs.get(id); // 這一下才 makeOrg：種範例、建目錄
+      const clean = String(name ?? '').trim();
+      if (clean) org.store.writeSettings({ ...org.store.readSettings(), company_name: clean });
+      return { id, name: clean || '組織' };
+    },
+    setCurrent(id) {
+      state = { ...state, current: id };
+      writeOrgs(dataDir, state);
+      return state.current;
+    },
+    // 「移出」不是真刪：整夾改名進 orgs-trash/，登錄簿拿掉。要救回來自己搬回 orgs/ 就好
+    remove(id) {
+      const stamp = new Date(now()).toISOString().replace(/[:.]/g, '-');
+      const trash = path.join(dataDir, 'orgs-trash', `${id}-${stamp}`);
+      fs.mkdirSync(path.dirname(trash), { recursive: true });
+      fs.renameSync(orgDir(dataDir, id), trash);
+      built.delete(id);
+      state = { ...state, orgs: state.orgs.filter((o) => o.id !== id) };
+      writeOrgs(dataDir, state);
+      return { id, moved_to: trash };
+    },
+  };
 
-  function kick(category, id, runId) {
-    const key = `${category}/${id}/${runId}`;
-    if (inflight.has(key)) return;
-    inflight.add(key);
-    runner.runUntilPause(category, id, runId)
-      .then((run) => {
-        // run 跑完＝優化引擎的進場時機（US-007：run 結束後出提議）
-        if (run?.status === 'done') {
-          optimizer.analyze(category, id, logPair('optimize', `-${category}-${id}`))
-            .catch((e) => console.error('[bojian] 提議產生失敗（下次一起看）：', e.message));
-        }
-      })
-      .catch((e) => console.error('[bojian] run 推進失敗：', e.message))
-      .finally(() => inflight.delete(key));
-  }
-
-  const scheduler = createScheduler({ store, runner, kick, now });
-
-  // Google 快照抓取（US-034）：任何失敗都不覆寫既有快取，回人話原因（Error Map）
-  async function refreshSnapshot(month) {
-    let out;
-    const log = logPair('snapshot', `-${month}`);
-    try {
-      const prompt = snapshotPrompt(month);
-      log.onPrompt(prompt); // store.writeLog 自己吞例外：工作單寫不進不擋抓快照
-      // 輕裝連接器例外（監工輪）：這一次呼叫要看得到使用者掛的行事曆，不推 --strict-mcp-config
-      out = await adapter.complete({ prompt, meta: { kind: 'snapshot', mcp: 'calendar' } });
-      log.onReply(String(out ?? ''));
-    } catch (e) {
-      return { ok: false, reason: e.message };
-    }
-    const parsed = parseSnapshot(out);
-    if (!parsed) return { ok: false, reason: '快照回覆讀不懂——再試一次，或確認你的 Claude 掛了行事曆存取' };
-    if (parsed.error) return { ok: false, reason: parsed.error };
-    const fetched_at = new Date(now()).toISOString();
-    store.writeSnapshot({ fetched_at, status: 'ok', events: parsed.events });
-    return { ok: true, fetched_at, count: parsed.events.length };
-  }
-
-  // 待辦聚合（US-035）：等人狀態五種＋時間未定＋待核可提議＋Google 異動卡——server 一次算好，前端不做 N+1
-  function todoItems() {
-    const items = [];
-    const KINDMAP = {
-      waiting_review: ['hold', '停點：看過再往下'],
-      waiting_human: ['you', '你做的步驟——做完回來標完成'],
-      waiting_branch: ['hold', 'AI 判不出走哪條路，等你選'],
-      waiting_data: ['hold', '資料不全——重抓／續跑／擱置'],
-      time_pending: ['hold', '時間未定——等你定時刻'],
-      waiting_check: ['hold', '查核攔下——看原始資料 vs 成品再決定'],
-    };
-    for (const { category, id } of store.listWorkflows()) {
-      for (const rid of store.listRuns(category, id)) {
-        let r;
-        try { r = store.readRun(category, id, rid); } catch { continue; }
-        if (r.status === 'done') continue;
-        for (const [nodeId, step] of Object.entries(r.steps ?? {})) {
-          const km = KINDMAP[step.status];
-          if (!km) continue;
-          const node = r.def.nodes.find((n) => n.id === nodeId);
-          items.push({
-            kind: step.status, tone: km[0],
-            title: `${node?.title ?? nodeId}（${r.workflow.name}）`,
-            desc: step.status === 'time_pending' ? (step.time_note ?? km[1])
-              : step.status === 'waiting_data' ? (step.data_note ?? km[1])
-              : step.status === 'waiting_check' ? (step.check?.blocks?.[0]?.detail ?? km[1])
-              : km[1],
-            run: { category, id, run_id: rid, node: nodeId },
-          });
-        }
-      }
-    }
-    for (const p of store.readProposals().filter((x) => x.status === 'pending')) {
-      items.push({
-        kind: 'proposal', tone: 'prop',
-        title: `優化提議：${p.workflow.category}/${p.workflow.id}`,
-        desc: p.change?.summary ?? '有一條提議等你看',
-        proposal_id: p.id, workflow: p.workflow,
-      });
-    }
-    for (const s of linkedShifts(store)) {
-      items.push({ kind: 'google_shift', tone: 'prop', title: s.title, desc: s.desc, shift: { run: s.run, to: s.to } });
-    }
-    return items;
-  }
-
-  // 刪共用檔順帶清勾選（移植合併輪 U1a）：掃所有流程步驟的 attachments，拿掉指向這份檔的 {scope,name}；
-  // 公司檔＝全部流程都看，部門檔＝只看該分類；有變的流程升一版（履歷寫原因），回被清掉的步驟數。壞檔跳過不擋刪除。
-  function unlinkSharedAttachments(scope, name) {
-    const tag = scope === '_company' ? 'company' : 'category';
-    let steps = 0;
-    for (const w of store.listWorkflows()) {
-      if (tag === 'category' && w.category !== scope) continue;
-      let def;
-      try { def = store.readWorkflow(w.category, w.id); } catch { continue; }
-      let touched = 0;
-      for (const n of def.nodes ?? []) {
-        if (!Array.isArray(n.attachments)) continue;
-        const kept = n.attachments.filter((a) => !(a && typeof a === 'object' && a.scope === tag && a.name === name));
-        if (kept.length !== n.attachments.length) { n.attachments = kept; touched += 1; }
-      }
-      if (!touched) continue;
-      steps += touched;
-      store.bumpVersion(w.category, w.id, def, `共用檔「${name}」已刪除，${touched} 步的勾選一併取消`, 'manual'); // 精簡：不走 saveManualEdit 的十分鐘合併，讓履歷留下原因
-    }
-    return steps;
-  }
+  // 用量分流：整個程序只裝一支 sink（adapter 的 sink 是全域單一支，每個組織各裝一次會互相蓋掉），
+  // 依 meta 蓋的 org 章送進該組織的帳本；沒章的算目前組織。org 只是路由用的章，不進帳本
+  // （帳本在哪個組織夾底下，已經說明了它是誰的）。
+  adapter.setUsageSink?.((u) => {
+    const { org, ...row } = u ?? {};
+    const target = orgs.get(org ?? state.current) ?? orgs.get(state.current);
+    if (!target) return;
+    try { target.store.appendUsage(row); } catch (e) { console.error('[bojian] 用量記帳失敗：', e.message); }
+  });
 
   async function handleApi(req, res, segs) {
+    // adapter 也從組織拿：這一趟的呼叫都蓋上這個組織的章（外層的 adapter 被遮住是故意的）
+    const { store, memory, runner, optimizer, scheduler, kick, logPair, adapter,
+      composeContext, refreshSnapshot, todoItems, unlinkSharedAttachments } = orgs.current();
     const json = (status, obj) => {
       res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
       res.end(JSON.stringify(obj));
@@ -336,12 +500,34 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
       if (segs[1] === 'compose' && req.method === 'POST' && segs.length === 2) {
         const body = await readBody(req);
         const ctx = composeContext(body);
-        const out = await compose({ adapter, messages: body.messages ?? [], currentDraft: body.current_draft ?? null, context: ctx, ...logPair('compose') });
-        // 記憶輪（M2）記路④：拆好了才路由最後一句使用者話——已存流程在哪個分類就用在那個分類（ctx.category 是驗過存在的），
-        // 新草稿用在全部。路由失敗只多一句 memory_notice，拆好的草稿照回
-        const lastSaid = [...(body.messages ?? [])].reverse().find((m) => m?.role === 'user')?.text ?? '';
-        out.memory_notice = await memory.onChat({ text: lastSaid, category: ctx.category, def: body.current_draft ?? null });
-        return json(200, out);
+        const messages = body.messages ?? [];
+        const currentDraft = body.current_draft ?? null;
+        // 拆法輪（契約 A）：phase 缺省＝有草稿→draft（對話修改不出卡），沒有→shape（第一趟先出成品卡）。伺服器不存中間態：格子由前端帶回來
+        const phase = body.phase === 'shape' || body.phase === 'draft' ? body.phase : (currentDraft ? 'draft' : 'shape');
+        const legalCat = (c) => (typeof c === 'string' && (c === '未分類' || ctx.categories.includes(c)) ? c : null);
+        const draftRound = async (shape, sources, category) => {
+          const out = await compose({ adapter, messages, currentDraft, context: ctx, phase: 'draft', shape, sources, category, ...logPair('compose', '-draft') });
+          // 分類由前端下拉（或第一趟建議）決定，拆解器寫錯也不採（覆核該修）：無條件蓋——沒帶或不合法就退到 ctx.category（對話修改時
+          // current_draft 驗過存在的分類），再沒有就把鍵刪掉（validateWorkflow 對 category:null 會報「要是文字」，不能寫 null）
+          const cat = category ?? ctx.category ?? null;
+          if (cat) out.draft.category = cat; else delete out.draft.category;
+          // 記憶輪（M2）記路④：拆好了才路由最後一句使用者話——已存流程在哪個分類就用在那個分類（ctx.category 是驗過存在的），
+          // 新草稿用在全部。路由失敗只多一句 memory_notice，拆好的草稿照回。第一趟還沒拆好，不記
+          const lastSaid = [...messages].reverse().find((m) => m?.role === 'user')?.text ?? '';
+          out.memory_notice = await memory.onChat({ text: lastSaid, category: ctx.category, def: currentDraft });
+          return { ...out, phase: 'draft' };
+        };
+        if (phase === 'draft') return json(200, await draftRound(body.shape ?? null, body.sources ?? null, legalCat(body.category)));
+        const first = await compose({ adapter, messages, currentDraft, context: ctx, phase: 'shape', ...logPair('compose', '-shape') });
+        first.category = legalCat(first.category);
+        // 開關關掉且沒明帶 phase（明帶 'shape'＝前端「重擬」，永遠只跑一趟）→連跑第二趟，前端不出卡直接出草稿
+        let confirmShape = true; // 設定讀不到＝照預設先出卡（不擋建流程，同 composeContext 的規矩）
+        try { confirmShape = store.readSettings().compose?.confirm_shape !== false; } catch { /* 走預設 */ }
+        if (body.phase !== 'shape' && !confirmShape) {
+          const second = await draftRound(first.shape, first.sources, first.category);
+          return json(200, { ...second, shape: first.shape, sources: first.sources, auto: true });
+        }
+        return json(200, { ...first, phase: 'shape' });
       }
       // /api/preflight 開跑前健檢（資料通道輪）：任何定義（草稿／畫布工作本／已存）都能查——抽屜預覽與開跑擋門同一份規則
       if (segs[1] === 'preflight' && req.method === 'POST' && segs.length === 2) {
@@ -351,7 +537,8 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
         } catch (e) {
           return json(400, { error: e.message });
         }
-        return json(200, preflight(body.def, body.values ?? null)); // values＝這次的值（開跑前才給）
+        // values＝這次的值（開跑前才給）；輸入來源改不重複的寫法（排版輪 L14b，前端 pfInputs 展開）
+        return json(200, { ...preflight(body.def, body.values ?? null), inputs: packInputs(body.def) });
       }
       // /api/render 文字成品排版（產檔輪）：停點卡／成品區／儀表板預覽用，原生 HTML 一律跳脫
       if (segs[1] === 'render' && req.method === 'POST' && segs.length === 2) {
@@ -365,6 +552,11 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
           store.createCategory((await readBody(req)).name);
           return json(200, { ok: true });
         }
+      }
+      // PUT /api/categories/:name {name}：分類改名（拆法輪 B0）——八處同步、歷史留舊名；StoreError code 對 400／404／409
+      if (segs[1] === 'categories' && segs.length === 3 && req.method === 'PUT') {
+        const moved = store.renameCategory(decodeURIComponent(segs[2]), (await readBody(req)).name);
+        return json(200, { ok: true, moved });
       }
       // /api/proposals/:pid/accept|reject
       if (segs[1] === 'proposals' && req.method === 'POST' && segs.length === 4) {
@@ -504,7 +696,7 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
             }
             if (segs[4] === 'scope') {
               // 記憶頁直接設範圍（縮也可以；靠證據往外擴才走 widenScope）
-              if (!SCOPE_LEVELS.includes(b.level)) return json(400, { error: '用在哪只能是全部、分類、流程' });
+              if (!SCOPE_LEVELS.includes(b.level)) return json(400, { error: '用在哪只能是全部、分類、Workflow' });
               const scope = {
                 level: b.level,
                 category: b.level === 'all' ? null : (b.category ?? card.scope?.category ?? null),
@@ -653,9 +845,25 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
       // ===== 三層共用檔（移植合併輪 U1a）：/api/shared/:scope/files（scope＝_company｜現有分類名）=====
       // 規範類（rule）上傳時轉純文字存 text_cache、擋格式與字數（單檔 4,000／每層 8,000→413）；參考類（ref）任何副檔名、10MB 封頂（同流程參考檔）；
       // 同名 409（換版＝先刪再傳）；刪除不進垃圾桶，順帶把所有流程步驟裡指向它的勾選拿掉（進履歷，看得到為什麼勾選不見了）
-      if (segs[1] === 'shared' && segs[3] === 'files' && (segs.length === 4 || segs.length === 5)) {
+      if (segs[1] === 'shared' && segs[3] === 'files' && (segs.length === 4 || segs.length === 5 || (segs.length === 6 && segs[5] === 'view'))) {
         const scope = decodeURIComponent(segs[2]);
         if (scope !== '_company' && !store.listCategories().includes(scope)) return json(404, { error: '沒有這個分類' });
+        // 排版輪 L7（上桌題 3b）：GET …/files/:name/view 唯讀查看——md／txt 回原文、docx 等回成品預覽排版；
+        // 路徑防護：壞編碼 400、檔名過 safeFileName（路徑符號／保留字 400）、NFC 正規化後只准讀清單裡登記的檔（夾裡野檔、結尾點 404）
+        if (segs.length === 6) {
+          if (req.method !== 'GET') return json(405, { error: '查看只能讀' });
+          let raw;
+          try { raw = decodeURIComponent(segs[4]); } catch { return json(400, { error: '檔名編碼不對' }); }
+          const name = safeFileName(normName(raw));
+          const entry = store.readSharedIndex(scope).files.find((f) => normName(f.name) === name);
+          const p = entry && store.sharedFilePath(scope, entry.name);
+          if (!p) return json(404, { error: `共用檔「${name}」不存在` });
+          const kind = viewKind(entry.name);
+          if (!kind) return json(415, { error: '這種檔不能在頁內看，請按「下載」開原檔' });
+          const buf = fs.readFileSync(p);
+          if (kind === 'text') return json(200, { name: entry.name, kind: 'text', text: buf.toString('utf8') });
+          return json(200, { name: entry.name, ...(await previewArtifact(buf, entry.name)) });
+        }
         const view = () => json(200, { scope, ...store.listShared(scope), limits: { ...LIMITS } });
         if (req.method === 'GET' && segs.length === 4) return view();
         if (req.method === 'POST' && segs.length === 4) {
@@ -701,9 +909,32 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
           }
         }
       }
+      // ===== 多組織：清單／新增／切換／移出。既有路由一律不加 /o/:org 前綴——「目前組織」就是全部路由的預設對象 =====
+      if (segs[1] === 'orgs' && segs.length === 2) {
+        if (req.method === 'GET') return json(200, orgs.snapshot());
+        if (req.method === 'POST') {
+          const name = String((await readBody(req)).name ?? '').trim();
+          // 名字就是該組織的 company_name，用同一條規則驗（60 字內），免得建得出來卻改不動
+          const problems = validateSettings({ ...DEFAULT_SETTINGS, company_name: name });
+          if (problems.length) return json(400, { error: problems.join('；') });
+          return json(200, orgs.create(name)); // 建完不切換：使用者自己決定什麼時候過去
+        }
+      }
+      if (segs[1] === 'orgs' && segs[2] === 'current' && segs.length === 3 && req.method === 'PUT') {
+        const { id } = await readBody(req);
+        if (!orgs.has(id)) return json(404, { error: '找不到這個組織' });
+        return json(200, { ok: true, current: orgs.setCurrent(id) });
+      }
+      if (segs[1] === 'orgs' && segs.length === 3 && req.method === 'DELETE') {
+        const id = decodeURIComponent(segs[2]);
+        if (!orgs.has(id)) return json(404, { error: '找不到這個組織' });
+        if (orgs.list().length <= 1) return json(400, { error: '至少要留一個組織，這是最後一個' });
+        if (id === orgs.currentId()) return json(400, { error: '這是你正在用的組織，先切到別的組織再移出它' });
+        return json(200, { ok: true, ...orgs.remove(id) });
+      }
       // ===== 記憶輪：全域設定（設定頁六組的資料源）與備份 =====
       if (segs[1] === 'settings' && segs.length === 2) {
-        if (req.method === 'GET') return json(200, { ...store.readSettings(), data_dir: dataDir, version: PKG_VERSION });
+        if (req.method === 'GET') return json(200, { ...store.readSettings(), data_dir: store.dataDir, version: PKG_VERSION });
         if (req.method === 'PUT') {
           // 部分送也行：合到現況上再逐欄驗，一欄錯整份不落地。data_dir／version 是 GET 附帶的唯讀資訊，送回來也不收
           const { data_dir: _d, version: _v, ...b } = await readBody(req);
@@ -768,7 +999,7 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
         if (req.method === 'GET' && segs.length === 2) return json(200, store.readSchedules());
         if (req.method === 'POST' && segs.length === 2) {
           const b = await readBody(req);
-          if (!b.workflow_id || !String(b.workflow_id).includes('/')) return json(400, { error: '要指定掛哪一條流程' });
+          if (!b.workflow_id || !String(b.workflow_id).includes('/')) return json(400, { error: '要指定掛哪一條 Workflow' });
           const [wc, ...wr] = String(b.workflow_id).split('/');
           const def = store.readWorkflow(wc, wr.join('/')); // 不存在 → 404
           // 有填的欄位保留原值交給 validator（健檢 M1：錯誤型別要被打回 400，不准被靜默改成別的設定）
@@ -1001,13 +1232,16 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
           return json(200, { ok: true, key });
         }
         if (req.method === 'PUT') {
-          store.readWorkflow(category, id); // 不存在 → 404
+          const current = store.readWorkflow(category, id); // 不存在 → 404
           const body = await readBody(req);
           // 監工輪：存檔只補監工與查核兩個主開關，不碰 check.facts——沒有那個欄位的既有流程缺省是開，
           // 補一個 false 進去等於使用者沒動手就被關掉（save 模式的定義見 schema.applyDefaults）
           const saveDef = applyDefaults(body.def, { mode: 'save' });
           validateWorkflow(saveDef, { allowFloating: true });
-          const version = store.saveManualEdit(category, id, saveDef); // 畫布／欄位編輯也進履歷（US-010）
+          // 改名走 saveRename（拆法輪 B0：履歷固定句「改名：「舊」→「新」」）；其餘照舊進手動編輯（US-010）
+          const version = saveDef.name !== current.name
+            ? store.saveRename(category, id, saveDef, current.name)
+            : store.saveManualEdit(category, id, saveDef);
           return json(200, { ok: true, version });
         }
         if (req.method === 'GET') return json(200, store.readWorkflow(category, id));
@@ -1068,6 +1302,22 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
         }
       }
 
+      // 本次上傳（排版輪 L11，題 2 A）：開跑前先傳進暫存區拿 token，開跑時才搬進該趟 runs/<rid>/in/——不進 Workflow 參考檔。
+      // 護欄同參考檔：檔名不准路徑符號、副檔名白名單＝參考檔選檔框那張、10MB 封頂（超過 413）；每次上傳順手清 24 小時沒用掉的
+      if (segs[4] === 'run-uploads' && req.method === 'POST' && segs.length === 5) {
+        store.readWorkflow(category, id); // 沒有這條 Workflow＝404
+        store.sweepUploads(24 * 3600e3, now());
+        const b = await readBody(req);
+        const name = safeFileName(String(b.name ?? '').normalize('NFC'));
+        const ext = name.includes('.') ? name.split('.').pop().toLowerCase() : '';
+        if (!RUN_UPLOAD_EXTS.includes(ext)) return json(400, { error: `這裡只收 ${RUN_UPLOAD_EXTS.join('、')} 檔` });
+        const buf = Buffer.from(String(b.content_b64 ?? ''), 'base64');
+        if (!buf.length) return json(400, { error: '檔案是空的' });
+        if (buf.length > 10 * 1024 * 1024) return json(413, { error: '檔案太大（上限 10MB）' });
+        const up = store.writeUpload(name, buf, { category, id }); // 排版輪 L13 附帶：代碼綁定這條 Workflow
+        return json(200, up);
+      }
+
       if (segs[4] === 'runs') {
         // GET /runs 清單（接回進行中用）；?detail=1（移植合併輪 U4a）每筆補 finished_at／steps／finals／files、started_at 倒序——流程頁右側「每次執行」用。
         // 壞掉的 run.yaml：不帶 detail 跳過（三欄形狀不變、舊讀者不炸）；帶 detail 照列、標 status:'unreadable'＋人話 error、排最後
@@ -1093,16 +1343,34 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
         // POST /runs 開跑（開跑前健檢：宿主可用？流程檔讀得懂？——US-013／Error Map）
         if (segs.length === 5 && req.method === 'POST') {
           if (!(await adapter.checkAvailable())) {
-            return json(503, { error: '連不上 Claude——先把 Claude 開起來（或重新登入）再按開始。你的流程庫都在，不會不見。' });
+            return json(503, { error: '連不上 Claude——先把 Claude 開起來（或重新登入）再按開始。你的 Workflow 庫都在，不會不見。' });
           }
           const body = await readBody(req);
           // 資料通道輪：固定規則擋門——AI 步驟開跑時什麼都拿不到就不開跑（提醒類不擋），UI 端先查過，這裡是兜底
           const defForRun = store.readWorkflow(category, id);
           // 這次的值照 runner 的解法算（空白退預設）——健檢看值（排程與健檢輪）與實際開跑吃同一份
-          const overrides = body.overrides ?? {};
+          const overrides = { ...(body.overrides ?? {}) };
+          // 排版輪 L11：本次補充（≤2,000 字）與本次上傳 {欄位 key: token}——token 要真的在暫存區、欄位要是上傳欄位；
+          // 上傳欄位的值只認上傳檔名（文字覆寫不能冒充），沒傳＝空（必填的由健檢擋）
+          const note = body.note ?? '';
+          if (typeof note !== 'string' || note.length > 2000) return json(400, { error: '本次補充要是文字、2,000 字以內' });
+          const uploads = body.uploads ?? {};
+          if (typeof uploads !== 'object' || Array.isArray(uploads)) return json(400, { error: '上傳資料格式不對' });
+          const fileKeys = new Set((defForRun.params ?? []).filter((p) => p.input === 'file').map((p) => p.key));
+          for (const k of fileKeys) delete overrides[k];
+          const claimed = {};
+          const attachNames = []; // 本次附件（大跑輪）：不綁欄位，不進 overrides／run.params，改交給 runner 當趟級附件
+          for (const [k, token] of Object.entries(uploads)) {
+            if (k !== RUN_ATTACH_KEY && !fileKeys.has(k)) return json(400, { error: `「${k}」不是上傳欄位` });
+            const up = store.readUpload(token, { category, id }); // 別條 Workflow 發的代碼拿不到（移部門／改名時記號已跟著改，L13b）
+            if (!up) return json(400, { error: store.uploadProblem(token, { category, id }) });
+            if (k === RUN_ATTACH_KEY) attachNames.push(up.name);
+            else overrides[k] = up.name;
+            claimed[k] = token;
+          }
           const values = Object.fromEntries((defForRun.params ?? []).map((p) => {
             const v = overrides[p.key];
-            return [p.key, v === undefined || v === null || String(v).trim() === '' ? p.default : v];
+            return [p.key, v === undefined || v === null || String(v).trim() === '' ? (fileKeys.has(p.key) ? '' : p.default) : v];
           }));
           const pf = preflight(defForRun, values);
           const blocks = pf.issues.filter((i) => i.level === 'block');
@@ -1110,9 +1378,12 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
             return json(409, { error: `開跑前健檢：有 ${blocks.length} 處要先修，修好再按開始`, issues: [...blocks, ...pf.issues.filter((i) => i.level !== 'block')] });
           }
           // 記憶輪（M2）：開跑表單點的習慣卡、點了又改掉的、帶的身分，原樣進 run.memory（M3b 才有介面送這三欄）
-          const run = runner.startRun(category, id, body.overrides ?? {}, {
+          const run = runner.startRun(category, id, overrides, {
             memoryPicks: body.memory_picks ?? {}, memoryChanged: body.memory_changed ?? [], memoryIdentity: body.memory_identity ?? null,
+            ...(note.trim() ? { note } : {}),
+            ...(attachNames.length ? { runFiles: attachNames } : {}), // 本次附件（大跑輪）
           }); // 讀檔＋驗定義，壞檔在這裡被擋
+          for (const token of Object.values(claimed)) store.claimUpload(token, category, id, run.run_id); // 檔跟著這一趟存，暫存即刪
           kick(category, id, run.run_id);
           return json(200, run);
         }
@@ -1218,6 +1489,11 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
         return json(status, { error: e.message });
       }
       if (e instanceof ComposeError || e instanceof PorterError) return json(400, { error: e.message });
+      // 排版輪 L13 附帶：系統層讀寫例外（帶 syscall／path）的原文含伺服器絕對路徑——記 log，回人話
+      if (e && (e.syscall || e.path)) {
+        console.error('[bojian] 讀寫檔案出錯：', e.message);
+        return json(500, { error: '伺服器讀寫檔案時出了問題，再試一次；一直這樣請重開剝繭' });
+      }
       return json(400, { error: e.message });
     }
   }
@@ -1235,22 +1511,34 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
   }
 
   const server = http.createServer((req, res) => {
+    if (!fromOwnUi(req)) {
+      res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
+      return res.end('這個要求不是從剝繭自己的畫面來的，已經擋下來了。');
+    }
     const { pathname } = new URL(req.url, 'http://localhost');
     const segs = pathname.split('/').filter(Boolean);
     if (segs[0] === 'api') return handleApi(req, res, segs);
     return handleStatic(req, res, pathname);
   });
 
+  let timer = null;
   return {
+    // 排程器 tick（ADR-005：server 內建、每分鐘、冪等）。多組織＝一個時鐘、逐組織敲一遍：
+    // 排程不跟著「目前組織」走，B 的排程在你看 A 的時候照樣到點開跑。一個組織炸了不影響下一個。
     start(port, { tickMs = 60_000 } = {}) {
-      seedExamples(store, examplesDir);
-      try { store.purgeTrash(30); } catch (e) { console.error('[bojian] 垃圾桶清理失敗：', e.message); }
-      try { store.purgeMemoryTrash(30); } catch (e) { console.error('[bojian] 記憶垃圾桶清理失敗：', e.message); }
-      scheduler.start(tickMs); // 排程器 tick（ADR-005：server 內建、每分鐘、冪等）
+      const tickAll = () => {
+        for (const o of orgs.all()) {
+          try { o.scheduler.tickOnce(); } catch { /* 這個組織這一分鐘跳過，下一分鐘再來 */ }
+        }
+      };
+      timer = setInterval(tickAll, tickMs);
+      timer.unref?.();
+      tickAll();
       return new Promise((resolve) => server.listen(port, '127.0.0.1', resolve));
     },
     stop() {
-      scheduler.stop();
+      if (timer) clearInterval(timer);
+      timer = null;
       return new Promise((resolve) => server.close(resolve));
     },
     port() {

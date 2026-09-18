@@ -144,6 +144,42 @@ test('算式驗算：兩邊其實都在講百分數時退一步用原始值再�
   assert.equal(verifyArithmetic('6/14=99%'), false);
 });
 
+// 裁定 31（a）：裁定 29 的退路沒有門檻，就等於「剝掉百分號、拿兩側原始值比整數位」——
+// 6/14=0%（0.43 對 0）、6+3+4+1=14%（14 對 14）一比就成立，假放行比假攔更難被發現。
+// 門檻＝非字面的那一側真的乘過 100（6/14*100=42.9%），退路才開。
+test('算式驗算：沒乘過 100 就不准退到原始值比', () => {
+  assert.equal(verifyArithmetic('6/14=0%'), false, '6/14 是 42.9%，不是 0%');
+  assert.equal(verifyArithmetic('6+3+4+1=14%'), false, '左邊是 14、右邊是 0.14，不是同一個單位');
+  assert.equal(verifyArithmetic('14%=6+3+4+1'), false, '寫在左邊也一樣');
+  assert.equal(verifyArithmetic('100/3=33%'), false, '33.3 不是 0.33');
+  assert.equal(verifyArithmetic('6/14=1%'), false);
+
+  // 沒有新假攔：本來就該成立的照樣成立
+  assert.equal(verifyArithmetic('6/14*100=42.9%'), true, '乘過 100＝退路照開');
+  assert.equal(verifyArithmetic('100*6/14=42.9%'), true, '100 寫在乘號前面也算乘過');
+  assert.equal(verifyArithmetic('42.9%=6/14*100'), true, '百分比寫在左邊也一樣');
+  assert.equal(verifyArithmetic('(6/14)*100=42.9%'), true, '括號包住比例再乘 100');
+  assert.equal(verifyArithmetic('6/14=42.9%'), true, '嚴格比就過得了的，本來就不靠退路');
+  assert.equal(verifyArithmetic('6/14=43%'), true);
+  assert.equal(verifyArithmetic('14/14=100%'), true);
+  assert.equal(verifyArithmetic('7/100=7%'), true);
+  assert.equal(verifyArithmetic('50%=0.5'), true);
+  assert.equal(verifyArithmetic('42.9%=6/14'), true);
+});
+
+// 裁定 31（b）：decimalsOf 直接對原字串找小數點，(42.0)% 的小數點後面跟著「0)」不是純數字，
+// 位數退化成 0＝整數比，寫錯的小數位被放行。先剝掉括號再判位數。
+test('算式驗算：括號包住的小數照小數位比，不退化成整數比', () => {
+  assert.equal(verifyArithmetic('6/14=(42.0)%'), false, '寫到一位就比到一位：42.857 不是 42.0');
+  assert.equal(verifyArithmetic('(42.0)%=6/14'), false, '寫在左邊也一樣');
+  assert.equal(verifyArithmetic('100/3=(33.0)'), false, '33.333 不是 33.0');
+
+  assert.equal(verifyArithmetic('6/14=(42.9)%'), true, '四捨五入到一位');
+  assert.equal(verifyArithmetic('6/14=(42.8)%'), true, '截斷到一位');
+  assert.equal(verifyArithmetic('100/3=(33.3)'), true);
+  assert.equal(verifyArithmetic('(43)%=6/14'), true, '沒有小數點的括號寫法不受影響');
+});
+
 test('算式驗算：帶單位、貨幣符號、標籤、句號的算式照樣算得出來', () => {
   assert.equal(verifyArithmetic('6+3+2+1=14 件'), false, '單位前有空白');
   assert.equal(verifyArithmetic('6+3+2+1=14件'), false, '單位直接黏著');
@@ -153,7 +189,7 @@ test('算式驗算：帶單位、貨幣符號、標籤、句號的算式照樣�
   assert.equal(verifyArithmetic('NT$1,200+NT$300=NT$1,500'), true, '對的也要算得出來');
   assert.equal(verifyArithmetic('6+3+4+1=14 件'), true);
   assert.equal(verifyArithmetic('約 20%'), null, '百分比不是算式');
-  assert.equal(verifyArithmetic('6+3+4+1=14%'), true, '裁定 29 的機械後果：剝掉百分號的原始值兩邊都是 14 → 放行（巧合放行比假攔便宜）');
+  assert.equal(verifyArithmetic('6+3+4+1=14%'), false, '裁定 31 補了門檻：左邊沒乘過 100 就不退到原始值比，14 對 0.14 照樣不成立');
   assert.equal(verifyArithmetic('大約一半'), null);
   assert.equal(verifyArithmetic('一半的28=14'), null, '數字前面掛中文＝看不懂，不猜');
 });
@@ -870,4 +906,14 @@ test('U1b 覆核該修：查核 prompt 裡規範內文行首 # 降一級（#####
   assert.ok(p.includes('## 公司規範：員工手冊.md\n## 員工手冊\n語氣要親切。\n### 請假\n前一天說。\n###### 六級'), p);
   const h1 = p.split('\n').filter((l) => /^# /.test(l));
   assert.deepEqual(h1, ['# 這一步：寫八月月報', '# 必守（逐條對）', '# 公司／部門規範（一定要守）', '# 格式要求', '# 判定規則', '# 輸出格式', '# 原始資料', '# 成品']);
+});
+
+// ---- 拆法輪 B2 ⑤（契約 D）：能耐表只給拆解器，查核員不帶 ----
+
+test('B2 ⑤：查核 prompt 0 命中「你能派工人做什麼」與「# 關於你」（能耐表與關於你只給拆解器）', () => {
+  const p = buildCheckPrompt({ title: '寫八月月報', requirements: { ...REQ, companyRules: [{ name: '手冊.md', text: '親切。' }] }, sources: '原始', product: '成品' });
+  assert.equal((p.match(/你能派工人做什麼/g) ?? []).length, 0, p);
+  assert.equal((p.match(/# 關於你/g) ?? []).length, 0, p);
+  const rules = buildEditRulesPrompt({ title: '寫八月月報', original: '舊', edited: '新', note: '口氣改' });
+  assert.equal((String(rules).match(/你能派工人做什麼/g) ?? []).length, 0);
 });

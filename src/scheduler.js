@@ -3,6 +3,7 @@
 // 時鐘一律用注入的 now()；tick 冪等，每分鐘重跑安全。
 import { parseWhen } from './runner.js';
 import { pushNotice, hasFingerprint } from './notices.js';
+import { preflight } from './preflight.js';
 
 const GRACE_MS = 90_000; // 到點 90 秒內算「準時」，更早＝錯過
 export const LEAD_MS = {
@@ -52,7 +53,12 @@ function dueOnDay(sched, dayMs) {
     const dow = d.getDay() === 0 ? 7 : d.getDay(); // 1=週一…7=週日
     return dow === (sched.weekday ?? 1) ? d.getTime() : null;
   }
-  if (sched.freq === 'monthly') return d.getDate() === (sched.day ?? 1) ? d.getTime() : null;
+  if (sched.freq === 'monthly') {
+    // 29–31 號在短月份不存在。夾到當月最後一天——不夾的話二月整個月靜默不跑，
+    // 連「錯過」通知都不會發（沒有 occurrence 就沒有東西可錯過），使用者要到缺月報才發現（2026-09-18 審查）
+    const last = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+    return d.getDate() === Math.min(sched.day ?? 1, last) ? d.getTime() : null;
+  }
   return null;
 }
 
@@ -131,7 +137,21 @@ export function createScheduler({ store, runner, kick = () => {}, now = () => Da
   // 觸發一次（到點／補跑／通知上的「照跑」）。失敗丟人話錯誤，由呼叫端決定通知或回 HTTP
   function fire(sched, { makeup = false } = {}) {
     const { category, id } = wfOf(sched);
-    const run = runner.startRun(category, id, sched.overrides_params ?? {}, { source: 'schedule', makeup });
+    // 開跑前健檢對排程也要生效（2026-09-18 審查）：手動按開始會被 409 擋下的流程，掛上排程後照樣到點就跑，
+    // 必填上傳是空的、產檔權限沒開就靜默降級——使用者隔天拿到一份沒資料、格式也不對的成品，而且標著「完成」。
+    // 上傳欄位排程填不了，一律當空值送進健檢，讓 R6 擋下來，不准退回 default 文字混過去。
+    const def = store.readWorkflow(category, id);
+    const given = sched.overrides_params ?? {};
+    const values = Object.fromEntries((def.params ?? []).map((p) => {
+      const v = given[p.key];
+      const empty = v === undefined || v === null || String(v).trim() === '';
+      return [p.key, empty ? (p.input === 'file' ? '' : p.default) : v];
+    }));
+    const blocks = preflight(def, values).issues.filter((i) => i.level === 'block');
+    if (blocks.length) {
+      throw new Error(`開跑前健檢有 ${blocks.length} 處要先修：${blocks.map((b) => b.title).filter(Boolean).join('；')}`);
+    }
+    const run = runner.startRun(category, id, given, { source: 'schedule', makeup });
     // 在 run 上補記排程身分（startRun 剛寫完，讀最新再補——單寫者紀律）
     const r = store.readRun(category, id, run.run_id);
     r.schedule_id = sched.id;
@@ -223,7 +243,11 @@ export function createScheduler({ store, runner, kick = () => {}, now = () => Da
     const timed = []; // {ms, label, blockedBy, fpBase}
     for (const { category, id } of store.listWorkflows()) {
       for (const rid of store.listRuns(category, id)) {
-        const r = store.readRun(category, id, rid);
+        // 壞掉的 run.yaml 只跳過這一筆。不包起來的話例外會逃出整個 tickOnce、被 start() 的空 catch
+        // 無聲吞掉，於是每分鐘都死在同一個檔案上：等時刻步驟再也不會醒、失敗通知與提醒全部停擺，
+        // 而畫面上一點異常都看不到（2026-09-18 審查；姊妹掃描器 todoItems／scanRunSteps 本來就有這道）
+        let r;
+        try { r = store.readRun(category, id, rid); } catch { continue; }
         if (r.status === 'done') continue;
         for (const [nodeId, step] of Object.entries(r.steps ?? {})) {
           // 無人值守失敗（US-040）：自動 run 的步驟重試用盡仍失敗 → 通知（人話原因＋重試），不默默終止

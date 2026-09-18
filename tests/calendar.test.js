@@ -18,13 +18,14 @@ function fakeAdapter() {
 }
 
 async function startApp(nowIso = '2026-08-24T10:00') {
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bojian-cal-'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bojian-cal-'));
   const adapter = fakeAdapter();
   const clock = { t: new Date(nowIso).getTime() };
-  const app = createApp({ dataDir, adapter, now: () => clock.t });
+  const app = createApp({ dataDir: root, adapter, now: () => clock.t });
   await app.start(0, { tickMs: 3600_000 });
   const base = `http://127.0.0.1:${app.port()}`;
-  return { app, base, adapter, dataDir, clock, store: createStore(dataDir) };
+  const dataDir = path.join(root, 'orgs', 'main'); // 多組織：測試看的是預設組織夾
+  return { app, base, adapter, dataDir, root, clock, store: createStore(dataDir) };
 }
 
 async function api(base, method, p, body) {
