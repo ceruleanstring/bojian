@@ -135,7 +135,22 @@ const state = {
 const seenNotices = new Set(); // 桌面通知去重（本次開頁期間）
 
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+// 說明文案輪（09-19 裁示方案 C）：說明收進問號——說明文字不印在畫面上，收進標題旁這顆鈕，
+// 滑過就出現、點一下釘住。空字串回空字串，所以「這裡本來就沒說明」跟「說明還沒寫」長得一樣（都不出現）。
+// r=true 讓氣泡靠右對齊，給貼在右邊緣的那幾顆用。
+const hint = (t, r = false) => (t ? `<button type="button" class="hint${r ? ' r' : ''}" aria-expanded="false" aria-label="說明" data-hint="${esc(t)}">?</button>` : '');
 const wfPath = (w) => `/api/workflows/${encodeURIComponent(w.category)}/${encodeURIComponent(w.id)}`;
+// 輪詢重繪前的守衛（列管 L029／L020）：原本四處各抄一次、而且只認 INPUT／TEXTAREA——
+// 下拉展開中被重繪會把選單關掉，可編輯區塊打到一半也會被洗掉。改成一顆共用的。
+const isTyping = () => {
+  const el = document.activeElement;
+  if (!el) return false;
+  if (el.isContentEditable) return true;
+  if (el.tagName === 'SELECT') return true;          // 展開中沒有「有沒有值」可判，聚焦就算
+  return ['INPUT', 'TEXTAREA'].includes(el.tagName) && !!el.value;
+};
+// 輪詢失敗不該整段靜音（列管 L034）：不打擾使用者，但 F12 看得到是哪一路在掉。
+const pollFailed = (where, e) => console.error(`[剝繭] ${where} 這一輪沒拿到，下一輪再試`, e);
 // 成品檔位址：不帶 sub＝下載；'/preview'＝頁內預覽形態；'/inline'＝內嵌回檔（pdf iframe）
 const runFileUrl = (cat, id, rid, name, sub = '') => `/api/workflows/${encodeURIComponent(cat)}/${encodeURIComponent(id)}/runs/${encodeURIComponent(rid)}/files/${encodeURIComponent(name)}${sub}`;
 
@@ -559,8 +574,10 @@ function identityRowHtml() {
       ${list.map((i) => `<option value="${esc(i.id)}" ${state.memIdentity === i.id ? 'selected' : ''}>${esc(i.name)}</option>`).join('')}
     </select></div>`;
 }
-const habitsNoteHtml = () => (Object.keys(state.wfMemory?.options ?? {}).length
-  ? '<p class="note habitsnote"><i class="ph ph-info"></i> 習慣選項只是選項：沒點就不套用；點了就是核可，不另外問。虛線的來自別條 Workflow，點了範圍才擴大。</p>' : '');
+// 說明文案輪：原本整段印在開跑表單裡，改成併進「填寫這次的值」的標題說明（同一個區塊不講兩次）
+const habitsNoteText = () => (Object.keys(state.wfMemory?.options ?? {}).length
+  ? '習慣選項只是選項：沒點就不套用；點了就是核可，不另外問。虛線的來自別條 Workflow，點了範圍才擴大。' : '');
+const habitsNoteHtml = () => '';
 // 欄位被改字（表單框或句內膠囊）：點過的卡若跟現在的值不同＝取消核可、記進 memChanged（後端只記數）；chip 就地取消選中，不重繪
 function memParamEdited(key, val) {
   const id = state.memPicks[key];
@@ -733,14 +750,14 @@ function memCardModalHtml() {
   else if (!c) body = '<div class="note" style="margin:0">讀取中⋯</div>';
   else if (mm.bucket === 'group') {
     title = '分類守則';
-    body = `<h3>${esc(c.text)}</h3><div class="sub" style="margin:0">分類「${esc(catLabel(c.category))}」的規矩・每一步都帶，交貨查核也會對</div>
+    body = `<h3>${esc(c.text)}${hint(`分類「${catLabel(c.category)}」的規矩：每一步都帶，交貨查核也會對。要改或刪，去側欄點分類名，改那段文字就好。`)}</h3>
       <div class="face">
         <div class="k">來自</div><div class="v">分類・${esc(catLabel(c.category))}</div>
         <div class="k">用法</div><div class="v">${c.field ? `有名字的欄位「${esc(c.field)}」＝「${esc(c.value ?? '')}」：這條 Workflow 或這一次另有值時，以外圈為準` : '自由規矩：不管外圈怎麼寫都疊加'}</div>
         <div class="k">範圍</div><div class="v">${esc(catLabel(c.category))}這個分類的每一條 Workflow</div>
         <div class="k">來源</div><div class="v">你在分類頁「分類守則」文字框打的</div>
       </div>
-      <p class="note" style="margin:0">要改或刪，去側欄點分類名，改那段文字就好。</p>`;
+`;
   } else {
     const isP = c.bucket === 'profile';
     title = isP ? '認識卡' : '習慣卡';
@@ -1158,9 +1175,8 @@ function checkRowHtml() {
 function flowSettingsModalHtml() {
   if (!state.flowSettingsOpen || !state.wf || subjectIsDraft()) return '';
   return `<div class="pvback memmodal flowsettings" data-act="flow-settings-close"><div class="modal" role="dialog" aria-label="Workflow 設定">
-    <div class="cvdhead" style="margin-bottom:var(--s2)"><span class="overline">Workflow 設定・${esc(state.wf.def.name)}</span>
+    <div class="cvdhead" style="margin-bottom:var(--s2)"><span class="overline">Workflow 設定・${esc(state.wf.def.name)}${hint('只管這條 Workflow；點了就存。新 Workflow 的預設在「設定」。')}</span>
       <button class="btn btn-ghost iconb" data-act="flow-settings-close" style="margin-left:auto" title="關閉（Esc）"><i class="ph ph-x"></i></button></div>
-    <p class="note" style="margin:0 0 var(--s3)">只管這條 Workflow；點了就存。新 Workflow 的預設在「設定」。</p>
     ${permRowHtml()}${checkRowHtml()}
   </div></div>`;
 }
@@ -1190,7 +1206,7 @@ function bringInHtml() {
   const sh = state.shared ?? {};
   const n = (layer) => (sh[layer] ? `${sh[layer].rules?.length ?? 0} 份` : sh.err ? '讀不到' : '讀取中⋯');
   return `<div class="bringrow">組織規範 ${n('company')}</div><div class="bringrow">分類規範 ${n('dept')}</div><div class="bringrow">Workflow 參考檔 ${(state.wfFiles ?? []).length} 份</div>
-    <p class="note">開始時會鎖定這次的值與 Workflow 版本，跑到一半改設計不影響這一趟。</p>`;
+`;
 }
 function dataCardsHtml(def, open) {
   const card = (id, cls, mark, title, status, btn) => `<article class="prep-card ${cls}" data-prep="${id}"><span class="mark">${mark}</span>
@@ -1211,19 +1227,18 @@ function dataCardsHtml(def, open) {
 }
 // 展開區：一次只開一張（state.dataCard，沒動過＝填值那張）
 function dataDetailHtml(def, open) {
-  const box = (title, sub, body, chip = '') => `<section class="focus-editor" data-focus="${open}"><header><div><h3>${title}</h3><p class="note">${sub}</p></div>${chip}</header>${body}</section>`;
+  const box = (title, sub, body, chip = '') => `<section class="focus-editor" data-focus="${open}"><header><div><h3>${title}${hint(sub)}</h3></div>${chip}</header>${body}</section>`;  // 說明文案輪：四個分頁的說明收進標題旁
   if (open === 'resume') return box('繼續上次執行', '接回去就從停的地方繼續；這一趟不用跑完的整筆刪掉。', resumeHtml() || '<p class="note">目前沒有跑到一半的執行。</p>');
   if (open === 'data') {
     const { total, done } = requiredNow(def);
-    return box('填寫這次的值', '只調整這一趟要使用的值；欄位本身要改，回「設計 Workflow」。',
+    return box('填寫這次的值', `只調整這一趟要使用的值；欄位本身要改，回「設計 Workflow」。${habitsNoteText() ? `\n\n${habitsNoteText()}` : ''}`,
       `${identityRowHtml()}${paramRowsHtml(def) || '<p class="note">這份 Workflow 沒有可調欄位。</p>'}
     ${habitsNoteHtml()}
-    <label class="label" for="run-note">本次補充</label><textarea id="run-note" class="runnote" data-keep maxlength="2000" placeholder="例如：這次特別留意新品類的表現（選填）">${esc(state.runNote ?? '')}</textarea>
-    <p class="note">這一趟每個 AI 步驟都看得到這段話。</p>
+    <label class="label" for="run-note">本次補充${hint('這一趟每個 AI 步驟都看得到這段話。')}</label><textarea id="run-note" class="runnote" data-keep maxlength="2000" placeholder="例如：這次特別留意新品類的表現（選填）">${esc(state.runNote ?? '')}</textarea>
     ${runAttachBoxHtml()}`,
       total ? `<span class="chip${done < total ? ' wait' : ''}">${done} / ${total} 必填</span>` : '');
   }
-  if (open === 'auto') return box('查看這次會帶入', '系統加入的背景資料，不含你填的欄位。', bringInHtml());
+  if (open === 'auto') return box('查看這次會帶入', '系統加入的背景資料，不含你填的欄位。開始時會鎖定這次的值與 Workflow 版本，跑到一半改設計不影響這一趟。', bringInHtml());
   // 驗收第 3 條：三個開關在這裡仍然可改、即點即存（原型畫成唯讀，照抄就是把能力做丟）
   if (open === 'execution') return box('確認執行選項', '這些設定屬於整條 Workflow，不是本次覆寫；點了就存。', `${permRowHtml()}${checkRowHtml()}`);
   return '';
@@ -1474,9 +1489,8 @@ function sharedModalHtml() {
     return `<section class="sharedlayer" data-shared-layer="${key}"><h4><span>${esc(label)}</span>${manage}</h4>${body}</section>`;
   };
   return `<div class="pvback memmodal sharedmodal" data-act="shared-close"><div class="modal" role="dialog" aria-label="上層共用檔">
-    <div class="cvdhead" style="margin-bottom:var(--s2)"><span class="overline">上層共用檔・${esc(wf.def.name)}</span>
+    <div class="cvdhead" style="margin-bottom:var(--s2)"><span class="overline">上層共用檔・${esc(wf.def.name)}${hint('規範每一步都帶；參考在步驟裡勾了才帶。要上傳或刪除，去組織頁／分類頁。')}</span>
       <button class="btn btn-ghost iconb" data-act="shared-close" style="margin-left:auto" title="關閉（Esc）"><i class="ph ph-x"></i></button></div>
-    <p class="note" style="margin:0 0 var(--s3)">規範每一步都帶；參考在步驟裡勾了才帶。要上傳或刪除，去組織頁／分類頁。</p>
     ${layer('company', companyName(), sh.company, `<span class="btn sm2 btn-ghost" data-act="open-company"><i class="ph ph-arrow-up-right"></i>去組織頁管理</span>`)}
     ${layer('dept', catLabel(wf.category), sh.dept, `<span class="btn sm2 btn-ghost" data-act="open-category" data-cat="${esc(wf.category)}"><i class="ph ph-arrow-up-right"></i>去分類頁管理</span>`)}
   </div></div>`;
@@ -1521,7 +1535,7 @@ function chatModeHtml() {
 function chatAsideHtml() {
   const rows = shapeRefsItems(state.chat.refs).map((t) => `<div class="refrow">${esc(t)}</div>`).join('');
   return `<aside class="right chatside"><div class="panel"><h3>這次拆解會參考</h3>${rows}</div>
-    <div class="panel"><h3>你保有最後決定</h3><p class="note">先填好的答案都有依據。改掉不符合的地方，再按「照這樣拆」。</p></div></aside>`;
+    <div class="panel"><h3>你保有最後決定${hint('先填好的答案都有依據。改掉不符合的地方，再按「照這樣拆」。')}</h3></div></aside>`;
 }
 
 // 成品長相卡（拆法輪 P4，契約 I；樣稿 uxProductCard）：拆解器第一趟回的七格＋資料從哪來＋部門＋兩鈕。
@@ -1767,8 +1781,7 @@ function listModeHtml() {
     ${proposalsHtml()}
     ${stepListHtml(def)}
     ${flowMemLineHtml()}
-    <details class="panel fieldsfold" data-fields${open ? ' open' : ''}><summary data-act="folder-toggle" data-k="fields"><i class="ph ph-caret-down"></i>執行需要的資料<span class="meta">・${def.params.length} 欄</span></summary>
-      <p class="note">欄位屬於這條 Workflow；這一次要填的值在「本次資料」。</p>${fieldRows}${addParam}
+    <details class="panel fieldsfold" data-fields${open ? ' open' : ''}><summary data-act="folder-toggle" data-k="fields"><i class="ph ph-caret-down"></i>執行需要的資料<span class="meta">・${def.params.length} 欄</span>${hint('欄位屬於這條 Workflow；這一次要填的值在「本次資料」。')}</summary>${fieldRows}${addParam}
       ${state.wf?.dictSimilar?.length ? `<p class="note"><i class="ph ph-info"></i> 這幾個欄位名跟詞典裡的很像：${esc(state.wf.dictSimilar.join('、'))}——已經照存，沒擋你。</p>` : ''}</details></div>`;
 }
 
@@ -1842,22 +1855,22 @@ function refFilesInner(n, checkedOverride) {
 function templateInner(n, keepVal) {
   const files = state.wfFiles ?? [];
   const sel = keepVal !== undefined ? keepVal : (n.template_file ?? '');
-  return `<div class="flabel">範本填空（選填）</div>
+  return `<div class="flabel">範本填空（選填）${hint('範本裡的 {{output}} 會被這步產出取代，{{參數}} 照常代入。')}</div>
     <select id="cv-template" class="moveselect wfull">
       <option value="">不用範本</option>
       ${files.map((f) => `<option value="${esc(f)}" ${sel === f ? 'selected' : ''}>${esc(f)}</option>`).join('')}
     </select>
-    <p class="note" style="margin:4px 0 0">範本裡的 {{output}} 會被這步產出取代，{{參數}} 照常代入。</p>`;
+`;
 }
 function refFilesSectionHtml(n) {
   if (subjectIsDraft()) {
-    return `<div class="flabel">參考檔</div><p class="note" style="margin:0">存進 Workflow 庫後才能掛參考檔。</p>`;
+    return `<div class="flabel">參考檔${hint('存進 Workflow 庫後才能掛參考檔。')}</div>`;
   }
   return `<div id="ref-section">${refFilesInner(n)}</div>`;
 }
 function templateSectionHtml(n) {
   if (subjectIsDraft()) {
-    return `<div class="flabel">範本填空</div><p class="note" style="margin:0">存進 Workflow 庫後才能用範本填空。</p>`;
+    return `<div class="flabel">範本填空${hint('存進 Workflow 庫後才能用範本填空。')}</div>`;
   }
   return `<div id="tpl-section">${templateInner(n)}</div>`;
 }
@@ -1886,9 +1899,8 @@ const SUP_CHK =[['cv-sup-note', 'note', '寫交接備註'], ['cv-sup-tier', 'tie
 function supChecksHtml(n) {
   const f = supFlags(n);
   const boxes = SUP_CHK.map(([id, key, label]) => `<label class="chk"><input type="checkbox" id="${id}" ${f[key] ? 'checked' : ''}>${label}</label>`).join('');
-  return `<div class="flabel">監工可以：</div>
-    <div class="chkrow">${boxes}</div>
-    <p class="note" style="margin:4px 0 0">勾了才會動；備註永遠只是加上去，不改你的指示</p>`;
+  return `<div class="flabel">監工可以：${hint('勾了才會動；備註永遠只是加上去，不改你的指示。')}</div>
+    <div class="chkrow">${boxes}</div>`;
 }
 
 function canvasEditorHtml(n, def) {
@@ -2775,6 +2787,17 @@ async function resumeTimeCall(node, at) {
 // 時間未定（time_pending）：wait_until 指的那一步沒交出看得懂的時刻，等你定。
 // 出口是後端的 resume-time：給時刻＝排到那時候自動往下；不給＝現在就往下走。
 // 沒有這張卡的話，run 會永久卡住，而且一直被算成「上一輪還沒跑完」在每次到點發重疊警示。
+// 列管 L011：時間定好之後狀態轉 waiting_time，但中欄本來什麼都不印——
+// 使用者剛按完「就排這個時間」，畫面一空，不知道到底排到了沒、排到幾點。
+function waitingTimeCardHtml(node, step) {
+  const at = step.wake_at ? new Date(step.wake_at) : null;
+  const when = at && !Number.isNaN(at.getTime())
+    ? at.toLocaleString('zh-TW', { hour12: false, month: 'numeric', day: 'numeric', weekday: 'short', hour: '2-digit', minute: '2-digit' })
+    : '';
+  return `<div class="alert"><b><i class="ph-fill ph-clock"></i> ${when ? `已排到 ${esc(when)}` : '已排好時間'}，到點自動往下跑</b>
+    <p class="note">這中間你不用守著。剝繭沒開著的話，下次開起來會接著處理。</p></div>`;
+}
+
 function timeCardHtml(node, step) {
   const raw = String(step.time_note ?? '').trim();
   const note = !raw || /[。.!?！？]$/.test(raw) ? raw : `${raw}。`; // 結尾沒標點就補一個，免得跟下一句黏成一長串
@@ -2812,6 +2835,7 @@ function stepCardHtml(node, step) {
     case 'waiting_human': return humanCardHtml(node);
     case 'waiting_data': return dataCardHtml(node, step);
     case 'time_pending': return timeCardHtml(node, step);
+    case 'waiting_time': return waitingTimeCardHtml(node, step);
     case 'failed': return failCardHtml(node, step);
     default: return '';
   }
@@ -2862,7 +2886,10 @@ function progressRailHtml(run) {
     const n = step.status === 'done' ? '<i class="ph ph-check"></i>' : step.status === 'skipped' ? '—' : kindOf(node) === 'branch' ? '<i class="ph ph-arrows-split"></i>' : seqMap.get(node.id);
     // 還沒跑到的步（pending／skipped 且不是目前這步）照 demo 灰掉不可點（U6c 覆核該修）；running／done／failed／waiting 都可點
     const future = ['pending', 'skipped'].includes(step.status) && node.id !== currentId;
-    return `<button class="runstep${node.id === activeId ? ' active' : ''}" data-act="run-inspect" data-node="${esc(node.id)}" title="${future ? '還沒跑到' : esc(node.title)}"${future ? ' disabled' : ''}><span class="n">${n}</span><span class="t">${esc(node.title)}</span>${stepPill(step)}</button>`;
+    // 列管 L025：並行兩支同時等你時，currentNodeOf 只挑得出第一支，左軌就只有那一顆亮。
+    // 每一顆自己看自己的狀態，等你的全部標起來；active（＝現在看的那步）照舊只有一顆。
+    const waiting = String(step.status).startsWith('waiting') || step.status === 'time_pending';
+    return `<button class="runstep${node.id === activeId ? ' active' : ''}" data-act="run-inspect" data-node="${esc(node.id)}" title="${future ? '還沒跑到' : esc(node.title)}"${future ? ' disabled' : ''}${waiting ? ' data-waiting' : ''}><span class="n">${n}</span><span class="t">${esc(node.title)}</span>${stepPill(step)}</button>`;
   }).join('');
   return `<aside class="panel progressrail"><h3>這次的進度</h3>${items}</aside>`;
 }
@@ -2974,9 +3001,8 @@ function dashPoll() {
   state.dashPollTimer = setTimeout(async () => {
     try {
       await loadDash();
-      const typing = ['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName) && document.activeElement.value;
-      if (!typing && !state.preview && !state.dash?.usageOpen) render(); // 預覽／用量浮窗開著時不重繪（重繪會把浮窗捲回頂、pdf 重載）；關掉下一輪就補上
-    } catch { /* 下一輪再試 */ }
+      if (!isTyping() && !state.preview && !state.dash?.usageOpen) render(); // 預覽／用量浮窗開著時不重繪（重繪會把浮窗捲回頂、pdf 重載）；關掉下一輪就補上
+    } catch (e) { pollFailed('儀表板', e); }
     dashPoll();
   }, 5000);
 }
@@ -3114,9 +3140,9 @@ function usageModalHtml(d) {
     <span class="${d.usageView === 'flow' ? 'on' : ''}" data-act="dash-usage-view" data-view="flow">按 Workflow</span>
     <span class="${d.usageView === 'day' ? 'on' : ''}" data-act="dash-usage-view" data-view="day">按日</span></span>`;
   return `<div class="modalback" data-act="dash-usage-back"><div class="modal usagemodal" role="dialog" aria-label="用量明細">
-      <div class="cvdhead"><b style="font-size:15px"><i class="ph ph-chart-bar"></i> 用量明細</b>${seg}
+      <div class="cvdhead"><b style="font-size:15px"><i class="ph ph-chart-bar"></i> 用量明細${d.usageView === 'day' ? hint('30 根＝近 30 天，最右是今天。') : ''}</b>${seg}
         <span class="btn btn-ghost iconb" data-act="dash-usage-close" style="margin-left:auto" title="關閉（Esc）"><i class="ph ph-x"></i></span></div>
-      ${d.usageView === 'day' ? `${usageChartHtml(d.data.usage, true)}<p class="note">30 根＝近 30 天，最右是今天。</p>` : ''}
+      ${d.usageView === 'day' ? usageChartHtml(d.data.usage, true) : ''}
       ${usageSectionHtml(d)}
       <div class="saverow"><button class="btn" data-act="dash-usage-close">關閉</button></div>
     </div></div>`;
@@ -3289,9 +3315,8 @@ function calendarPoll() {
   state.calPollTimer = setTimeout(async () => {
     try {
       await loadCalendar();
-      const typing = ['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName) && document.activeElement.value;
-      if (!typing) render();
-    } catch { /* 下一輪再試 */ }
+      if (!isTyping()) render();
+    } catch (e) { pollFailed('行事曆', e); }
     calendarPoll();
   }, 5000);
 }
@@ -3388,9 +3413,8 @@ function calDrawerHtml() {
     <div class="cvdhead"><span class="overline">這一次</span>
       <span class="btn iconb" data-act="cal-run-now" title="現在就跑" style="color:var(--accent-text);background:rgb(var(--accent-rgb)/.12)"><i class="ph-fill ph-play"></i></span>
       <span class="btn btn-ghost iconb" data-act="cal-drawer-close"><i class="ph ph-x"></i></span></div>
-    <h3 style="margin:6px 0">${esc(sched.name)}</h3><div class="sub">${esc(d.occ ? d.occ.replace('T', ' ') : '')}${sched.enabled === false ? '・<b style="color:var(--amber-text)">已暫停</b>' : ''}</div>
+    <h3 style="margin:6px 0">${esc(sched.name)}${hint('改這次時間＝直接在行事曆上把它拖到別格；取消這一次＝滑過事件按垃圾桶。')}</h3><div class="sub">${esc(d.occ ? d.occ.replace('T', ' ') : '')}${sched.enabled === false ? '・<b style="color:var(--amber-text)">已暫停</b>' : ''}</div>
     <div class="frow2"><span class="lb2">提前提醒</span><span class="rchips">${chips}<button class="raddbtn" data-act="cal-lead-add">＋ 加一次提醒</button></span></div>
-    <p class="note">改這次時間＝直接在行事曆上把它拖到別格；取消這一次＝滑過事件按垃圾桶。</p>
     <div class="overline" style="margin-top:var(--s3)">這個排程的步驟（點一步進去調）</div>
     ${steps || '<p class="note">讀取步驟中⋯</p>'}
     <div class="saverow" style="margin-top:var(--s3)">
@@ -3426,9 +3450,8 @@ function calModalsHtml() {
       </div>`;
     }).join('');
     html += `<div class="modalback" data-act="smgr-back"><div class="modal">
-      <div class="cvdhead"><b style="font-size:15px">排程清單</b>
+      <div class="cvdhead"><b style="font-size:15px">排程清單${hint('所有排程都在這裡——包含已暫停、過期、或本月沒有場次的。月曆上看不到的，也能從這裡進設定。')}</b>
         <span class="btn btn-ghost iconb" data-act="smgr-close" style="margin-left:auto"><i class="ph ph-x"></i></span></div>
-      <p class="note" style="margin:0 0 6px">所有排程都在這裡——包含已暫停、過期、或本月沒有場次的（月曆上看不到的也能從這裡進設定）。</p>
       ${rows || '<div class="railempty">還沒有任何排程</div>'}
       <div class="saverow"><button class="btn" data-act="smgr-close">關閉</button></div>
     </div></div>`;
@@ -3697,7 +3720,7 @@ function categoryPageHtml() {
 const SET_GROUPS = [['個人與記憶', '偏好、身分與資訊範圍'], ['Workflow 預設', '只影響新建的 Workflow'], ['連線', 'AI 與行事曆快照'], ['執行與排程', '啟動、提醒與補跑'], ['資料管理', '備份、垃圾桶與版本']];
 const SET_TABS = { 個人與記憶: ['關於你', '身分', '記憶總覽', '欄位詞典'] };
 const SET_LEAD = {
-  個人與記憶: '它記得你的，都在這裡。平常不用進來。', 連線: '剝繭不自帶 AI，掛在你自己的 Claude 上；行事曆用你自己的 Google 授權。',
+  個人與記憶: '這裡的每一張卡，都會跟著每一次執行送給 AI。', 連線: '剝繭不自帶 AI，掛在你自己的 Claude 上；行事曆用你自己的 Google 授權。',
   'Workflow 預設': '只管「新建的 Workflow 長什麼樣」。每條 Workflow 自己的開關留在 Workflow 頁。', 執行與排程: '剝繭什麼時候在、錯過了怎麼辦、AI 工人能做什麼。', 資料管理: '資料在哪、備份、清理。',
 };
 const FIELD_KIND_TXT = { appearance: '產出的樣子', audience: '對象', time: '時間', range: '範圍', limits: '資源與限制', method: '做法' }; // 與後端 FIELD_KINDS 同一份
@@ -3791,13 +3814,13 @@ function settingsHtml() {
   else if (s.group === '執行與排程') body = setExecHtml(d);
   else body = setDataHtml(d);
   return `${pageHeadHtml('設定', '個人偏好、Workflow 預設與系統執行，各有明確範圍。')}
-    <div class="setwrap" data-settings><nav class="setnav" aria-label="設定項目">${nav}</nav><section class="setbody" data-group="${esc(s.group)}"><h2>${esc(s.group)}</h2><p class="lead">${esc(SET_LEAD[s.group] ?? '')}</p>${body}</section></div>`;
+    <div class="setwrap" data-settings><nav class="setnav" aria-label="設定項目">${nav}</nav><section class="setbody" data-group="${esc(s.group)}"><h2>${esc(s.group)}${hint(SET_LEAD[s.group] ?? '')}</h2>${body}</section></div>`;
 }
 // 組內分段小標（排版輪 L6：原子分頁改同一張卡分段）
 const setSec = (t) => `<h3>${esc(t)}</h3>`;
 const setRow = (l, d, c, stack = false) => `<div class="row${stack ? ' stack' : ''}"><div class="l">${l}</div>${d ? `<div class="d">${d}</div>` : ''}<div class="c">${c}</div></div>`;
 const setSw = (on, act, extra = '') => `<span class="sw ${on ? 'on' : ''}" data-act="${act}" ${extra} role="switch" aria-checked="${on}">${on ? '開' : '關'}<i></i></span>`;
-const setLater = (l, dsc) => setRow(l, dsc, '<span class="chip">下一輪</span>'); // 續票項：只留一行說去哪
+const setLater = (l, dsc) => setRow(`${l}${hint(dsc)}`, '', '<span class="chip">下一輪</span>'); // 續票項：「下一輪」膠囊已經說了還沒做，現在是什麼行為收進問號（說明文案輪）
 // 設定頁一句結果／錯誤（快照、備份、垃圾桶、清空）：state.settings.msg={key,text,err}，換組／換子分頁就清
 const setMsgHtml = (key) => { const m = state.settings?.msg; return m?.key === key ? `<div class="setmsg ${m.err ? 'err' : ''}" data-setmsg="${key}"><i class="ph ${m.err ? 'ph-warning-circle' : 'ph-check-circle'}"></i>${esc(m.text)}</div>` : ''; };
 
@@ -3811,11 +3834,11 @@ function setConnHtml(d) {
   const on = state.claude === true;
   return `${setSec('Claude')}<div class="group">
       ${setRow('狀態', on ? '找得到 Claude 指令。用量在儀表板。' : '找不到 Claude 指令：Claude Code 沒裝，或不在路徑上。你的 Workflow 庫都在，不會不見。', `<span class="chip ${on ? '' : 'red'}" data-claude="${on ? 'on' : 'off'}"><i class="${on ? 'ph-fill ph-plugs-connected' : 'ph ph-plugs'}"></i>${on ? '已連上' : '連不上'}</span><button class="btn sm2" data-act="reconnect"><i class="ph ph-arrows-clockwise"></i>重新連線</button>`)}
-      ${setRow('登入過期怎麼辦', '這裡只看得到 Claude 指令在不在，看不出登入有沒有過期。步驟一直失敗、訊息說登入過期時：開終端機跑 <span style="font-family:var(--mono)">claude</span>，照它的指示登入，回來按那一步的「重試」。', '')}
-      ${setRow('模型檔位對照', '步驟抽屜與「Workflow 預設」選的檔位，各對到哪個模型。', '<span class="sub" style="margin:0">快而省 Haiku・均衡 Sonnet・深而慢 Opus</span>')}</div>
+      ${setRow(`登入過期怎麼辦${hint('這裡只看得到 Claude 指令在不在，看不出登入有沒有過期。步驟一直失敗、訊息說登入過期時：開終端機跑「claude」，照它的指示登入，回來按那一步的「重試」。')}`, '', '')}
+      ${setRow(`模型檔位對照${hint('步驟抽屜與「Workflow 預設」選的檔位，各對到哪個模型。')}`, '', '<span class="sub" style="margin:0">快而省 Haiku・均衡 Sonnet・深而慢 Opus</span>')}</div>
     ${setSec('Google 行事曆')}<div class="group">
       ${setRow('Google 快照', desc, `<span class="chip" data-snap="${!snap ? 'none' : ok ? 'ok' : 'failed'}">${!snap ? '還沒抓過' : ok ? '有快照' : '抓不到'}</span><button class="btn sm2" data-act="set-cal-refresh" ${state.settings.busy ? 'disabled' : ''}><i class="ph ph-arrows-clockwise"></i>${state.settings.busy === 'cal' ? '抓取中⋯' : '重新整理快照'}</button>`)}
-      ${setRow('授權', '行事曆走你 Claude 裡的 Google 行事曆連接器；剝繭不另外存授權，也拿不到你的密碼。要解除，在 Claude 那邊解除。', '')}</div>${setMsgHtml('cal')}
+      ${setRow(`授權${hint('行事曆走你 Claude 裡的 Google 行事曆連接器；剝繭不另外存授權，也拿不到你的密碼。要解除，在 Claude 那邊解除。')}`, '', '')}</div>${setMsgHtml('cal')}
     ${setSec('連接器與金鑰')}${setKeysHtml()}`;
 }
 
@@ -3825,22 +3848,23 @@ function setDefaultsHtml(d) {
   const seg = (k, cur, opts) => `<div class="seg sm" data-def="${k}">${opts.map(([v, t]) => `<span class="${String(cur) === v ? 'on' : ''}" data-act="set-def-val" data-k="${k}" data-v="${v}">${t}</span>`).join('')}</div>`;
   const fl = df.supervisor_flags ?? {};
   const aiSec = `${setSec('AI 步驟')}<div class="group"><h5>模型與重試</h5>
-      ${setRow('模型檔位', '步驟沒自己選檔位時用哪一檔；「不設」＝交給 Claude 的預設。', seg('model_tier', df.model_tier ?? 'null', [['null', '不設'], ['fast', '快而省'], ['balanced', '均衡'], ['deep', '深而慢']]))}
-      ${setRow('出錯自動重試', '步驟沒自己設時，失敗了自動再試幾次；「不設」＝不重試。', seg('retry', df.retry ?? 'null', [['null', '不設'], ['0', '0 次'], ['1', '1 次'], ['2', '2 次']]))}
+      ${setRow(`模型檔位${hint('步驟沒自己選檔位時用哪一檔；「不設」＝交給 Claude 的預設。')}`, '', seg('model_tier', df.model_tier ?? 'null', [['null', '不設'], ['fast', '快而省'], ['balanced', '均衡'], ['deep', '深而慢']]))}
+      ${setRow(`出錯自動重試${hint('步驟沒自己設時，失敗了自動再試幾次；「不設」＝不重試。')}`, '', seg('retry', df.retry ?? 'null', [['null', '不設'], ['0', '0 次'], ['1', '1 次'], ['2', '2 次']]))}
       ${setLater('產出語言', '現在跟指示的語言一樣。')}</div>`;
   // 拆法輪 W1（契約 F）：拆之前先出成品卡讓你確認（預設開）；關掉＝一句話直接出草稿，清單頂端印拆解器自己定的長相對照
-  const stopSec = `${setSec('停點')}<div class="group">${setRow('拆之前先確認成品長相', '關掉＝一句話直接出草稿；等分類拆法偏好學會了再關比較保險。', setSw(d.cfg.compose?.confirm_shape !== false, 'set-compose-sw', 'data-k="confirm_shape"'))}</div>
-    <div class="group">${setRow('停點', '在每個步驟的「停點」設定。', '')}${setLater('停著沒處理多久提醒', '停點提醒間隔下一輪。')}</div>`;
+  const stopSec = `${setSec('停點')}<div class="group">${setRow(`拆之前先確認成品長相${hint('關掉＝一句話直接出草稿；等分類拆法偏好學會了再關比較保險。')}`, '', setSw(d.cfg.compose?.confirm_shape !== false, 'set-compose-sw', 'data-k="confirm_shape"'))}</div>
+    <div class="group">${setRow('停點', '哪幾步要停下來等你，在每個步驟自己的設定裡改，不在這一頁。', '')}${setLater('停著沒處理多久提醒', '停點提醒間隔下一輪。')}</div>`;
   const permSec = `${setSec('權限與查核')}<div class="group"><h5>產出檔案的權限</h5>
-      ${setRow('親手建的 Workflow', '預設允不允許 AI 工人在該趟的產出資料夾寫檔（Word、Excel）與執行程式；Workflow 頁可以個別改。', setSw(df.permissions_files !== false, 'set-def-sw', 'data-k="permissions_files"'))}
-      ${setRow('匯入的 Workflow', '一律不允許，不是設定：別人 Workflow 裡藏的指示不可信，不能讓它在你電腦上寫檔。要開，進那條 Workflow 的頁面自己打開。', '<span class="chip">固定關</span>')}</div>
+      ${setRow(`親手建的 Workflow${hint('預設允不允許 AI 工人在該趟的產出資料夾寫檔（Word、Excel）與執行程式；Workflow 頁可以個別改。')}`, '', setSw(df.permissions_files !== false, 'set-def-sw', 'data-k="permissions_files"'))}
+      ${setRow(`匯入的 Workflow${hint('一律不允許，不是設定：別人 Workflow 裡藏的指示不可信，不能讓它在你電腦上寫檔。要開，進那條 Workflow 的頁面自己打開。')}`, '', '<span class="chip">固定關</span>')}</div>
     <div class="group"><h5>交貨查核</h5>
-      ${setRow('每步都查', '每個 AI 步驟做完先對照原始資料與你的要求查一次；攔到會自動重做一次，還錯才停下問你。Workflow 頁可以個別關。', setSw(df.check_enabled !== false, 'set-def-sw', 'data-k="check_enabled"'))}
-      ${setRow('數字對原始資料', '「看 Workflow」＝這條 Workflow 有必填的資料欄位才對原始資料；固定開／固定關＝不看 Workflow。', seg('check_facts', df.check_facts ?? 'auto', [['auto', '看 Workflow'], ['on', '固定開'], ['off', '固定關']]))}</div>
+      ${setRow(`每步都查${hint('每個 AI 步驟做完先對照原始資料與你的要求查一次；攔到會自動重做一次，還錯才停下問你。Workflow 頁可以個別關。')}`, '', setSw(df.check_enabled !== false, 'set-def-sw', 'data-k="check_enabled"'))}
+      ${setRow(`數字對原始資料${hint('「看 Workflow」＝這條 Workflow 有必填的資料欄位才對原始資料；固定開／固定關＝不看 Workflow。')}`, '', seg('check_facts', df.check_facts ?? 'auto', [['auto', '看 Workflow'], ['on', '固定開'], ['off', '固定關']]))}</div>
     <div class="group"><h5>監工</h5>
-      ${setRow('監工：開場備註、每步交接、跑完紀錄', '新 Workflow 預設開不開；Workflow 頁可以個別關。', setSw(df.supervisor_enabled !== false, 'set-def-sw', 'data-k="supervisor_enabled"'))}
-      ${setRow('每步「監工可以」的預設', '新 Workflow 每個 AI 步驟預設打開哪幾個；步驟抽屜可以個別改。', `<div class="pills">${SUP_CHK.map(([, k, t]) => `<span class="pill ${fl[k] ? 'on' : ''}" data-act="set-def-flag" data-k="${k}">${t}</span>`).join('')}</div>`)}</div>`;
-  return `<p class="note" style="margin:0 0 var(--s2)" data-def-note>只影響之後新建的 Workflow；已經存好的 Workflow 不變，各自在 Workflow 頁改。</p>${permSec}${aiSec}${stopSec}`;
+      ${setRow(`監工：開場備註、每步交接、跑完紀錄${hint('新 Workflow 預設開不開；Workflow 頁可以個別關。')}`, '', setSw(df.supervisor_enabled !== false, 'set-def-sw', 'data-k="supervisor_enabled"'))}
+      ${setRow(`每步「監工可以」的預設${hint('新 Workflow 每個 AI 步驟預設打開哪幾個；步驟抽屜可以個別改。')}`, '', `<div class="pills">${SUP_CHK.map(([, k, t]) => `<span class="pill ${fl[k] ? 'on' : ''}" data-act="set-def-flag" data-k="${k}">${t}</span>`).join('')}</div>`)}</div>`;
+  // 說明文案輪：這行跟 h2 旁邊 SET_LEAD[「Workflow 預設」] 講的是同一件事（只差幾個字）——畫面上只留一份
+  return `${permSec}${aiSec}${stopSec}`;
 }
 
 // ---- 執行與排程：常駐／排程／AI 工人（M5b）——開機自啟從行事曆頁底搬來（GET/POST /api/autostart）；其餘讀寫 settings.exec ----
@@ -3858,11 +3882,11 @@ function setExecHtml(d) {
       ${setRow('開機自動啟動', unsupported ? '這個平台不支援：請自行把「node src/server.js」加進開機項目。' : on ? '電腦一開，剝繭就在背景待命；排程到點會跑。' : '現在是手動：你打開它才會跑，關掉就停。排程到點時如果沒開著，會記成「錯過」，下次打開時問你要不要補。', unsupported ? '<span class="chip">這個平台不支援</span>' : setSw(on, 'autostart-toggle', 'data-autostart'))}
       ${setLater('同時最多跑幾趟', '現在到點全發、不限流。')}</div>
     ${setSec('排程')}<div class="group">
-      ${setRow('錯過時', '剝繭沒開著、排程到點沒跑成：新排程預設問你補不補，還是直接補跑。每條排程建立後可以自己改；已有的排程不受影響。', `<div class="seg sm" data-exec="auto_makeup"><span class="${ex.auto_makeup ? '' : 'on'}" data-act="set-exec-val" data-k="auto_makeup" data-v="false">先詢問</span><span class="${ex.auto_makeup ? 'on' : ''}" data-act="set-exec-val" data-k="auto_makeup" data-v="true">自動補</span></div>`)}
-      ${setRow('提醒預設時間點', '新排程預設提早幾次提醒（可多選）；每條排程建立後可以自己改。', `<div class="pills" data-exec="remind_leads">${LEAD_ORDER.map((k) => `<span class="pill ${leads.includes(k) ? 'on' : ''}" data-act="set-exec-lead" data-k="${k}">${LEAD_TXT[k]}</span>`).join('')}</div>`, true)}</div>
+      ${setRow(`錯過時${hint('剝繭沒開著、排程到點沒跑成：新排程預設問你補不補，還是直接補跑。每條排程建立後可以自己改；已有的排程不受影響。')}`, '', `<div class="seg sm" data-exec="auto_makeup"><span class="${ex.auto_makeup ? '' : 'on'}" data-act="set-exec-val" data-k="auto_makeup" data-v="false">先詢問</span><span class="${ex.auto_makeup ? 'on' : ''}" data-act="set-exec-val" data-k="auto_makeup" data-v="true">自動補</span></div>`)}
+      ${setRow(`提醒預設時間點${hint('新排程預設提早幾次提醒（可多選）；每條排程建立後可以自己改。')}`, '', `<div class="pills" data-exec="remind_leads">${LEAD_ORDER.map((k) => `<span class="pill ${leads.includes(k) ? 'on' : ''}" data-act="set-exec-lead" data-k="${k}">${LEAD_TXT[k]}</span>`).join('')}</div>`, true)}</div>
     ${setSec('AI 工人')}<div class="group">
       ${setRow('允許查網路', ex.web === false ? '關著：AI 工人每一步都不上網，只用你給的資料；監工建議開也不會開。' : '開著：步驟需要查資料時，AI 工人可以上網查。', setSw(ex.web !== false, 'set-exec-sw', 'data-k="web"'))}
-      ${setRow('連接器', '只有唯讀；工人環境裡沒有金鑰，呼叫由剝繭本體執行。', '<span class="chip">輪 2</span>')}</div>`;
+      ${setRow(`連接器${hint('只有唯讀；工人環境裡沒有金鑰，呼叫由剝繭本體執行。')}`, '', '<span class="chip">輪 2</span>')}</div>`;
 }
 
 // ---- 多組織（調整輪）：設定→資料管理「組織」段的組織清單／新增／移出 ----
@@ -3886,10 +3910,10 @@ function orgManageHtml() {
     return `<div class="orgrow${now ? ' now' : ''}" data-org="${esc(o.id)}"><div class="orgmeta"><b>${esc(name)}</b><span class="syn">${o.workflows ?? 0} 條 Workflow</span></div><div class="orgacts">${acts}</div>${ask}</div>`;
   };
   const busy = state.settings?.busy === 'org';
-  return `<div class="group" data-orgs><h5>全部組織・${list.length} 個<span class="sub">每個組織一整套資料（Workflow、記憶、行事曆都各自分開，不互看）。切換會重新載入畫面。</span></h5>
+  return `<div class="group" data-orgs><h5>全部組織・${list.length} 個${hint('每個組織一整套資料——Workflow、記憶、行事曆都各自分開，不互看。切換會重新載入畫面。')}</h5>
       <div class="orglist">${list.map(row).join('')}</div>
       <div class="orgadd"><input id="org-new-name" class="notein" data-keep maxlength="60" autocomplete="off" placeholder="新組織的名字" value="${esc(kept('org-new-name') ?? '')}" style="margin:0;max-width:260px"><button class="btn sm2" data-act="org-add"${busy ? ' disabled' : ''}><i class="ph ph-plus"></i>${busy ? '建立中⋯' : '新增組織'}</button></div>
-      ${setRow('改別的組織的名字', '上面那格「組織名稱」改的是<b>目前這個</b>組織。要改別的，先切過去再改。', '')}${setMsgHtml('org')}</div>`;
+      ${setRow('改別的組織的名字', '上面那格改的是你現在待著的這個組織；要改別的，先切過去。', '')}${setMsgHtml('org')}</div>`;
 }
 
 // ---- 資料：位置與備份／清理／關於（M5b）——位置唯讀；立即備份＋清單；垃圾桶合併表（流程＋卡各自復原）；清空記憶二次確認；版本 ----
@@ -3901,22 +3925,22 @@ function setDataHtml(d) {
       ...d.trash.cards.map((t) => ({ kind: 'card', key: t.key, at: t.trashed_at, label: t.bucket === 'profile' ? '認識卡' : '習慣卡', text: t.text, extra: '' })),
     ].sort((a, b) => String(b.at ?? '').localeCompare(String(a.at ?? '')));
     const tr = (r) => `<tr data-trash="${esc(r.kind)}:${esc(r.key)}"><td><span class="chip">${esc(r.label)}</span></td><td><b>${esc(r.text)}</b>${r.extra ? `<span class="syn" style="margin-left:6px">${esc(r.extra)}</span>` : ''}</td><td class="syn">${esc(memAt(r.at))}</td><td class="acts"><button class="mini" data-act="set-trash-restore" data-kind="${esc(r.kind)}" data-key="${esc(r.key)}">復原</button></td></tr>`;
-  const cleanSec = `${setSec('清理')}<div class="group"><h5>垃圾桶・${rows.length} 項<span class="sub">刪掉的 Workflow 與記憶卡放 30 天，期限內都能復原；到期自動清。</span></h5>
+  const cleanSec = `${setSec('清理')}<div class="group"><h5>垃圾桶・${rows.length} 項${hint('刪掉的 Workflow 與記憶卡放 30 天，期限內都能復原；到期自動清。')}</h5>
       ${rows.length ? `<div style="overflow-x:auto"><table class="dict" data-trashtable><thead><tr><th>是什麼</th><th>名字</th><th>刪掉時間</th><th></th></tr></thead><tbody>${rows.map(tr).join('')}</tbody></table></div>` : '<div class="none">垃圾桶是空的</div>'}${setMsgHtml('trash')}</div>
     <div class="group">
-      ${setRow('清空記憶', '所有習慣卡與認識卡進記憶垃圾桶（30 天內可逐張復原）；欄位詞典、分類的規矩、身分、Workflow 都不動。', '<button class="btn sm2 btn-danger" data-act="set-clear-mem-open">清空記憶</button>')}
+      ${setRow(`清空記憶${hint('所有習慣卡與認識卡進記憶垃圾桶（30 天內可逐張復原）；欄位詞典、分類的規矩、身分、Workflow 都不動。')}`, '', '<button class="btn sm2 btn-danger" data-act="set-clear-mem-open">清空記憶</button>')}
       ${setLater('匯出全部、清空全部', '')}${setMsgHtml('clear')}</div>`;
-  const aboutSec = `${setSec('關於')}<div class="group">${setRow(`剝繭 ${esc(d.cfg.version ?? '')}`, 'MIT 授權。你的資料不經過任何人的伺服器，全在你電腦和你自己的 Claude 帳號裡。', '')}</div>`;
+  const aboutSec = `${setSec('關於')}<div class="group">${setRow(`剝繭 ${esc(d.cfg.version ?? '')}${hint('MIT 授權。你的資料不經過任何人的伺服器，全在你電腦和你自己的 Claude 帳號裡。')}`, '', '')}</div>`;
   const bk = [...d.backups].sort((a, b) => String(b.at).localeCompare(String(a.at)));
     // 公司（移植合併輪 U3）：名稱 change／Enter 即 PUT（處理在 app 的 change 監聽）；規範上限唯讀（三層 §三固定值，後端 checkRuleLimits 同一份）
   const orgSec = `${setSec('組織')}<div class="group">
-      ${setRow('組織名稱', '側欄最上層、麵包屑、組織頁標題跟著改；清空顯示「組織」。', `<input class="notein" id="set-company-name" type="text" maxlength="60" placeholder="組織" value="${esc(d.cfg.company_name ?? '')}" style="margin:0;max-width:260px">`)}
+      ${setRow(`組織名稱${hint('側欄最上層、麵包屑、組織頁標題跟著改；清空顯示「組織」。')}`, '', `<input class="notein" id="set-company-name" type="text" maxlength="60" placeholder="組織" value="${esc(d.cfg.company_name ?? '')}" style="margin:0;max-width:260px">`)}
       ${setRow('規範上限', '單檔 4,000 字・每層合計 8,000 字', '<span class="chip">固定</span>')}${setMsgHtml('company')}</div>
     ${orgManageHtml()}
     ${setSec('位置與備份')}<div class="group"><h5>位置</h5>
       ${setRow('資料夾', `<span class="path" data-datadir>${esc(d.cfg.data_dir ?? '')}</span>`, '<span class="chip">換位置下一輪</span>')}</div>
     <div class="group"><h5>備份</h5>
-      ${setRow('立即備份', '整個資料夾複製一份到同層的「資料夾名-backups」；剝繭不存金鑰，備份裡也沒有。', `<button class="btn sm2" data-act="set-backup-now" ${s.busy ? 'disabled' : ''}><i class="ph ph-copy"></i>${s.busy === 'backup' ? '備份中⋯' : '立即備份'}</button>`)}
+      ${setRow(`立即備份${hint('整個資料夾複製一份到同層的「資料夾名-backups」；剝繭不存金鑰，備份裡也沒有。')}`, '', `<button class="btn sm2" data-act="set-backup-now" ${s.busy ? 'disabled' : ''}><i class="ph ph-copy"></i>${s.busy === 'backup' ? '備份中⋯' : '立即備份'}</button>`)}
       ${setLater('每天自動備份、還原', '要還原，先把備份夾整個複製回資料夾位置。')}${setMsgHtml('backup')}
       <h5>備份清單・${bk.length} 份</h5>
       ${bk.length ? `<div style="overflow-x:auto"><table class="dict" data-backuptable><thead><tr><th>備份</th><th>時間</th></tr></thead><tbody>${bk.map((b) => `<tr data-backup="${esc(b.name)}"><td><b>${esc(b.name)}</b></td><td class="syn">${esc(memAt(b.at))}</td></tr>`).join('')}</tbody></table></div>` : '<div class="none">還沒備份過</div>'}</div>`;
@@ -3951,8 +3975,8 @@ function setMemoryHtml(d) {
 // 連接器與金鑰：排版輪 L6 從記憶搬到「連線」分段；輪 2 才做，兩列都「尚未提供」
 function setKeysHtml() {
   return `<div class="group">
-      ${setRow('連接器與金鑰', 'AI 永遠看不到金鑰：金鑰放作業系統的認證管理員，不進剝繭的任何檔案、備份、匯出、卷宗；AI 工人拿到的是連接器的名字與它能讀什麼，呼叫由剝繭本體執行。第一版只有讀，沒有寫。', '<span class="chip">尚未提供</span>')}
-      ${setRow('雲端硬碟、信箱', '接上之後，Workflow 可以讀你的雲端檔案當資料來源。', '<span class="chip">尚未提供</span>')}</div>`;
+      ${setRow(`連接器與金鑰${hint('AI 永遠看不到金鑰：金鑰放作業系統的認證管理員，不進剝繭的任何檔案、備份、匯出、卷宗；AI 工人拿到的是連接器的名字與它能讀什麼，呼叫由剝繭本體執行。第一版只有讀，沒有寫。')}`, '', '<span class="chip">尚未提供</span>')}
+      ${setRow(`雲端硬碟、信箱${hint('接上之後，Workflow 可以讀你的雲端檔案當資料來源。')}`, '', '<span class="chip">尚未提供</span>')}</div>`;
 }
 // 內容層按場合帶幾張：後端 memory.js CONTENT_TOP 的複本（那邊改了要跟）
 const MEM_CONTENT_TOP = 3;
@@ -4030,14 +4054,14 @@ function setKnowHtml(d) {
   const introCtx = introCards.filter((c) => c.layer !== 'expression');
   const introExp = introCards.filter((c) => c.layer === 'expression');
   const introRows = INTRO_QUESTIONS.map((q, i) => { const c = q.layer === 'expression' ? introExp[0] : introCtx[i]; return setRow(esc(q.label), c ? esc(c.text) : '<span class="none">還沒答</span>', c ? `<button class="mini" data-act="mem-card" data-id="${esc(c.id)}" data-bucket="profile" data-text="${esc(c.text)}" title="點開卡片改">修改</button>` : ''); }).join('');
-  const introBlock = `<div class="group" data-intro><h5>介紹你自己<span class="sub">三題各是一張認識卡；改＝開那張卡。</span></h5>${introCards.length ? introRows : `<div class="none">還沒介紹過</div><div class="btns" style="margin-top:8px"><button class="btn sm2" data-act="intro-open"><i class="ph ph-hand-waving"></i>介紹你自己</button></div>`}</div>`;
+  const introBlock = `<div class="group" data-intro><h5>介紹你自己${hint('三題，每題存成一張卡。答過之後在這裡改。')}</h5>${introCards.length ? introRows : `<div class="none">還沒介紹過</div><div class="btns" style="margin-top:8px"><button class="btn sm2" data-act="intro-open"><i class="ph ph-hand-waving"></i>介紹你自己</button></div>`}</div>`;
   const injText = paused ? '（整層暫停中）' : expLive.length ? expLive.map((c) => `· ${c.text}`).join('\n') : '（還沒有每步帶的卡：介紹自己時答第三題，或在停點註記寫「以後都⋯」）';
   return `${introBlock}<div class="group">
-      ${setRow('關於你', paused ? '暫停期間每步指示不附「關於你」，卡都還在；分類的規矩與習慣選項照舊。' : '每步帶的每一步都帶；按場合帶的只在場合對上的 Workflow 帶；交貨查核與監工一律不帶。', setSw(!paused, 'set-pause', 'data-paused'))}
-      ${Object.keys(SENSITIVE_TXT).map((k) => setRow(`記${SENSITIVE_TXT[k]}`, '預設不記。打開＝只記你親口說的。', setSw(!!sens[k], 'set-sens', `data-k="${k}"`))).join('')}</div>
-    <div class="injected ${paused ? 'paused' : ''}" data-injected><div class="overline">每步指示現在附的「關於你」（從卡直接串出來，AI 不改寫）</div><div class="note" style="margin:2px 0 0">（不含身分限縮；綁了身分的分類實際附的會更少）</div><pre>${esc(injText)}</pre></div>
-    <div class="group" data-layer="expression"><h5>每步帶・${expLive.length} 條<span class="sub">怎麼講：語氣、長度、格式、禁忌。</span></h5>${exp.map(crow).join('') || '<div class="none">還沒有</div>'}</div>
-    <div class="group" data-layer="content"><h5>按場合帶・${ctxLive.length} 條<span class="sub">關於你的事實：讀者、公司、進行中的事。</span></h5>${ctx.map(crow).join('') || '<div class="none">還沒有</div>'}</div>`;
+      ${setRow(`關於你${hint(paused ? '暫停期間每一步都不附「關於你」，卡片留著；分類的規矩與習慣選項照舊。' : '關掉＝每一步都不帶，卡片留著。交貨查核與監工本來就不帶。')}`, '', setSw(!paused, 'set-pause', 'data-paused'))}
+      ${setRow(`記敏感資訊${hint('這四類預設都不記。打開之後，也只記你親口說過的——步驟產出永遠不是來源。')}`, '', `<div class="pills">${Object.keys(SENSITIVE_TXT).map((k) => `<button type="button" class="pill${sens[k] ? ' on' : ''}" data-act="set-sens" data-k="${k}" aria-pressed="${!!sens[k]}">${SENSITIVE_TXT[k]}</button>`).join('')}</div>`, true)}</div>
+    <div class="injected ${paused ? 'paused' : ''}" data-injected><div class="overline">每一步實際會附上這段${hint('從卡直接串出來，AI 不改寫。這裡不含身分限縮——綁了身分的分類，實際附的會比這裡少。')}</div><pre>${esc(injText)}</pre></div>
+    <div class="group" data-layer="expression"><h5>每步帶・${expLive.length} 條${hint('怎麼講：語氣、長度、格式、禁忌。每一步都會附上。')}</h5>${exp.map(crow).join('') || '<div class="none">還沒有</div>'}</div>
+    <div class="group" data-layer="content"><h5>按場合帶・${ctxLive.length} 條${hint('關於你的事實：讀者、公司、進行中的事。只有場合對上的 Workflow 才附上。')}</h5>${ctx.map(crow).join('') || '<div class="none">還沒有</div>'}</div>`;
 }
 // 欄位詞典：六類分節表——欄位／同義詞／用在哪些流程（後端 ?usage=1 掃全部流程算的）／掛的習慣卡（活著的）／改性質下拉＋「併入⋯」
 function setDictHtml(d) {
@@ -4082,7 +4106,7 @@ function setIdentitiesHtml(d) {
       <span class="acts"><button class="mini" data-act="id-edit" data-id="${esc(i.id)}">改</button><button class="mini no" data-act="id-del" data-id="${esc(i.id)}">刪</button></span></div>
       <div class="ib">${i.cards.map((c) => esc(textOf(c))).join('　·　') || '沒勾任何認識卡：用它開跑＝關於你一條都不帶'}</div></div>`;
   };
-  return `<div class="group"><h5>身分・一疊認識卡的封套，開跑時可換<span class="sub">只限縮「關於你」帶哪些卡；習慣選項與分類的規矩不受它影響。</span></h5>
+  return `<div class="group"><h5>身分${hint('一疊認識卡的封套，開跑時可以換。只限縮「關於你」帶哪些卡；習慣選項與分類的規矩不受它影響。')}</h5>
     <div class="list">${d.identities.map(item).join('') || '<div class="none">還沒有身分</div>'}</div>
     <div class="addrow"><input class="notein" id="id-new" placeholder="新身分的名字，例：跟客戶開會的我" style="margin:0"><button class="btn sm2" data-act="id-add"><i class="ph ph-plus"></i>新增身分</button></div></div>`;
 }
@@ -4208,9 +4232,8 @@ function pollProposalsSoon(w) {
       try {
         const before = state.proposals.pending.length;
         await refreshProposals(w);
-        const typing = ['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName) && document.activeElement.value;
-        if (state.proposals.pending.length !== before && !typing) render();
-      } catch { /* 靜候下次 */ }
+        if (state.proposals.pending.length !== before && !isTyping()) render();
+      } catch (e) { pollFailed('Workflow 提議', e); }
     }, ms);
   }
 }
@@ -4232,8 +4255,13 @@ function schedulePoll(recordDelay) {
       state.runJson = json;
       state.run = { ...fresh, workflow: w };
       if (before !== 'done' && state.run.status === 'done') pollProposalsSoon(w);
-      if (changed) render();
-    } catch { /* 下一輪再試 */ }
+      // 列管 L020：跑步中打字（停點回話、人做步驟要交出的內容）本來會被每秒重繪打斷。
+      // 打字時先記帳不重繪，手停了下一輪補畫——不是丟掉，不然畫面會停在舊狀態。
+      if (changed || state.pollDirty) {
+        if (isTyping()) state.pollDirty = true;
+        else { state.pollDirty = false; render(); }
+      }
+    } catch (e) { pollFailed('執行狀態', e); }
     schedulePoll(running ? undefined : 5000); // 跑完等紀錄：第一次 2 秒，之後退避到 5 秒
   }, delay);
 }
@@ -4981,6 +5009,11 @@ app.addEventListener('keydown', (e) => {
 
 // 畫布快捷鍵：Ctrl+Z 上一步、Ctrl+Shift+Z / Ctrl+Y 重做、Ctrl+S 存檔（打字中不攔，交還瀏覽器原生行為）
 document.addEventListener('keydown', (e) => {
+  // 說明文案輪：釘住的說明鈕 Esc 關，焦點留在那顆鈕上（就地改，不重繪）
+  if (e.key === 'Escape') {
+    const open = document.querySelector('.hint[aria-expanded="true"]');
+    if (open) { open.setAttribute('aria-expanded', 'false'); open.focus(); return; }
+  }
   if (e.key === 'Escape' && state.rowMenu) { // 排版輪 L4：「⋯」選單 Esc 關，焦點回那顆「⋯」
     const { cat, id } = state.rowMenu;
     state.rowMenu = null;
@@ -5222,6 +5255,14 @@ document.getElementById('shared-file').addEventListener('change', async (e) => {
 let backDown = null; // 排版輪 L10：步驟彈窗背景點一下才關——記住按下點（框內選字拖到遮罩放開，click 目標也是遮罩）
 app.addEventListener('pointerdown', (e) => { backDown = e.target; }, true);
 app.addEventListener('click', async (e) => {
+  // 說明文案輪：說明鈕就地開合——不進 state 也不重繪（重繪會搶輸入焦點、也拖慢），
+  // 點任何地方都先把已經釘住的關掉，再決定要不要開自己這一顆。
+  const hintBtn = e.target.closest('.hint');
+  document.querySelectorAll('.hint[aria-expanded="true"]').forEach((h) => { if (h !== hintBtn) h.setAttribute('aria-expanded', 'false'); });
+  if (hintBtn) {
+    hintBtn.setAttribute('aria-expanded', hintBtn.getAttribute('aria-expanded') === 'true' ? 'false' : 'true');
+    return;
+  }
   const pv = e.target.closest('.pchip.pv');
   if (pv) {
     state.editingParam = pv.dataset.pkey;
@@ -5331,7 +5372,8 @@ app.addEventListener('click', async (e) => {
       const w = state.run.workflow;
       let text;
       try { text = (await api('GET', `/api/workflows/${encodeURIComponent(w.category)}/${encodeURIComponent(w.id)}/runs/${state.run.run_id}/prompts/${encodeURIComponent(el.dataset.pname)}`)).text; }
-      catch { text = '讀不到這一步的指示——這步可能還沒送出過工作單'; }
+      // 列管 L021：兩種情況都會讀不到，講清楚是哪一種，不要讓人以為是壞了
+      catch (err) { text = `讀不到這一步的指示。可能是這一步還沒送出過工作單，也可能這一趟是「每步留存指示」上線前跑的——那時候沒有存。\n\n（${err?.message ?? err}）`; }
       state.promptView = { title: el.dataset.ptitle, text };
       render();
     }
@@ -5982,8 +6024,7 @@ app.addEventListener('click', async (e) => {
         render();
         setTimeout(() => {
           state.permFlashUntil = 0;
-          const typing = ['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName) && document.activeElement.value;
-          if (!typing) render(); // 到期拿掉 class（動畫本身已跑完，打字中就留到下次重繪）
+          if (!isTyping()) render(); // 到期拿掉 class（動畫本身已跑完，打字中就留到下次重繪）
         }, 1500);
       } else { // 捲到那個欄位並聚焦
         if (state.flowTab === 'data' && state.dataCard !== 'data') { state.dataCard = 'data'; render(); } // 調整輪：欄位與上傳框在「填寫這次的值」卡裡，先展開它才找得到
@@ -6689,10 +6730,9 @@ async function noticePollGlobal() {
     if (!state.calendar && !state.dash) {
       const before = state.notices.unread.length;
       applyNotices(await api('GET', '/api/notices'));
-      const typing = ['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName) && document.activeElement.value;
-      if (before !== state.notices.unread.length && !typing && !state.run) render();
+      if (before !== state.notices.unread.length && !isTyping() && !state.run) render();
     }
-  } catch { /* 下一輪再試 */ }
+  } catch (e) { pollFailed('通知', e); }
   setTimeout(noticePollGlobal, 30000);
 }
 

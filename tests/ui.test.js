@@ -374,13 +374,13 @@ test('T6 ⑤：抽屜／流程頁／零碎：AI 執行／人工、停點、輸�
   assert.ok(src.includes(`id="cv-human" \${!isAI ? 'checked' : ''}>你來處理</label>`), '抽屜執行者（排版輪 L10：下拉 AI 執行／人工→勾選「你來處理」）');
   assert.ok(src.includes(`id="cv-stop" \${n.stop_point === 'always' ? 'checked' : ''}>完成後停點</label>`), '抽屜勾選「停點」（排版輪 L10：樣稿字「完成後停點」）');
   assert.equal(count(src, '<span class="lb">輸入來源：</span>'), 2, '抽屜「輸入來源」兩處（檢查中＋清單；排版輪 L10：overline 改一行灰字）');
-  assert.ok(src.includes('<h3>${title}</h3>') && src.includes("box('填寫這次的值'"), '流程頁本次資料標題（分頁結構歸 T10；調整輪：整頁 h3「這次的值」→任務卡展開區標題「填寫這次的值」，標題由 .focus-editor header 統一印）');
+  assert.ok(src.includes('<h3>${title}${hint(sub)}</h3>') && src.includes("box('填寫這次的值'"), '流程頁本次資料標題（分頁結構歸 T10；調整輪：整頁 h3「這次的值」→任務卡展開區標題「填寫這次的值」，標題由 .focus-editor header 統一印）');
   assert.equal(count(src, '<option value="">常用片段⋯</option>'), 3, '常用片段⋯：模板＋JS 重繪兩處');
   assert.ok(src.includes("window.alert('先在「常用片段⋯」裡選一個要刪的')"), 'alert 句跟著改名');
   assert.ok(src.includes('<i class="ph ph-star"></i>存為片段</span>'), '存常用→存為片段');
   assert.ok(src.includes('<span class="lb2">錯過時</span>') && src.includes('>自動補（不勾＝先詢問）</label>'), '新增排程視窗：列標題「錯過時」＋勾選字「自動補（不勾＝先詢問）」（同列不念兩次錯過）');
   assert.equal(count(src, '錯過的時候'), 0, '舊列標題「錯過的時候」清掉');
-  assert.ok(src.includes("setRow('錯過時', "), '設定→執行與排程 列標題「錯過時」');
+  assert.ok(src.includes('setRow(`錯過時${hint('), '設定→執行與排程 列標題「錯過時」（說明文案輪：說明搬進標題旁的問號）');
   assert.ok(src.includes('data-v="false">先詢問</span>') && src.includes('data-v="true">自動補</span>'), '設定 seg 先詢問／自動補');
   assert.ok(src.includes('記憶待整理 ${ex.total} 條'), '儀表板記憶列');
   assert.ok(src.includes("it.saving ? '記著⋯' : '儲存'"), '介紹頁 記住這三條→儲存');
@@ -474,7 +474,8 @@ test('T8 ②：新流程的預設——監工總開關與三勾搬到「權限�
   assert.equal(count(ai, '監工'), 0, 'AI 步驟不再有監工');
   assert.ok(ai.includes('模型檔位') && ai.includes('出錯自動重試'), 'AI 步驟留模型與重試');
   const stop = secOf(all, '停點');
-  assert.ok(stop.includes('在每個步驟的「停點」設定。'), '停點句');
+  // 說明文案輪：這一列沒有任何可操作的東西，作用是指路，所以話留在畫面上——但要講完整
+  assert.ok(stop.includes('哪幾步要停下來等你，在每個步驟自己的設定裡改，不在這一頁。'), '停點指路句');
 });
 
 test('T8 ③：關於你——頂部介紹三列各附「修改」、敏感四類改四個開關（health 開）、身分段收在 details；沒介紹過→灰字＋「介紹你自己」鈕', () => {
@@ -487,10 +488,14 @@ test('T8 ③：關於你——頂部介紹三列各附「修改」、敏感四�
   for (const t of ['你是誰、做什麼', '小公司負責人', '你做出來的東西通常給誰看', '給主管看', '你最受不了什麼', '受不了術語']) assert.ok(intro.includes(t), `介紹列缺「${t}」`);
   assert.equal(count(intro, '>修改</button>'), 3, '三列各一顆修改');
   assert.equal(count(intro, 'data-act="mem-card"'), 3, '修改＝開那張卡');
-  assert.equal(count(html, 'data-act="set-sens"'), 4, '敏感四個開關');
-  assert.ok(html.includes('data-act="set-sens" data-k="health" role="switch" aria-checked="true"'), 'health 開');
-  assert.ok(html.includes('data-act="set-sens" data-k="politics" role="switch" aria-checked="false"'), 'politics 關');
-  assert.equal(count(html, 'class="pill'), 0, '敏感類別不再是 pills');
+  // 說明文案輪（09-19 裁示：「記敏感資訊的可以合成一欄」）：四列各印一次同樣的小字→合成一列，說明只講一次
+  assert.equal(count(html, 'data-act="set-sens"'), 4, '四類還是四個可點項');
+  assert.equal(count(html, '記敏感資訊'), 1, '合成一列');
+  for (const t of ['記健康', '記政治', '記宗教', '記財務']) assert.ok(!html.includes(t), `「${t}」自成一列的寫法退場`);
+  assert.equal(count(html, '預設不記。打開＝只記你親口說的。'), 0, '重複四次的小字退場');
+  assert.ok(html.includes('class="pill on" data-act="set-sens" data-k="health" aria-pressed="true"'), 'health 開');
+  assert.ok(html.includes('class="pill" data-act="set-sens" data-k="politics" aria-pressed="false"'), 'politics 關');
+  assert.ok(/記敏感資訊<button type="button" class="hint"[^>]*data-hint="[^"]*預設都不記[^"]*"/.test(html), '說明收進問號，只出現一次');
   // 排版輪 L6（契約 K）：身分從「關於你」拆出成自己的分頁（原收在 details 裡）
   assert.equal(count(html, 'data-fold="identity"') + count(html, 'data-act="id-add"'), 0, '關於你不再帶身分段');
   const idTab = uiFn('setMemoryHtml', { ...ctx, state: { ...ctx.state, settings: { idEdit: null, tab: { 個人與記憶: '身分' } } } })({ cfg: { memory: {} }, cards, identities: [] });
@@ -617,11 +622,11 @@ const t10Stubs = { resumeHtml: () => '<div data-resume></div>', proposalsHtml: (
 test('T10 ③：本次資料分頁＝任務卡＋展開的身分／欄位值，開始鈕在右欄摘要卡、不含步驟清單；設計流程的清單模式不再有開跑表單、留欄位定義與記憶一行', () => {
   // 調整輪：開跑表單拆成主欄任務卡（展開＝身分＋欄位值）與右欄「開始這次執行」摘要卡，「開始」不再在 dataTabHtml 裡
   const data = uiFn('dataTabHtml', t10Ctx({}, t10Stubs))();
-  assert.ok(data.includes('<h3>填寫這次的值</h3>') && data.includes('id="mem-identity"') && data.includes('data-param="k1"'), '開跑表單三件（標題／身分／欄位值）');
+  assert.ok(data.includes('<h3>填寫這次的值<button type="button" class="hint"') && data.includes('id="mem-identity"') && data.includes('data-param="k1"'), '開跑表單三件（標題／身分／欄位值）');
   assert.ok(!data.includes('data-act="start"') && uiFn('dataAsideHtml', t10Ctx({}, t10Stubs))().includes('data-act="start"'), '開始鈕搬到右欄摘要卡');
   assert.ok(!data.includes('class="step') && !data.includes('執行需要的資料'), '不含步驟清單與欄位定義（排版輪 L8：欄位卡改名「執行需要的資料」）');
   const list = uiFn('listModeHtml', t10Ctx({}, t10Stubs))();
-  assert.ok(!list.includes('data-act="start"') && !list.includes('<h3>填寫這次的值</h3>') && !list.includes('data-param="k1"'), '清單模式不再有開跑表單');
+  assert.ok(!list.includes('data-act="start"') && !list.includes('<h3>填寫這次的值<button type="button" class="hint"') && !list.includes('data-param="k1"'), '清單模式不再有開跑表單');
   assert.ok(list.includes('執行需要的資料') && list.includes('data-req="k1"') && list.includes('data-flowmemline') && list.includes('data-step'), '欄位定義、記憶一行、步驟清單留著');
   assert.equal(uiFn('dataTabHtml', t10Ctx({}, { ...t10Stubs, subjectIsDraft: () => true }))(), '', '草稿沒有本次資料');
 });
@@ -1112,7 +1117,7 @@ test('U4b ⑤：本次資料——主欄任務卡（含續跑那張）＋展開�
   // 調整輪：主欄只剩任務卡與展開區；續跑卡的「接回去繼續／刪掉」改成展開「繼續上次執行」那張才看得到（resumeHtml 原樣沒動）
   const ctx = () => u4bCtx({}, { ...t10Stubs, subjectDef: () => u4bDef });
   const data = uiFn('dataTabHtml', ctx())();
-  assert.ok(data.includes('<h3>填寫這次的值</h3>') && data.includes('id="mem-identity"') && data.includes('data-param="r1"'), '標題／身分／欄位');
+  assert.ok(data.includes('<h3>填寫這次的值<button type="button" class="hint"') && data.includes('id="mem-identity"') && data.includes('data-param="r1"'), '標題／身分／欄位');
   assert.ok(data.includes('data-prep="resume"') && uiFn('dataTabHtml', u4bCtx({ dataCard: 'resume' }, { ...t10Stubs, subjectDef: () => u4bDef }))().includes('data-resume'), '續跑那張卡在、展開它就是原本的續跑卡');
   const aside = uiFn('dataAsideHtml', ctx())();
   assert.ok(aside.includes('只用於本次') && aside.includes('data-act="start"'), '開始與「只用於本次」在右欄');
@@ -1289,7 +1294,7 @@ test('U5 ③：usageModalHtml——usageOpen 才印 .modalback＋seg 按流程�
   assert.ok(src.includes("api('GET', `/api/calendar?month=${ymOf(new Date())}`).catch(() => null)"), 'loadDash 多抓 calendar（失敗＝null）');
   for (const a of ["act === 'dash-usage-open'", "act === 'dash-usage-close'", "act === 'dash-show-all'"]) assert.ok(src.includes(a), `事件 ${a}`);
   assert.ok(src.includes("if (e.key === 'Escape' && state.dash?.usageOpen) { state.dash.usageOpen = false; render(); return; }"), 'Esc 關用量浮窗');
-  assert.ok(src.includes('if (!typing && !state.preview && !state.dash?.usageOpen) render();'), '輪詢守門：浮窗開著不重繪');
+  assert.ok(src.includes('if (!isTyping() && !state.preview && !state.dash?.usageOpen) render();'), '輪詢守門：浮窗開著不重繪');
 });
 
 test('U5 ④：showAll——true 印全部 4 張＋「收起」；recent ≤ 3 沒有鈕', () => {
@@ -1634,7 +1639,7 @@ test('U6c ⑤：接線原文——schedulePoll 0 命中 runInspect；run-current
   // 還沒開始的步：左軌鈕照 demo 灰掉（disabled、title「還沒跑到」），done／目前這步不灰（U6c 覆核該修）；歷史視圖那條路（鍵盤導航仍可到）不炸、橫幅在、一句「還沒開始」、沒有產出格
   const { rail: r0, main: pend } = u6Cols(u6Html({ runInspect: 'n3' }, MD_STUB));
   assert.ok(/<button class="runstep[^"]*" data-act="run-inspect" data-node="n3" title="還沒跑到" disabled>/.test(r0), `pending 步鈕 disabled：${r0}`);
-  assert.ok(/<button class="runstep[^"]*" data-act="run-inspect" data-node="n1" title="收集">/.test(r0) && /data-node="n2" title="寫稿">/.test(r0), `done／目前這步不 disabled：${r0}`);
+  assert.ok(/<button class="runstep[^"]*" data-act="run-inspect" data-node="n1" title="收集">/.test(r0) && /data-node="n2" title="寫稿" data-waiting>/.test(r0), `done／目前這步不 disabled：${r0}`);
   assert.equal(count(r0, ' disabled'), 1, '只有未來步灰掉');
   assert.ok(pend.includes('data-act="run-current"') && pend.includes('data-steprow="n3"') && pend.includes('還沒開始') && !pend.includes('data-mdkey="hist:n3"'), `pending 步：${pend}`);
   const rDone = u6Cols(u6Html({ run: u6Run({ status: 'done', steps: { n1: { status: 'done', output: 'a' }, n2: { status: 'done', output: 'b' }, n3: { status: 'done', output: 'c' } } }) }, MD_STUB)).rail;
@@ -2197,7 +2202,7 @@ test('W1 ④：setDefaultsHtml 停點分頁——「拆之前先確認成品長�
   assert.ok(on.includes('拆之前先確認成品長相'), '開關列標題');
   assert.ok(on.includes('關掉＝一句話直接出草稿；等分類拆法偏好學會了再關比較保險。'), '契約 F 原句');
   assert.ok(/<span class="sw on" data-act="set-compose-sw" data-k="confirm_shape" role="switch" aria-checked="true">開<i><\/i><\/span>/.test(on), `開關開：${/<span class="sw[^>]*set-compose-sw[^<]*<i><\/i><\/span>/.exec(on)?.[0]}`);
-  assert.ok(on.includes('在每個步驟的「停點」設定。'), 'T8② 停點句續在');
+  assert.ok(on.includes('哪幾步要停下來等你，在每個步驟自己的設定裡改，不在這一頁。'), 'T8② 停點指路句續在');
   const missing = uiFn('setDefaultsHtml', t8DefCtx('停點'))({ cfg: { defaults: {} } });
   assert.ok(/<span class="sw on" data-act="set-compose-sw"[^>]*aria-checked="true">開/.test(missing), 'compose 缺→仍視為開（舊設定檔相容）');
   const off = uiFn('setDefaultsHtml', t8DefCtx('停點'))({ cfg: { defaults: {}, compose: { confirm_shape: false } } });
@@ -2900,7 +2905,9 @@ test('L6 ③：settingsHtml——page-head 設定；.setnav 五組兩行鈕（�
     ['個人與記憶', '個人與記憶', '偏好、身分與資訊範圍', true], ['Workflow 預設', 'Workflow 預設', '只影響新建的 Workflow', false], ['連線', '連線', 'AI 與行事曆快照', false],
     ['執行與排程', '執行與排程', '啟動、提醒與補跑', false], ['資料管理', '資料管理', '備份、垃圾桶與版本', false]]), `五組兩行：${nav}`);
   assert.equal(count(html, '素材庫'), 0, '素材庫組退場（驗收第 13 條）');
-  assert.ok(/<section class="setbody" data-group="個人與記憶"><h2>個人與記憶<\/h2>/.test(html), '右邊白卡 h2＝組名');
+  // 說明文案輪：白卡頂的 <p class="lead"> 整條退場，那句話收進 h2 旁的說明鈕
+  assert.ok(/<section class="setbody" data-group="個人與記憶"><h2>個人與記憶<button type="button" class="hint" aria-expanded="false" aria-label="說明" data-hint="[^"]+">\?<\/button><\/h2>/.test(html), `右邊白卡 h2＝組名＋說明鈕：${html.slice(html.indexOf('class="setbody"'), html.indexOf('class="setbody"') + 220)}`);
+  assert.equal(count(html, 'class="lead"'), 0, '白卡頂不再印說明段');
   const down = uiFn('settingsHtml', l6SetCtx({ claude: false, settings: { group: '連線', tab: {}, data: null, err: null } }))();
   assert.ok(/data-g="連線"[^>]*>連線<small class="warn">Claude 連不上<\/small>/.test(down), '連不上改第二行琥珀字');
   const ex = { summary: { paused: false, exceptions: { expired: [{}], dormant: [], replaced: [], changed: [{}] }, counts: { profile: 0, habit: 0 } }, trash: { wf: [], cards: [] }, cfg: {} };
@@ -3333,7 +3340,7 @@ test('L9 ①：已存 Workflow 聊天——表單卡 .panel.chatform（caption �
   assert.ok(busy.includes('在想了，等我一下⋯') && /<textarea id="chat-input"[^>]*disabled/.test(busy) && /data-act="send-chat"[^>]*disabled/.test(busy), 'busy：在想＋停用');
   const aside = uiFn('chatAsideHtml', { state: st })();
   assert.ok(aside.startsWith('<aside class="right chatside">') && count(aside, '<div class="panel') === 2, `右欄兩塊：${aside}`);
-  assert.ok(aside.indexOf('<h3>這次拆解會參考</h3>') < aside.indexOf('<h3>你保有最後決定</h3>') && aside.includes('先填好的答案都有依據。改掉不符合的地方，再按「照這樣拆」。'), '樣稿原句');
+  assert.ok(aside.indexOf('<h3>這次拆解會參考</h3>') < aside.indexOf('<h3>你保有最後決定') && aside.includes('先填好的答案都有依據。改掉不符合的地方，再按「照這樣拆」。'), '樣稿原句（說明文案輪：那句收進 h3 旁的說明鈕，字還在）');
   const rd = /function render\(\) \{[\s\S]*?\n\}\n/.exec(uiSrc())[0];
   assert.ok(rd.includes("state.mode === 'chat' ? chatAsideHtml()"), '聊天右欄（已存與草稿同一套）');
   assert.ok(cssRule('.chatform textarea')?.includes('min-height:110px'), `textarea：${cssRule('.chatform textarea')}`);
@@ -3560,7 +3567,7 @@ test('L11 ①（調整輪改寫）：dataTabHtml 在 .dataform——四張任務
   // 改成四張 .prep-card ＋內嵌 .focus-editor；「只用於本次／回設計／開始」搬到右欄摘要卡（見 L11 ④）。
   const h = uiFn('dataTabHtml', l11Ctx())();
   const order = ['<section class="dataform">', 'data-prep="resume"', 'data-prep="data"', 'data-prep="auto"', 'data-prep="execution"',
-    '<section class="focus-editor" data-focus="data">', '<h3>填寫這次的值</h3>', 'id="mem-identity"', 'data-param="r1"', 'data-upload-box="src"',
+    '<section class="focus-editor" data-focus="data">', '<h3>填寫這次的值<button type="button" class="hint"', 'id="mem-identity"', 'data-param="r1"', 'data-upload-box="src"',
     '<details class="formdetails"', 'data-param="o1"', 'id="run-note"', 'data-healthcard', '</section>'];
   order.reduce((prev, s) => { const i = h.indexOf(s, prev + 1); assert.ok(i > prev, `順序：${s}（${i} vs ${prev}）`); return i; }, -1);
   assert.equal(count(h, '<span class="chip wait req"'), 2, '必一＋原始資料兩個「必填」黃 chip');
@@ -3571,7 +3578,7 @@ test('L11 ①（調整輪改寫）：dataTabHtml 在 .dataform——四張任務
   assert.equal(uiFn('dataTabHtml', l11Ctx({}, { subjectIsDraft: () => true }))(), '', '草稿沒有本次資料');
   // 展開別張：會帶入／執行選項的內容進主欄，三個開關仍然可改（驗收第 3 條：原型畫成唯讀，照抄就是把能力做丟）
   const auto = uiFn('dataTabHtml', l11Ctx({ dataCard: 'auto' }))();
-  assert.ok(auto.includes('<h3>查看這次會帶入</h3>') && auto.includes('組織規範 1 份') && !auto.includes('id="mem-identity"'), auto.slice(0, 200));
+  assert.ok(auto.includes('<h3>查看這次會帶入<button type="button" class="hint"') && auto.includes('組織規範 1 份') && !auto.includes('id="mem-identity"'), auto.slice(0, 200));
   const exec = uiFn('dataTabHtml', l11Ctx({ dataCard: 'execution' }))();
   for (const s of ['id="perm-files"', 'id="check-delivery"', 'id="supervisor-row"', 'data-act="perm-files-toggle"', 'data-act="check-toggle"', 'data-act="facts-toggle"', 'data-act="supervisor-toggle"']) assert.ok(exec.includes(s), `三開關可編輯：${s}`);
   assert.equal(uiFn('dataTabHtml', l11Ctx({ dataCard: null }))().indexOf('focus-editor'), -1, 'null＝全收起');
@@ -3641,7 +3648,7 @@ test('L11 ④（調整輪改寫）：右欄＝一張「開始這次執行」摘�
   assert.ok(uiFn('dataAsideHtml', l11Ctx({ health: { err: 'x' } }))().includes('<strong>讀不到</strong>'));
   // 兩塊靜態面板的真數字改在主欄任務卡「查看這次會帶入」／「確認執行選項」
   const d = uiFn('dataTabHtml', l11Ctx({ dataCard: 'auto' }))();
-  for (const w of ['<h3>查看這次會帶入</h3>', '組織規範 1 份', '分類規範 0 份', 'Workflow 參考檔 4 份', '開始時會鎖定這次的值與 Workflow 版本，跑到一半改設計不影響這一趟。']) assert.ok(d.includes(w), w);
+  for (const w of ['<h3>查看這次會帶入<button type="button" class="hint"', '組織規範 1 份', '分類規範 0 份', 'Workflow 參考檔 4 份', '開始時會鎖定這次的值與 Workflow 版本，跑到一半改設計不影響這一趟。']) assert.ok(d.includes(w), w);
   assert.ok(uiFn('dataTabHtml', l11Ctx())().includes('產出檔案 關閉・交貨查核 開啟・監工 開啟'), '執行選項卡上一句現況');
   const on = uiFn('dataTabHtml', l11Ctx({}, { subjectDef: () => ({ ...l11Def, permissions: { files: true }, check: { enabled: false }, supervisor: { enabled: false } }) }))();
   assert.ok(on.includes('產出檔案 開啟・交貨查核 關閉・監工 關閉'), on.slice(on.indexOf('產出檔案') - 40, on.indexOf('產出檔案') + 60));
@@ -3696,7 +3703,7 @@ test('L11 ⑤：本次上傳——上傳框四態；選檔→POST run-uploads→
 
 test('L11 ⑥⑦：本次補充 #run-note data-keep、值讀 state.runNote、2,000 字上限、打字寫回；startCheckHtml 原文一字不動', () => {
   const h = uiFn('dataTabHtml', l11Ctx({ runNote: '留意<新品>' }))();
-  assert.ok(h.includes('<label class="label" for="run-note">本次補充</label>') && h.includes('<textarea id="run-note" class="runnote" data-keep maxlength="2000" placeholder="'), h.slice(h.indexOf('run-note') - 60, h.indexOf('run-note') + 200));
+  assert.ok(h.includes('<label class="label" for="run-note">本次補充<button type="button" class="hint"') && h.includes('<textarea id="run-note" class="runnote" data-keep maxlength="2000" placeholder="'), h.slice(h.indexOf('run-note') - 60, h.indexOf('run-note') + 200));
   assert.ok(h.includes('>留意<新品></textarea>') && h.includes('每個 AI 步驟都看得到'), '值讀 state.runNote（測試 esc 為原樣）＋說明');
   const inp = uiSrc().slice(uiSrc().indexOf("app.addEventListener('input'"), uiSrc().indexOf("t.id === 'cal-pick-year'"));
   assert.ok(inp.includes("if (t.id === 'run-note') state.runNote = t.value;"), '打字寫回');
@@ -3709,7 +3716,8 @@ test('L11 ⑥⑦：本次補充 #run-note data-keep、值讀 state.runNote、2,0
 // ---------- 大跑輪：本次附件（原型 .upload-box「本次附件」）＝檔案版的本次補充，接在本次補充下方 ----------
 test('大跑輪 UI ①：本次附件框在「本次補充」下方、沿用既有 uploadBoxHtml（不新造元件）、保留鍵 __run__、沒有必填 chip；選檔／移除走既有 run-upload 分支；開始時 body 帶 uploads.__run__', () => {
   const h = uiFn('dataTabHtml', l11Ctx({ runNote: '留意新品' }))();
-  ['id="run-note"', '這一趟每個 AI 步驟都看得到這段話。', '<label class="label">本次附件</label>', 'data-upload-box="__run__"', 'data-healthcard']
+  // 說明文案輪：那句從 textarea 下方收進「本次補充」label 旁的說明鈕，所以排到 run-note 前面
+  ['這一趟每個 AI 步驟都看得到這段話。', 'id="run-note"', '<label class="label">本次附件</label>', 'data-upload-box="__run__"', 'data-healthcard']
     .reduce((prev, s) => { const i = h.indexOf(s, prev + 1); assert.ok(i > prev, `順序：${s}（${i} vs ${prev}）`); return i; }, -1);
   // 同一顆元件：本次附件框的 html＝uploadBoxHtml 出來的那串，一字不差
   const box = uiFn('uploadBoxHtml', l11Ctx())({ key: '__run__', label: '本次附件' }, '這一趟每個 AI 步驟都看得到這個檔；只給這一趟用，下次不留。');
@@ -5238,7 +5246,7 @@ test('組織 ⑥：設定→資料管理的組織清單——每列「名字（N
   assert.ok(rows[0].startsWith(' now" data-org="main"') && rows[0].includes('<b>明遠設計</b>') && rows[0].includes('<span class="syn">3 條 Workflow</span>'), `目前那列：${rows[0].slice(0, 200)}`);
   assert.ok(rows[0].includes('<span class="chip">目前</span>') && !rows[0].includes('data-act="org-go"'), '目前那個標 chip、沒有切換鈕');
   assert.ok(rows[1].includes('<b>青石</b>') && rows[1].includes('1 條 Workflow') && rows[1].includes('data-act="org-go" data-id="org-b"'), `別的那列有切換鈕：${rows[1].slice(0, 200)}`);
-  assert.ok(html.includes('要改別的，先切過去再改'), '改名只有目前組織能就地改，別的先切過去');
+  assert.ok(html.includes('要改別的，先切過去'), '改名只有目前組織能就地改，別的先切過去');
   assert.equal(orgMgr({ orgs: [], orgId: '' }), '', '清單讀不到＝整段不印（設定頁其他格照舊）');
 });
 
@@ -5347,4 +5355,153 @@ test('時間未定（time_pending）：中欄要有可以操作的卡，不然�
   // 沒有 time_note 時要自己講得出一句話，不能空著
   const bare = timeCardHtml({ id: 'n2', title: '寄出確認信' }, { status: 'time_pending' });
   assert.ok(bare.includes('寄出確認信') && bare.includes('要幾號幾點繼續'), bare);
+});
+
+// ---------- 說明文案輪（09-19 三案草稿選 C，理由「簡潔是最重要的」）：說明收進問號 ----------
+// 病根：說明小字是開發當下「補一句解釋」寫出來的——同一句印很多次、或只是把標題換句話說。
+// 方案 C＝畫面上不印說明，收進標題旁一顆鈕，滑過就出現、點一下釘住。
+
+test('C1：hint()——沒說明就不出鈕；說明進 data-hint 且要跳脫', () => {
+  // uiCtx 基底的 esc 是不跳脫的 stub，要驗跳脫就得把 app.js 真的那顆挖出來（同 L3 ③ 的作法）
+  const realEsc = vm.runInNewContext(/^const esc = (.*);$/m.exec(uiSrc())[1]);
+  const hint = uiFn('hint', { esc: realEsc });
+  assert.equal(hint(''), '', '沒說明＝不出鈕，免得畫面長出一排空問號');
+  assert.equal(hint(null), '', '同上（undefined／null 都算沒有）');
+  const h = hint('關掉＝每一步都不帶，卡片留著。');
+  assert.ok(h.startsWith('<button type="button" class="hint" aria-expanded="false" aria-label="說明"'), `語意按鈕、報得出開合狀態：${h}`);
+  assert.ok(h.includes('data-hint="關掉＝每一步都不帶，卡片留著。"') && h.endsWith('>?</button>'), `說明收在屬性裡：${h}`);
+  assert.ok(hint('<img src=x onerror=alert(1)>').includes('&lt;img') && !hint('<img src=x>').includes('<img'), `說明文字要跳脫，不能被當標籤吃掉。實際：${hint('<img src=x>')}`);
+  assert.ok(hint('靠右那顆', true).includes('class="hint r"'), 'r＝氣泡改靠右對齊，給貼在右邊緣的用');
+});
+
+test('C2：說明鈕樣式——滑過與釘住兩路都出現，氣泡不靠 JS 畫', () => {
+  const base = cssRule('.hint');
+  assert.ok(base && base.includes('width:15px') && base.includes('border-radius:50%'), `.hint 本體：${base}`);
+  assert.ok(base.includes('cursor:pointer'), '是可點的，不是只能滑過——沒有滑鼠的裝置也要開得了');
+  const bubble = cssRule('.hint::after');
+  assert.ok(bubble && bubble.includes('content:attr(data-hint)'), `氣泡直接讀屬性，不用 JS 產：${bubble}`);
+  assert.ok(bubble.includes('visibility:hidden') && bubble.includes('opacity:0'), '預設收著');
+  const css = cssSrc();
+  assert.ok(css.includes('.hint:hover::after,.hint[aria-expanded="true"]::after{opacity:1;visibility:visible}'), '滑過與釘住兩路都會出現');
+  assert.ok(css.includes('.hint:focus-visible'), '鍵盤走到要看得出來（L031 無障礙同向）');
+  assert.ok(css.includes('.hint.r::after'), '貼邊那顆有靠右變體，免得氣泡被視窗切掉');
+});
+
+test('C3：說明鈕就地開合——不進 state、不重繪，點別處與 Esc 都關得掉', () => {
+  const src = uiSrc();
+  const seg = src.slice(src.indexOf("app.addEventListener('click'"), src.indexOf("const pv = e.target.closest('.pchip.pv')"));
+  assert.ok(seg.includes("e.target.closest('.hint')"), '點擊委派最前面先認說明鈕');
+  assert.ok(seg.includes("document.querySelectorAll('.hint[aria-expanded=\"true\"]')"), '點任何地方都先把釘住的關掉');
+  assert.ok(seg.includes("setAttribute('aria-expanded'"), '開合＝就地改屬性');
+  assert.equal(count(seg, 'render()'), 0, '不重繪——重繪會搶輸入焦點（列管 L015），也拖慢');
+  assert.equal(count(seg, 'state.'), 0, '不進 state——開合是看的人的事，不是資料');
+  assert.ok(/if \(e\.key === 'Escape'\) \{\s*const open = document\.querySelector\('\.hint\[aria-expanded="true"\]'\)/.test(src), 'Esc 關掉釘住的那顆');
+});
+
+test('C4：個人與記憶整頁——畫面上零說明小字，說明全在問號裡', () => {
+  const at = '2026-09-01T00:00:00.000Z';
+  const card = (id, layer, text, kind) => ({ id, bucket: 'profile', status: 'active', layer, text, scope: { level: 'all' }, source: { kind }, created_at: at });
+  const ctx = { state: { settings: { idEdit: null, tab: {} }, categories: ['旅遊'] } };
+  const html = uiFn('setKnowHtml', ctx)({ cfg: { memory: { sensitive: { health: true } } }, cards: [card('i1', 'content', '小公司負責人', 'intro'), card('p1', 'expression', '不要恭維', 'chat')], identities: [] });
+  assert.equal(count(html, 'class="sub"'), 0, '這頁不再有說明小字');
+  // 介紹三題的 .d 放的是你答過的內容（不是說明），所以只看介紹段之後
+  const afterIntro = html.slice(html.indexOf('<div class="group">'));
+  assert.equal(count(afterIntro, '<div class="d">'), 0, '開關列的說明欄也空了');
+  assert.ok(count(html, 'class="hint"') >= 5, `說明改掛在問號上：${count(html, 'class="hint"')} 顆`);
+  for (const dead of ['三題各是一張認識卡', '每步帶的每一步都帶', '預設不記。打開＝只記你親口說的。', '不含身分限縮；綁了身分的分類實際附的會更少']) {
+    assert.ok(!html.includes(dead), `舊小字「${dead.slice(0, 12)}…」該從畫面上退場`);
+  }
+  // 退場不等於丟掉：這些話要在問號裡找得到
+  for (const kept of ['每題存成一張卡', '卡片留著', '預設都不記', '語氣、長度、格式、禁忌', '綁了身分的分類']) {
+    assert.ok(html.includes(kept), `說明「${kept}」該收進問號，不是刪掉`);
+  }
+});
+
+test('C5：設定五組的開場白都收進標題旁，畫面不再有整段引言', () => {
+  const src = uiSrc();
+  assert.ok(src.includes('<h2>${esc(s.group)}${hint(SET_LEAD[s.group] ?? \'\')}</h2>'), '引言收進 h2 旁的說明鈕');
+  assert.equal(count(src, '<p class="lead">'), 0, '白卡頂的引言段整條退場');
+  assert.ok(!src.includes('它記得你的，都在這裡'), '「把標題換句話說＋在跟人聊天」那句退場');
+  assert.ok(src.includes('這裡的每一張卡，都會跟著每一次執行送給 AI。'), '換成講「這頁的東西會怎樣」');
+});
+
+test('C6：設定五組——畫面上留下的 .d 只准是值或即時狀態，說明一律在問號裡', () => {
+  const src = uiSrc();
+  // 動工前設定頁有 24 條 setRow 說明印在畫面上；現在只剩「值／狀態／指路」三種該留的
+  const rows = [...src.matchAll(/setRow\(\s*(?:`[^`]*`|'[^']*')\s*,\s*(`[^`]*`|'[^']*')/g)]
+    .map((m) => m[1].slice(1, -1))
+    .filter((d) => /[\u4e00-\u9fff]/.test(d));
+  const keep = [
+    '單檔 4,000 字・每層合計 8,000 字',                                    // 值
+    '哪幾步要停下來等你，在每個步驟自己的設定裡改，不在這一頁。',            // 指路（這一列沒有可操作的東西）
+    '上面那格改的是你現在待著的這個組織；要改別的，先切過去。',              // 指路
+  ];
+  for (const d of rows) {
+    const ok = keep.includes(d) || d.includes('${') || d.startsWith('<');   // 變數＝即時狀態或值，標籤＝路徑之類的內容
+    assert.ok(ok, `這條說明還印在畫面上，該收進問號：「${d.slice(0, 40)}」`);
+  }
+  // 收進去的那些要真的還在（搬家不是刪掉）
+  for (const kept of ['別人 Workflow 裡藏的指示不可信', '攔到會自動重做一次', '金鑰放作業系統的認證管理員', '30 天內可逐張復原', '整個資料夾複製一份']) {
+    assert.ok(src.includes(kept), `說明「${kept}」該在 hint 裡找得到`);
+  }
+  assert.ok(!src.includes('只影響之後新建的 Workflow；已經存好的 Workflow 不變'), 'Workflow 預設頁那行跟 h2 旁的說明重複，該只留一份');
+  assert.ok(src.includes("const setLater = (l, dsc) => setRow(`${l}${hint(dsc)}`"), '「下一輪」佔位列的說明也收進問號');
+});
+
+// ---------- 執行頁調整輪（09-19 裁定：先做執行頁，技術帳直接修）：列管六條 ----------
+
+test('E1（L029）：isTyping 一顆共用的——認 SELECT 與可編輯區塊，不再四處各抄一份只認 INPUT／TEXTAREA', () => {
+  const src = uiSrc();
+  const fn = /const isTyping = \(\) => \{[\s\S]*?\n\};/.exec(src)?.[0] ?? '';
+  assert.ok(fn, 'isTyping 抽成頂層共用函式');
+  assert.ok(fn.includes("el.tagName === 'SELECT'"), '下拉展開中重繪會把選單關掉，聚焦就算在操作');
+  assert.ok(fn.includes('el.isContentEditable'), '可編輯區塊也算');
+  assert.ok(fn.includes("['INPUT', 'TEXTAREA'].includes(el.tagName) && !!el.value"), '輸入框維持「有值才算」');
+  assert.equal(count(src, "['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName)"), 0, '四處各抄一份的舊寫法全退場');
+  assert.ok(count(src, 'isTyping()') >= 4, `四路輪詢都改用它：${count(src, 'isTyping()')} 處`);
+});
+
+test('E2（L020）：執行頁輪詢——跑步中打字不被每秒重繪打斷，手停了下一輪補畫', () => {
+  const src = uiSrc();
+  const fn = src.slice(src.indexOf('function schedulePoll'), src.indexOf('async function refreshRun'));
+  assert.ok(fn.includes('if (changed || state.pollDirty)'), '這一輪沒畫的下一輪要記得畫');
+  assert.ok(fn.includes('if (isTyping()) state.pollDirty = true;'), '打字中只記帳');
+  assert.ok(fn.includes('else { state.pollDirty = false; render(); }'), '手停了才畫，並清掉帳');
+  assert.equal(count(fn, 'if (changed) render();'), 0, '舊的無條件重繪退場');
+});
+
+test('E3（L034）：五處輪詢的 catch 不再整段靜音，失敗看得到是哪一路', () => {
+  const src = uiSrc();
+  assert.ok(/const pollFailed = \(where, e\) => console\.error\(/.test(src), 'pollFailed 一顆共用的');
+  assert.equal(count(src, 'catch { /* 下一輪再試 */ }') + count(src, 'catch { /* 靜候下次 */ }'), 0, '靜音 catch 全退場');
+  for (const where of ['儀表板', '行事曆', 'Workflow 提議', '執行狀態', '通知']) {
+    assert.ok(src.includes(`pollFailed('${where}'`), `${where} 這一路有留話`);
+  }
+});
+
+test('E4（L011）：狀態轉 waiting_time 之後中欄要有卡，講清楚排到幾點', () => {
+  const card = uiFn('waitingTimeCardHtml', { esc: (x) => String(x ?? '') });
+  const h = card({ id: 'n2', title: '寄週報' }, { status: 'waiting_time', wake_at: '2026-09-22T09:00:00+08:00' });
+  assert.ok(h.includes('已排到') && /9\/22|9月22|22/.test(h), `排到幾點要印出來：${h}`);
+  assert.ok(h.includes('到點自動往下跑'), '講清楚不用守著');
+  // wake_at 壞掉或沒有時不能印「已排到 Invalid Date」
+  const bare = card({ id: 'n2', title: '寄週報' }, { status: 'waiting_time' });
+  assert.ok(bare.includes('已排好時間') && !bare.includes('Invalid'), `沒有 wake_at 也要講得出一句話：${bare}`);
+  assert.ok(uiSrc().includes("case 'waiting_time': return waitingTimeCardHtml(node, step);"), '接進中欄分派');
+});
+
+test('E5（L021）：舊趟沒有卷宗時，「當時指示」點下去要說得出是哪一種讀不到', () => {
+  const src = uiSrc();
+  const seg = src.slice(src.indexOf("act === 'run-prompt'"), src.indexOf("act === 'run-prompt'") + 1200);
+  assert.ok(seg.includes('這一步還沒送出過工作單') && seg.includes('上線前跑的'), '兩種情況都講到');
+  assert.equal(count(seg, "text = '讀不到這一步的指示——這步可能還沒送出過工作單'"), 0, '舊的單一說法退場');
+});
+
+test('E6（L025）：並行兩支同時等你——左軌兩顆都標得出來，不是只有第一支', () => {
+  const src = uiSrc();
+  const fn = src.slice(src.indexOf('function progressRailHtml'), src.indexOf('function progressRailHtml') + 1600);
+  assert.ok(fn.includes("const waiting = String(step.status).startsWith('waiting') || step.status === 'time_pending';"), '每顆自己看自己的狀態');
+  assert.ok(fn.includes("${waiting ? ' data-waiting' : ''}"), '等你的標起來');
+  assert.ok(fn.includes("${node.id === activeId ? ' active' : ''}"), 'active 照舊只有一顆——「現在看哪一步」跟「哪幾步在等你」是兩件事');
+  assert.ok(cssSrc().includes('.runstep[data-waiting]{box-shadow:inset 3px 0 var(--amber)}'), '琥珀色邊條');
 });

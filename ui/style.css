@@ -58,6 +58,23 @@ main{padding:0}
 .seg span.on{background:#fff;color:var(--accent-text);box-shadow:var(--e1)}
 .overline{font-size:10px;font-weight:800;letter-spacing:.07em;color:#526aa0;text-transform:uppercase} /* 拆法輪 P5：抽屜標籤色照 DEMO .inspector .label */
 .sub{font-size:12px;color:var(--ink-500);margin-bottom:var(--s4)}
+/* 說明文案輪（09-19 選 C，理由「簡潔是最重要的」）：說明收進問號——畫面上不印說明小字，
+   標題／欄位名旁一顆說明鈕，滑過就出現、點一下釘住（沒有滑鼠的裝置也開得了）。
+   開合就地改 aria-expanded，不進 state 也不重繪（重繪會搶輸入焦點，見列管 L015）。 */
+.hint{display:inline-flex;align-items:center;justify-content:center;position:relative;flex:0 0 auto;
+  width:15px;height:15px;padding:0;margin:0 0 0 2px;vertical-align:middle;
+  border:.5px solid var(--hairline);border-radius:50%;background:var(--fill-inner);
+  color:var(--ink-400);font:700 10px/1 var(--font);letter-spacing:0;cursor:pointer}
+.hint:hover,.hint[aria-expanded="true"]{border-color:var(--accent);color:var(--accent-text);background:var(--accent-soft)}
+.hint:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.hint::after{content:attr(data-hint);position:absolute;left:50%;top:calc(100% + 7px);transform:translateX(-50%);
+  width:max-content;min-width:170px;max-width:290px;padding:8px 10px;border-radius:8px;z-index:60;
+  background:var(--ink-900);color:#fff;font:400 11.5px/1.55 var(--font);letter-spacing:0;text-align:left;
+  white-space:normal;box-shadow:var(--e3);opacity:0;visibility:hidden;transition:opacity .12s}
+.hint:hover::after,.hint[aria-expanded="true"]::after{opacity:1;visibility:visible}
+/* 貼右邊緣的那幾顆（欄位名在右欄時）用 .hint.r，氣泡改靠右對齊免得被視窗切掉 */
+.hint.r::after{left:auto;right:-6px;transform:none}
+@media(max-width:720px){.hint::after{max-width:min(290px,72vw)}}
 .note{font-size:12px;color:var(--ink-500);margin:10px 0 0}
 .card{background:var(--m3-bg);backdrop-filter:var(--m3-f);-webkit-backdrop-filter:var(--m3-f);
   border:.5px solid var(--hairline);border-radius:13px;box-shadow:var(--e2);padding:var(--s4)}
@@ -507,6 +524,10 @@ svg.wire .ghost{fill:none;stroke:var(--accent);stroke-width:2.2}
 .item.warn::before{background:var(--amber)}
 .item.prop::before{background:var(--amber)}
 .item .acts{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+/* 列管 L025：左軌「等你」的標示——並行兩支同時等你時兩顆都要看得出來，
+   不是只有 currentNodeOf 挑中的那一支。active 是「現在看哪一步」，兩件事分開標。 */
+.runstep[data-waiting]{box-shadow:inset 3px 0 var(--amber)}
+.runstep[data-waiting].active{box-shadow:inset 3px 0 var(--amber),var(--e1)}
 .railempty{color:var(--ink-400);font-size:12px;text-align:center;padding:14px 6px}
 .donefold>summary{font-size:11.5px;color:var(--ink-400);padding:5px 2px 0;display:flex;align-items:center;gap:5px;cursor:pointer;list-style:none}
 .donefold>summary::-webkit-details-marker{display:none}
@@ -775,7 +796,7 @@ details.artifact summary .filechip{margin-left:4px}
 .sw.on i{background:var(--accent)}
 .sw.on i::after{left:14px}
 .pills{display:flex;gap:5px;flex-wrap:wrap}
-.pill{display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:100px;border:.5px solid var(--hairline);background:#fff;font-size:11.5px;font-weight:500;color:var(--ink-700);cursor:pointer;user-select:none}
+.pill{display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:100px;border:.5px solid var(--hairline);background:#fff;font-family:inherit;line-height:1.65;font-size:11.5px;font-weight:500;color:var(--ink-700);cursor:pointer;user-select:none}
 .pill.on{background:rgb(var(--accent-rgb) / .10);border-color:rgb(var(--accent-rgb) / .35);color:var(--accent-text);font-weight:600}
 .mini{font:600 11px/1 var(--font);padding:4px 9px;border-radius:100px;border:.5px solid var(--hairline);background:#fff;color:var(--ink-700);cursor:pointer;white-space:nowrap}
 .mini:hover{box-shadow:var(--e1)}

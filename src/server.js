@@ -204,17 +204,48 @@ export function freeOrgId(root, taken = [], gen = newOrgId) {
   throw new Error('抽不出新的組織代號，請稍後再試一次');
 }
 
+// 這支是公開庫，別人會 clone 回自己的機器上跑，所以兩道最低防線要有（列管 L010／L033）：
+// 上限——本來完全沒有，對方送一個永遠不結束的 body 進來就會一直吃記憶體直到整支掛掉。
+// 16MB 是照「本次附件」的 10MB 上限回推的：base64 之後約 13.4MB，再留一點給 JSON 的外框。
+const BODY_LIMIT_BYTES = 16 * 1024 * 1024;
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
+    // 型別——瀏覽器跨站送 application/json 會先打一次 preflight（被 CORS 擋掉），
+    // 但 text/plain 這種「簡單請求」不會。不檢查的話，Origin 那道防線等於多一條繞道。
+    // 沒帶 content-type 的放行：CLI 與測試不一定帶，而它們本來就不經過瀏覽器。
+    const ct = String(req.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase();
+    if (ct && ct !== 'application/json') {
+      const e = new Error(`請求內容要是 application/json，收到的是 ${ct}`);
+      e.status = 415;
+      reject(e);
+      return;
+    }
     let data = '';
+    let bytes = 0;
+    let done = false;
     // 先定編碼：不設就是每塊各自解碼，跨塊的中文會被切成兩個 U+FFFD，而 JSON.parse 照樣成功——
     // 亂碼會無聲無息存進 workflow.yaml（長指示／長對話史的 body 超過 64KB 就會踩到，2026-09-18 審查實測）
     req.setEncoding('utf8');
-    req.on('data', (c) => { data += c; });
+    req.on('data', (c) => {
+      if (done) return;
+      bytes += Buffer.byteLength(c, 'utf8');
+      if (bytes > BODY_LIMIT_BYTES) {
+        done = true;
+        const e = new Error(`請求內容太大（上限 ${Math.round(BODY_LIMIT_BYTES / 1024 / 1024)}MB）`);
+        e.status = 413;
+        reject(e);
+        req.resume();  // 剩下的直接丟掉不再累積；不能 destroy——連線斷了對方就收不到那句 413
+        return;
+      }
+      data += c;
+    });
     req.on('end', () => {
+      if (done) return;
+      done = true;
       try { resolve(data ? JSON.parse(data) : {}); } catch { reject(new Error('請求內容不是合法 JSON')); }
     });
-    req.on('error', reject);
+    req.on('error', (e) => { if (!done) { done = true; reject(e); } });
   });
 }
 
@@ -1489,6 +1520,7 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
         return json(status, { error: e.message });
       }
       if (e instanceof ComposeError || e instanceof PorterError) return json(400, { error: e.message });
+      if (e && Number.isInteger(e.status)) return json(e.status, { error: e.message }); // readBody 的 413／415
       // 排版輪 L13 附帶：系統層讀寫例外（帶 syscall／path）的原文含伺服器絕對路徑——記 log，回人話
       if (e && (e.syscall || e.path)) {
         console.error('[bojian] 讀寫檔案出錯：', e.message);

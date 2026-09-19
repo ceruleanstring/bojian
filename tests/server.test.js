@@ -3807,3 +3807,55 @@ test('xlsx 預覽：中間的空白格不會讓後面的數字往左位移', asy
   assert.ok(rows[0].includes('<td></td>'), '空白格要留一個空的 td');
   assert.ok(rows[1].includes('<td>1200</td></tr>'), '金額要留在第三欄，不能被擠到「黑」的位置');
 });
+
+// ---------- 安全兩條（09-19 裁定：技術帳直接修；列管 L010／L033）----------
+// 這支是公開庫，別人會 clone 回自己的機器上跑，最低防線要有。
+
+test('安全 ①（L010）：請求內容超過上限就擋下，不是一直吃記憶體', async () => {
+  const { app, base } = await startApp();
+  try {
+    const res = await fetch(`${base}/api/settings`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ company_name: 'x'.repeat(17 * 1024 * 1024) }),
+    });
+    assert.equal(res.status, 413, '超過 16MB 回 413');
+    assert.match((await res.json()).error, /太大/, '訊息講人話');
+  } finally { await app.stop(); }
+});
+
+test('安全 ②（L033）：帶了 content-type 就必須是 JSON；沒帶的放行（CLI 與測試不經過瀏覽器）', async () => {
+  const { app, base } = await startApp();
+  try {
+    const bad = await fetch(`${base}/api/settings`, {
+      method: 'PUT',
+      headers: { 'content-type': 'text/plain' },   // 瀏覽器的「簡單請求」用這個繞過 preflight
+      body: JSON.stringify({ company_name: '繞道' }),
+    });
+    assert.equal(bad.status, 415, 'text/plain 擋下');
+    // fetch 一定會自己補一個 content-type（沒設就是 text/plain），所以「完全不帶」要用原生 http 才送得出來——
+    // 那正是 CLI／curl 的樣子，它們不經過瀏覽器，也就沒有跨站那回事。
+    const none = await new Promise((resolve) => {
+      const u = new URL(`${base}/api/settings`);
+      const r = http.request({ hostname: u.hostname, port: u.port, path: u.pathname, method: 'PUT' }, (res) => {
+        res.resume();
+        res.on('end', () => resolve(res.statusCode));
+      });
+      r.end(JSON.stringify({ company_name: '沒帶型別' }));
+    });
+    assert.equal(none, 200, '沒帶 content-type 照舊放行');
+    assert.equal((await api(base, 'GET', '/api/settings')).json.company_name, '沒帶型別', '真的寫進去了');
+  } finally { await app.stop(); }
+});
+
+test('安全 ③：上限是照「本次附件」的 10MB 回推的——正常大小的附件不能被自己的防線擋掉', async () => {
+  const { app, base } = await startApp();
+  try {
+    const made = await api(base, 'POST', '/api/workflows', { category: '測試', def: { format: 1, name: '附件測試', params: [], nodes: [{ id: 'n1', title: '一', executor: 'ai', stop_point: 'never', instruction: '做', next: [] }] } });
+    assert.equal(made.status, 200, `先建得起來才測得到附件：${JSON.stringify(made.json).slice(0, 160)}`);
+    const wf = made.json;
+    const content = Buffer.alloc(9 * 1024 * 1024, 0x41).toString('base64'); // 9MB 的檔，base64 後約 12MB
+    const res = await api(base, 'POST', `/api/workflows/${encodeURIComponent(wf.category)}/${encodeURIComponent(wf.id)}/run-uploads`, { name: '大檔.txt', content_b64: content });
+    assert.equal(res.status, 200, `9MB 的附件要進得來（base64 後約 12MB，上限 16MB）：${JSON.stringify(res.json).slice(0, 120)}`);
+  } finally { await app.stop(); }
+});
