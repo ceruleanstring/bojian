@@ -156,7 +156,7 @@ test('D20：節點層 remind_leads——九檔與 {at} 合法、壞值擋下', (
   assert.throws(() => validateWorkflow(bad), (e) => e.message.includes('remind_leads'));
 });
 
-// 調色盤（畫布回饋輪二）：剛放上畫布、線還沒拉滿的並行／分岔點，編輯中可存；開跑嚴格仍擋
+// 調色盤（二）：剛放上畫布、線還沒拉滿的並行／分岔點，編輯中可存；開跑嚴格仍擋
 test('編輯中（allowFloating）：空並行點與單路分岔放行；嚴格模式照擋', () => {
   const task = (id, next) => ({ id, title: id, executor: 'ai', stop_point: 'never', instruction: '做', next });
   const wip = {
@@ -173,7 +173,7 @@ test('編輯中（allowFloating）：空並行點與單路分岔放行；嚴格�
   assert.throws(() => validateWorkflow(wip2), (e) => e.message.includes('至少要兩支'), '嚴格模式擋空並行點');
 });
 
-// 畫布回饋輪：fork/join 退場——一般節點多出線＝並行、多入線＝會合，不再需要結構節點
+// fork/join 退場——一般節點多出線＝並行、多入線＝會合，不再需要結構節點
 test('直連並行／會合：task 多個 next 合法；分岔可超過兩條路', () => {
   const task = (id, next) => ({ id, title: id, executor: 'ai', stop_point: 'never', instruction: '做', next });
   const direct = {
@@ -211,7 +211,7 @@ test('健檢 P2-04：多起點會合＝合法；孤島步驟仍算斷鏈；別�
   assert.throws(() => validateWorkflow(cycle), (e) => e.message.includes('繞圈'), '圈不在第一顆可達範圍也要抓到');
 });
 
-// —— 監工輪：流程層監工開關、數字對原始資料子開關、步驟三個勾、保留 id ——
+// —— 流程層監工開關、數字對原始資料子開關、步驟三個勾、保留 id ——
 
 const soloDef = (extra = {}, node = {}) => ({
   format: 1,
@@ -264,7 +264,7 @@ test('預設補值 save：補監工與查核，但永遠不碰數字對原始資
   assert.deepEqual(applyDefaults(soloDef(), { mode: 'save' }).check, { enabled: true });
 });
 
-// —— 記憶輪 M1b：params[].kind 六類、頂層 category 型別、applyDefaults 第三參數 defaults、全域設定逐欄驗證 ——
+// —— params[].kind 六類、頂層 category 型別、applyDefaults 第三參數 defaults、全域設定逐欄驗證 ——
 
 test('記憶輪：params[].kind 只准六類；頂層 category 只驗型別（存檔時由 server 剝掉）', () => {
   validateWorkflow(soloDef({ params: [{ key: 'a', label: 'A', default: '', kind: 'time' }] })); // 不丟例外即通過
@@ -346,7 +346,7 @@ test('B4 契約 F：validateSettings 驗 compose.confirm_shape 布林（人話�
   assert.deepEqual(validateSettings({ ...DEFAULT_SETTINGS, compose: 'x' }), ['設定的拆解格式不對']);
 });
 
-// ---- 移植合併輪 U1a：attachments 收 {scope, name}、設定收 company_name ----
+// ---- attachments 收 {scope, name}、設定收 company_name ----
 test('U1a ⑤：attachments 元素＝檔名字串或 {scope: company|category, name}；scope 亂給、name 帶路徑符號都拒', () => {
   validateWorkflow(soloDef({}, { attachments: ['a.txt', { scope: 'company', name: 'b.md' }, { scope: 'category', name: 'c.docx' }] }));
   validateWorkflow(soloDef({}, { attachments: [] }));
@@ -373,7 +373,7 @@ test('U1a ⑥：company_name 要是文字、60 字內；缺省空字串合法', 
   assert.ok(validateSettings({ ...DEFAULT_SETTINGS, company_name: null }).includes('組織名稱要是文字、60 字內'));
 });
 
-// ---- 排版輪 L11（題 2 A）：欄位可設「每次上傳一個檔」——params[].input 只准 'file'；舊檔沒有這個鍵照過 ----
+// ---- 欄位可設「每次上傳一個檔」——params[].input 只准 'file'；舊檔沒有這個鍵照過 ----
 test('排版輪 L11 ①：params[].input 只准 file、選填；舊定義沒有 input 照過', () => {
   validateWorkflow(soloDef({ params: [{ key: 'a', label: 'A', default: '' }] }));
   validateWorkflow(soloDef({ params: [{ key: 'src', label: '原始資料', default: '', input: 'file', required: true }] }));
@@ -384,7 +384,7 @@ test('排版輪 L11 ①：params[].input 只准 file、選填；舊定義沒有 
   validateWorkflow(loadExample()); // 內建範例（沒有 input）照過
 });
 
-// ---- 排版輪 L13（題 1 A）：卡片入口「任一條到」＝nodes[].merge:'any'（選填；缺省＝等全部） ----
+// ---- 卡片入口「任一條到」＝nodes[].merge:'any'（選填；缺省＝等全部） ----
 test('排版輪 L13 引擎①：merge 只准 any、缺省通過（舊檔沒有這個鍵照過）', () => {
   const def = {
     format: 1, name: '任一條到', params: [],

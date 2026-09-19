@@ -247,7 +247,7 @@ test('複查 L1：schedules.json 存在但讀不到（是資料夾）→ 明確�
   assert.throws(() => store.readSchedules(), (e) => e instanceof StoreError && e.message.includes('schedules.json'));
 });
 
-// ===== 儀表板輪：用量帳本＋prompt 卷宗＋跨流程最近執行 =====
+// ===== 用量帳本＋prompt 卷宗＋跨流程最近執行 =====
 
 test('用量帳本：append 後讀回一致；殘行跳過；sinceMs 過濾', () => {
   const { store, dir } = tmpStore();
@@ -315,7 +315,7 @@ test('工作單留存（監工輪）：寫→列→讀一致；沒寫過的種�
   assert.throws(() => store.readLog('compose', '沒這份'), (e) => e instanceof StoreError && e.code === 'NOT_FOUND');
 });
 
-// ===== 記憶輪 M1a：兩本帳（卡）＋詞典＋群組圈＋身分＋設定＋記憶垃圾桶＋備份 =====
+// ===== 兩本帳（卡）＋詞典＋群組圈＋身分＋設定＋記憶垃圾桶＋備份 =====
 
 const HABIT = {
   id: 'h-test0001-ab12', bucket: 'habit', text: '一天 3 個點', who: 'you', field: '旅行節奏',
@@ -527,7 +527,7 @@ test('多組織備份：不帶 root 時 root＝dataDir，備份仍只備那一�
   }
 });
 
-// ---- 移植合併輪 U1a：共用檔儲存（data/shared/<scope>/{index.yaml,files/}）----
+// ---- 共用檔儲存（data/shared/<scope>/{index.yaml,files/}）----
 test('U1a 共用檔：沒有夾＝空索引；加規範存 text_cache、加參考不存；同名 DUP；列表分兩類；刪除連檔帶索引；路徑與規範全文', () => {
   const { store, dir } = tmpStore();
   assert.deepEqual(store.readSharedIndex('_company'), { version: 1, files: [] });
@@ -577,7 +577,7 @@ test('U1a 共用檔：沒有夾＝空索引；加規範存 text_cache、加參�
   assert.throws(() => store.deleteShared('_company', '手冊.md'), (e) => e instanceof StoreError && e.code === 'NOT_FOUND');
 });
 
-// —— 拆法輪 B4 ⑥／契約 F：詞典補缺三條、settings.compose 缺省 ——
+// ——  ⑥／：詞典補缺三條、settings.compose 缺省 ——
 test('B4 ⑥：舊 dict.yaml 只有七條→readDict() 十條、既有條 created_at 不變、新三條 origin factory 且 kind 對；已有同名「範圍」自訂條→不重複也不動；不落地', () => {
   const { store, dir } = tmpStore();
   const OLD = ['語氣', '長度', '格式', '讀者', '語言', '截止日', '產出檔類型'];
@@ -651,7 +651,7 @@ test('U1a 修正：safeFileName 擋 Windows 保留字（CON／PRN／AUX／NUL／
   assert.equal(store.listShared('_company').refs.length, 4);
 });
 
-// —— 拆法輪 B0：分類改名（八處同步：流程夾／群組 yaml／共用夾／排程／提議／習慣卡與認識卡／身分／垃圾桶）＋復原擋門 ——
+// —— 分類改名（八處同步：流程夾／群組 yaml／共用夾／排程／提議／習慣卡與認識卡／身分／垃圾桶）＋復原擋門 ——
 function seedRename(store) {
   store.writeWorkflow('旅遊', 'a', { ...DEF, name: '訂機票' });
   store.writeWorkflow('工作', 'b', { ...DEF, name: '寫週報' });
@@ -853,7 +853,7 @@ test('B0 修正輪：改名版之後十分鐘內的畫布編輯不併入改名�
   assert.deepEqual(store.listVersions('旅遊', 'a').map((v) => v.diff_note), ['建立', `改名：「${DEF.name}」→「新名」`, '手動編輯（畫布／欄位）']);
 });
 
-// ---- 排版輪 L11（題 2 A）：本次上傳暫存區 data/uploads/<token>/<檔名>，開跑時搬進 runs/<rid>/in/ ----
+// ---- 本次上傳暫存區 data/uploads/<token>/<檔名>，開跑時搬進 runs/<rid>/in/ ----
 test('排版輪 L11 ②③⑦：暫存上傳——writeUpload 回 token、檔名護欄、readUpload、claimUpload 搬進該趟 in/ 並刪暫存、壞 token 讀不到、sweepUploads 清 24 小時沒用掉的', () => {
   const { store, dir } = tmpStore();
   store.writeWorkflow('旅遊', 'a', DEF);
@@ -884,7 +884,7 @@ test('排版輪 L11 ②③⑦：暫存上傳——writeUpload 回 token、檔名
   assert.ok(store.readUpload(fresh.token));
 });
 
-// ---- 排版輪 L13 附帶修（L11 覆核非阻擋兩條）：暫存代碼綁定發放的 Workflow；檔名含控制字元（NUL 等）走人話擋下 ----
+// ---- 修：暫存代碼綁定發放的 Workflow；檔名含控制字元（NUL 等）走人話擋下 ----
 test('排版輪 L13 附帶①：writeUpload 帶發放對象→readUpload／claimUpload 對象不符＝找不到；不帶對象讀照舊；舊暫存（沒有綁定記號）照舊可用', () => {
   const { store, dir } = tmpStore();
   const up = store.writeUpload('三月.csv', Buffer.from('1,2'), { category: '旅遊', id: 'a' });
@@ -903,7 +903,7 @@ test('排版輪 L13 附帶①：writeUpload 帶發放對象→readUpload／claim
   assert.equal(store.readUpload(legacy.token, { category: '旅遊', id: 'b' }).name, '舊.csv', '沒有綁定記號的舊暫存照舊');
 });
 
-// L13b（L13 覆核退回）：代碼綁的是「這條 Workflow」，不是它當時所在的分類——移分類／分類改名後照常能用；
+// L13b：代碼綁的是「這條 Workflow」，不是它當時所在的分類——移分類／分類改名後照常能用；
 // id 不保證跨分類唯一（範例補種只看「範例」分類，移出去的範例下次開機會再種一份同 id），所以不能只比 id，改成搬家時把記號跟著改
 test('L13b：移分類、分類改名後綁定記號跟著走——自己照常能用、舊位置同 id 的別條拿不到；uploadProblem 分清「別條的」與「找不到」', () => {
   const { store } = tmpStore();
@@ -940,7 +940,7 @@ test('排版輪 L13 附帶②：safeFileName 擋控制字元（NUL、換行、ta
   assert.throws(() => store.writeUpload(`a${ctl(0)}.pdf`, Buffer.from('x')), (e) => e.code === 'BAD_NAME' && !e.message.includes(dir));
 });
 
-// ── 2026-09-18 審查修正輪 ──────────────────────────────────────────────
+// ── 2026-09-18  ──────────────────────────────────────────────
 
 test('搬分類：握著「分類/id」這把鍵的東西要跟著走（排程／提議／未讀通知）', () => {
   const { store } = tmpStore();

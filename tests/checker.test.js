@@ -1,4 +1,4 @@
-// checker 測試（交貨查核輪）：算式驗算、JSON 解析、分類、查核 prompt、原始資料組裝、成品檔文字、查核與擬規則
+// checker 測試：算式驗算、JSON 解析、分類、查核 prompt、原始資料組裝、成品檔文字、查核與擬規則
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -6,9 +6,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Document, Packer, Paragraph, TextRun } from 'docx';
 import ExcelJS from 'exceljs';
+import PptxGenJS from 'pptxgenjs';
 import {
   buildCheckPrompt, parseCheckResult, verifyArithmetic, classify, extractFileText,
-  runCheck, buildEditRulesPrompt, deriveEditRules, buildSources, CheckParseError,
+  runCheck, buildEditRulesPrompt, deriveEditRules, buildSources, CheckParseError, pptxSlides,
 } from '../src/checker.js';
 
 // 假 adapter：回錄呼叫；reply 是 Error 就丟出來（style 同 runner.test.js）
@@ -47,7 +48,7 @@ test('算式驗算：對的 true、錯的 false、看不懂 null；千分位、�
   assert.equal(verifyArithmetic('100/3=33.33'), true, '除不盡：截到右邊寫的位數就算成立');
 });
 
-// 裁定 20：查核員照規則第 2 條把算式寫進 calc，除不盡的佔比（6÷14）一定是四捨五入或截斷過的商——
+//：查核員照規則第 2 條把算式寫進 calc，除不盡的佔比（6÷14）一定是四捨五入或截斷過的商——
 // 用固定容差比一定判不成立，查核員說 ok 會被程式翻成攔。真跑一趟九次誤攔全出在這裡。
 test('算式驗算：右邊寫到第幾位就比到第幾位——四捨五入或截斷都算成立，真的算錯照樣抓', () => {
   assert.equal(verifyArithmetic('6/14=0.428'), true, '截斷到三位');
@@ -63,7 +64,7 @@ test('算式驗算：右邊寫到第幾位就比到第幾位——四捨五入�
   assert.equal(verifyArithmetic('6+3+2+1=14'), false);
 });
 
-// 裁定 24（a）：查核員照第 2 條把成品的「43%」搬到等號右邊，左邊卻沒乘 100——
+//（a）：查核員照第 2 條把成品的「43%」搬到等號右邊，左邊卻沒乘 100——
 // 百分號是「除以 100」不是雜訊，任一邊寫了就先換算成同一個單位再比。
 test('算式驗算：等號任一邊寫百分號就先除以 100 再比', () => {
   assert.equal(verifyArithmetic('6/14=42.9%'), true, '寫到小數一位');
@@ -78,7 +79,7 @@ test('算式驗算：等號任一邊寫百分號就先除以 100 再比', () => 
   assert.equal(verifyArithmetic('約 20%'), null, '沒有等號就不是算式');
 });
 
-// 裁定 24（b）：兩邊都沒寫百分號，一邊是比例、一邊是百分數（6/14=43）——小的乘 100 對得上也算成立
+//（b）：兩邊都沒寫百分號，一邊是比例、一邊是百分數（6/14=43）——小的乘 100 對得上也算成立
 test('算式驗算：一邊小於 1、一邊不小於 1 時，小的乘 100 對得上也算成立', () => {
   assert.equal(verifyArithmetic('6/14=43'), true);
   assert.equal(verifyArithmetic('1/14=7'), true);
@@ -94,7 +95,7 @@ test('算式驗算：一邊小於 1、一邊不小於 1 時，小的乘 100 對�
   assert.equal(verifyArithmetic('28/2=15'), false);
 });
 
-// 裁定 26：比對的位數要取自「寫成純數字」的那一側。之前一律取右邊的位數，百分號寫在左邊、右邊是算式或整數時
+//：比對的位數要取自「寫成純數字」的那一側。之前一律取右邊的位數，百分號寫在左邊、右邊是算式或整數時
 // 位數退化成 0，等於整數比——0% 到 100% 之間隨便寫什麼都判成立（50%=6/14、50%=0 都被放行）。
 test('算式驗算：位數取自寫成純數字的那一側，百分號在左邊不會恆真', () => {
   assert.equal(verifyArithmetic('50%=6/14'), false, '6/14 是 42.9%，不是 50%');
@@ -133,7 +134,7 @@ test('算式驗算：帶正負號或外層括號的純數字也算「寫出來�
   assert.equal(verifyArithmetic('(43)%=6/14'), true, '括號包住的數字照樣算位數');
 });
 
-// 裁定 29：恰一側寫百分號、嚴格比對不成立時，退一步用兩側「剝掉百分號的原始值」再比一次。
+//：恰一側寫百分號、嚴格比對不成立時，退一步用兩側「剝掉百分號的原始值」再比一次。
 // 查核員把佔比乘完 100 又補百分號（6/14*100=42.9%）是最自然的寫法，硬判不成立會假攔。
 test('算式驗算：兩邊其實都在講百分數時退一步用原始值再比一次', () => {
   assert.equal(verifyArithmetic('6/14*100=42.9%'), true, '42.857 對 42.9，比到寫出來的一位');
@@ -144,7 +145,7 @@ test('算式驗算：兩邊其實都在講百分數時退一步用原始值再�
   assert.equal(verifyArithmetic('6/14=99%'), false);
 });
 
-// 裁定 31（a）：裁定 29 的退路沒有門檻，就等於「剝掉百分號、拿兩側原始值比整數位」——
+//（a）： 的退路沒有門檻，就等於「剝掉百分號、拿兩側原始值比整數位」——
 // 6/14=0%（0.43 對 0）、6+3+4+1=14%（14 對 14）一比就成立，假放行比假攔更難被發現。
 // 門檻＝非字面的那一側真的乘過 100（6/14*100=42.9%），退路才開。
 test('算式驗算：沒乘過 100 就不准退到原始值比', () => {
@@ -167,7 +168,7 @@ test('算式驗算：沒乘過 100 就不准退到原始值比', () => {
   assert.equal(verifyArithmetic('42.9%=6/14'), true);
 });
 
-// 裁定 31（b）：decimalsOf 直接對原字串找小數點，(42.0)% 的小數點後面跟著「0)」不是純數字，
+//（b）：decimalsOf 直接對原字串找小數點，(42.0)% 的小數點後面跟著「0)」不是純數字，
 // 位數退化成 0＝整數比，寫錯的小數位被放行。先剝掉括號再判位數。
 test('算式驗算：括號包住的小數照小數位比，不退化成整數比', () => {
   assert.equal(verifyArithmetic('6/14=(42.0)%'), false, '寫到一位就比到一位：42.857 不是 42.0');
@@ -296,7 +297,7 @@ test('查核結果解析：誘餌物件不准劫走——候選計分擇優，�
   assert.equal(decoy.summary, '數字對不上');
 });
 
-// 裁定 8：查核員被要求「只輸出一個 JSON 物件」，回覆裡有好幾份一樣像的結果＝交件不合格，誠實說沒查成，不准靠位置猜
+//：查核員被要求「只輸出一個 JSON 物件」，回覆裡有好幾份一樣像的結果＝交件不合格，誠實說沒查成，不准靠位置猜
 const OTHER_JSON = '{"items":[{"claim":"總數 14 件","source":"明細原文","scope":"全月","calc":"6+3+4+1=14","verdict":"ok"}],"must_violations":[],"flags":[],"summary":"都對"}';
 
 test('查核結果解析：候選政策——有內容優先、外層優先、兩份不同的結果＝含糊就丟錯、一字不差的重複不算含糊', () => {
@@ -328,7 +329,7 @@ test('查核結果解析：候選政策——有內容優先、外層優先、�
 
 test('查核結果解析：圍欄不優先——圍欄內外同一個池；兩個圍欄各一份不同結果是含糊；圍欄裡沒像樣的就看正文', () => {
   const fence = (s) => `\`\`\`json\n${s}\n\`\`\``;
-  // 圍欄裡一份、正文另有一份完整的不同結果：圍欄不是護身符，兩份不同＝含糊（裁定 9 移除「圍欄優先」）
+  // 圍欄裡一份、正文另有一份完整的不同結果：圍欄不是護身符，兩份不同＝含糊（ 移除「圍欄優先」）
   assert.throws(() => parseCheckResult(`草稿：${OTHER_JSON}\n最後結果：\n${fence(RESULT_JSON)}`), CheckParseError, '圍欄內外各一份不同');
   // 兩個圍欄、兩份不同結果：沒有「第一個圍欄贏」這種位置裁判
   assert.throws(() => parseCheckResult(`${fence(OTHER_JSON)}\n\n${fence(RESULT_JSON)}`), CheckParseError, '兩個圍欄');
@@ -340,7 +341,7 @@ test('查核結果解析：圍欄不優先——圍欄內外同一個池；兩�
   assert.equal(parseCheckResult(`${fence(RESULT_JSON)}\n${fence(RESULT_JSON)}`).summary, '數字對不上');
 });
 
-// 裁定 9：被包住的候選只有名次不高於外層才丟——空殼包著真結果、裸陣列包著真結果物件，內層更像就留下來贏
+//：被包住的候選只有名次不高於外層才丟——空殼包著真結果、裸陣列包著真結果物件，內層更像就留下來贏
 test('查核結果解析：裁定 9——包住真結果的空殼不准贏、裸陣列裡的結果物件贏過陣列、圍欄裡的範例不再優先', () => {
   const real = '{"items":[{"claim":"總數 13 件","source":"明細原文","scope":"全月","calc":"6+3+4+1=14","verdict":"mismatch"}],"must_violations":[],"flags":[],"summary":"數字對不上"}';
   const expectReal = (r, name) => {
@@ -480,12 +481,12 @@ test('查核 prompt：段標題齊、必守逐條列、判定規則六條與輸�
   assert.ok(/mismatch/.test(rulesSection) && /unsupported/.test(rulesSection) && /missing/.test(rulesSection), 'verdict 定義');
   assert.ok(rulesSection.includes('conclusion-changed') && rulesSection.includes('format'), 'flags 只有兩種');
   assert.ok(rulesSection.includes('calc 只寫數字與 + - * / ( ) ='), 'calc 要交代寫法，不要單位與文字');
-  // 裁定 20＋24：等號右邊照成品的位數寫，程式就用同樣的位數比；百分比要寫全，別把 43% 寫成 6/14=43
+  //：等號右邊照成品的位數寫，程式就用同樣的位數比；百分比要寫全，別把 43% 寫成 6/14=43
   assert.ok(
     rulesSection.includes('百分比寫成 6/14*100=42.9 或 6/14=42.9%，等號右邊寫成品裡出現的數字（可四捨五入或截斷到成品的位數）。'),
     '算式右邊照成品的位數寫，百分比有寫法示範',
   );
-  // 裁定 22：判斷型步驟（評分、排序、建議）第一次一定被整批判無據——unsupported 只留給事實性主張
+  //：判斷型步驟（評分、排序、建議）第一次一定被整批判無據——unsupported 只留給事實性主張
   assert.ok(
     rulesSection.includes('unsupported 只用在事實性主張（數字、事件、引用、名稱、時程、規格）；這一步被指示要做的判斷、評分、排序、建議本身不需要出處，但它引用的事實要有。'),
     'unsupported 只針對事實性主張',
@@ -500,7 +501,7 @@ test('查核 prompt：段標題齊、必守逐條列、判定規則六條與輸�
   assert.ok(bare.slice(bare.indexOf('# 格式要求'), bare.indexOf('# 判定規則')).includes('（無）'));
 });
 
-// ---- 監工輪：facts 開關與監工備註 ----
+// ---- facts 開關與監工備註 ----
 
 test('查核 prompt：流程沒開「數字對原始資料」→ 判定規則換成只對必守與格式四條、原始資料段講明沒開', () => {
   const p = buildCheckPrompt({
@@ -549,7 +550,7 @@ test('查核 prompt：監工備註自成一段（參考，不是必守），不�
   assert.ok(!none.includes('# 監工備註'), '沒備註就不出這一段');
 });
 
-// ---- 記憶輪 M3a：群組規矩併進必守 ----
+// ---- 群組規矩併進必守 ----
 
 test('查核 prompt：群組規矩是必守第三路（驗收重點→停點規則→群組規矩）；違反歸既有 must 攔；省略時逐字不變', () => {
   const p = buildCheckPrompt({
@@ -725,7 +726,7 @@ test('查核：查核員交了兩份不同的結果 → incomplete，note 說分
   assert.deepEqual(r.items, []);
 });
 
-// 裁定 21：卷宗只存指示不存回覆，「這次沒查成」事後永遠查不出為什麼——失敗時把查核員的回覆原文一起交出去
+//：卷宗只存指示不存回覆，「這次沒查成」事後永遠查不出為什麼——失敗時把查核員的回覆原文一起交出去
 test('查核：沒查成時把查核員的回覆原文交出來（raw）；沒收到回覆就是空字串，查成了不用留', async () => {
   const args = { meta: { node: 'a' }, title: '寫八月月報', requirements: REQ, sources: '八月', product: '成品' };
 
@@ -829,7 +830,7 @@ test('擬規則：兩組不同的規則＝分不出使用者要哪組 → 退成
   assert.deepEqual(await deriveEditRules({ adapter: fakeAdapter(`${real}\n再說一次：${real}`), ...args, note: '' }), [{ text: '後面每步保留 120 分鐘', scope: 'all' }]);
   // 只有一組、沒寫 scope：照樣是規則，補成 all
   assert.deepEqual(await deriveEditRules({ adapter: fakeAdapter('{"rules":[{"text":"後面每步保留 120 分鐘"}]}'), ...args, note: '' }), [{ text: '後面每步保留 120 分鐘', scope: 'all' }]);
-  // 包含依名次（裁定 9 的 meta 案）：規則物件裡包了一個長得一樣、同名次的子物件——被包住的不算，外層贏
+  // 包含依名次（ 的 meta 案）：規則物件裡包了一個長得一樣、同名次的子物件——被包住的不算，外層贏
   assert.deepEqual(
     await deriveEditRules({ adapter: fakeAdapter('{"rules":[{"text":"後面每步保留 120 分鐘","scope":"all"}],"draft":{"rules":[{"text":"草稿規則","scope":"all"}]}}'), ...args, note: '' }),
     [{ text: '後面每步保留 120 分鐘', scope: 'all' }],
@@ -841,7 +842,7 @@ test('擬規則：兩組不同的規則＝分不出使用者要哪組 → 退成
     [{ text: '範例規則', scope: 'all' }],
     '同名次的子物件不算——與上一條同結構，外層贏',
   );
-  // 圍欄不優先：圍欄裡放範例、正文放真規則——兩組不同＝含糊，退成預設（裁定 9 移除「圍欄那組優先」）
+  // 圍欄不優先：圍欄裡放範例、正文放真規則——兩組不同＝含糊，退成預設（ 移除「圍欄那組優先」）
   assert.deepEqual(
     await deriveEditRules({ adapter: fakeAdapter(`\`\`\`json\n{"rules":[{"text":"範例規則","scope":"all"}]}\n\`\`\`\n實際規則：{"rules":[{"text":"後面每步保留 120 分鐘","scope":"all"}]}`), ...args, note: '' }),
     [{ text: '以改過的版本為準', scope: 'all' }],
@@ -868,7 +869,7 @@ test('擬規則：onPrompt 拿到的就是送出去的那份指示；不給也�
   );
 });
 
-// ---- 移植合併輪 U1b：查核第四路——公司／部門規範另成一段（整份貼，不拆成必守條列）、判定規則加一句「違反規範歸 must」 ----
+// ---- 查核第四路——公司／部門規範另成一段（整份貼，不拆成必守條列）、判定規則加一句「違反規範歸 must」 ----
 
 test('U1b ②：companyRules／deptRules → 「# 公司／部門規範（一定要守）」段在必守清單後、格式要求前；每檔「## 公司規範：檔名」＋全文；判定規則多一句「違反規範歸 must」；factsOff 也一樣', () => {
   const rules = { companyRules: [{ name: '員工手冊.md', text: '語氣要親切。' }], deptRules: [{ name: '部門規範.docx', text: '報價一律含稅。' }] };
@@ -908,7 +909,7 @@ test('U1b 覆核該修：查核 prompt 裡規範內文行首 # 降一級（#####
   assert.deepEqual(h1, ['# 這一步：寫八月月報', '# 必守（逐條對）', '# 公司／部門規範（一定要守）', '# 格式要求', '# 判定規則', '# 輸出格式', '# 原始資料', '# 成品']);
 });
 
-// ---- 拆法輪 B2 ⑤（契約 D）：能耐表只給拆解器，查核員不帶 ----
+// ----  ⑤：能耐表只給拆解器，查核員不帶 ----
 
 test('B2 ⑤：查核 prompt 0 命中「你能派工人做什麼」與「# 關於你」（能耐表與關於你只給拆解器）', () => {
   const p = buildCheckPrompt({ title: '寫八月月報', requirements: { ...REQ, companyRules: [{ name: '手冊.md', text: '親切。' }] }, sources: '原始', product: '成品' });
@@ -917,3 +918,29 @@ test('B2 ⑤：查核 prompt 0 命中「你能派工人做什麼」與「# 關�
   const rules = buildEditRulesPrompt({ title: '寫八月月報', original: '舊', edited: '新', note: '口氣改' });
   assert.equal((String(rules).match(/你能派工人做什麼/g) ?? []).length, 0);
 });
+
+// （US-096 的「封面／條列／表格三種版型至少可用」原本只靠工作單的文字提示，
+// 沒有任何東西保證）：這一條真的呼叫 bundled 的 pptxgenjs 做出三種版型，再用查核員那支抽回文字。
+// 三種都抽得到＝版型做得出來、且交貨查核與頁內預覽讀得到簡報（不再是「成品檔讀不出來」）。
+test('成品格式輪：pptxgenjs 三種版型真的做得出來，且 pptxSlides／extractFileText 抽得回中文', async () => {
+  const p = new PptxGenJS();
+  p.layout = 'LAYOUT_16x9';
+  p.addSlide().addText('九月社群成效月報', { x: 0.6, y: 2.2, fontSize: 40, bold: true });
+  p.addSlide().addText(
+    [{ text: '互動率 4.1%', options: { bullet: true } }, { text: '短影音帶動成長', options: { bullet: true } }],
+    { x: 0.8, y: 1.4, fontSize: 18 },
+  );
+  p.addSlide().addTable([['要改的事', '為什麼'], ['短影音排期固定化', '發布時間不規律']], { x: 0.6, y: 1.4 });
+  const buf = Buffer.from(await p.write({ outputType: 'nodebuffer' }));
+
+  const slides = pptxSlides(buf);
+  assert.equal(slides.length, 3, '三張投影片');
+  assert.deepEqual(slides[0].texts, ['九月社群成效月報'], '封面：大標抽得回來');
+  assert.deepEqual(slides[1].texts, ['互動率 4.1%', '短影音帶動成長'], '條列：每點各一行');
+  assert.ok(slides[2].texts.includes('要改的事') && slides[2].texts.includes('短影音排期固定化'), '表格：表頭與內容都抽得到');
+
+  const text = await extractFileText(buf, '月報.pptx');
+  assert.ok(text, '查核員一定要讀得出簡報——讀不出就會判「這次沒查」，交貨查核對簡報整個失效');
+  assert.ok(text.includes('【第 1 張】') && text.includes('九月社群成效月報') && text.includes('短影音排期固定化'), text);
+});
+

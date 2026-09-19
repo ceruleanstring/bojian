@@ -112,7 +112,7 @@ test('applyProposal：目標節點／參數已不存在 → 丟人話錯誤，�
   assert.throws(() => applyProposal(structuredClone(DEF), goneParam), /已經不在了（Workflow 後來改過）/);
 });
 
-// ===== 監工輪 K5：訊號 D（監工建議）與 E（連兩趟同款交接） =====
+// ===== 訊號 D（監工建議）與 E（連兩趟同款交接） =====
 
 // 帶監工欄位（record／handoff）的一趟：跑完的 run 才進得了訊號池
 function doneRunWith(store, { record = undefined, handoff = undefined } = {}) {
@@ -226,7 +226,7 @@ test('applyProposal：參數改預設／節點換指示', () => {
   assert.equal(d2.nodes[0].instruction, '新指示');
 });
 
-// ── 2026-09-18 審查修正輪 ──────────────────────────────────────────────
+// ── 2026-09-18  ──────────────────────────────────────────────
 
 test('一個壞掉的 run.yaml 不准讓這條流程從此再也沒有提議', async () => {
   const { dir, store, opt } = setup();

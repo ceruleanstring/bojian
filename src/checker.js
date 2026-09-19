@@ -1,8 +1,9 @@
-// checker — 交貨查核（交貨查核輪）：組查核 prompt、解析查核員的 JSON、程式自己驗算算式、分類成攔／標／缺。
+// checker — 交貨查核：組查核 prompt、解析查核員的 JSON、程式自己驗算算式、分類成攔／標／缺。
 // 查核員是每步一次全新的 adapter.complete（meta.kind='check'，不帶工具、不帶側寫）；業務 prompt 只在這裡組。
 // 判定不信查核員的總結——status 一律由 classify 依規則算出來。
 import mammoth from 'mammoth';
 import ExcelJS from 'exceljs';
+import PizZip from 'pizzip';
 
 export class CheckParseError extends Error {
   constructor(message) {
@@ -91,7 +92,7 @@ function sideValue(t) {
 }
 
 // 這一側「寫出來」有幾位小數（整數＝0）。位數上限 12，再多就是浮點雜訊不是精度
-// 括號先剝掉（裁定 31）：(42.0)% 的小數點後面跟著「0)」不是純數字，不剝就當成整數，位數退化成 0＝整數比
+// 括號先剝掉：(42.0)% 的小數點後面跟著「0)」不是純數字，不剝就當成整數，位數退化成 0＝整數比
 function decimalsOf(text) {
   const t = text.replace(/[()]/g, '');
   const at = t.lastIndexOf('.');
@@ -104,8 +105,8 @@ const roundTo = (v, k) => Number(v.toFixed(k));
 const truncTo = (v, k) => Math.trunc(v * 10 ** k) / 10 ** k;
 
 // 算出來的 v 對得上寫出來的 written 嗎——比到 k 位為止，四捨五入或截斷都算對
-// （v 一定要放算出來的那一側：截斷是查核員把商寫短的動作，寫出來的那一側沒有東西可以截）
-// （written 也收到同一位數，免得浮點雜訊自己製造差異）
+//（v 一定要放算出來的那一側：截斷是查核員把商寫短的動作，寫出來的那一側沒有東西可以截）
+//（written 也收到同一位數，免得浮點雜訊自己製造差異）
 const fitsAt = (v, written, k) => {
   const w = roundTo(written, k);
   return roundTo(v, k) === w || truncTo(v, k) === w;
@@ -116,13 +117,13 @@ const percentSide = (t) => (/[%％]$/.test(t) ? { text: t.slice(0, -1), percent:
 
 // 純數字＝整條只有一個數（千分位與小數點是寫法不是運算子）；百分號已經被 percentSide 剝掉了。
 // 前導正負號與包住整個數的括號也算「寫出來的數字」——不認就退回照右邊取位數，-50%／(50)% 這些寫法又變回整數比。
-// （值本身由 sideValue 解析，負號跟著值走；括號沒收尾的寫法解不出來，早就在前面回 null 了）
+//（值本身由 sideValue 解析，負號跟著值走；括號沒收尾的寫法解不出來，早就在前面回 null 了）
 const isLiteral = (t) => /^[+-]?\(?(?:\d[\d,]*(?:\.\d+)?|\.\d+)\)?$/.test(t);
 
-// 這一側自己乘過 100 了嗎（裁定 31）：6/14*100、100*6/14 都算；*1000、*100.5 不算
+// 這一側自己乘過 100 了嗎：6/14*100、100*6/14 都算；*1000、*100.5 不算
 const scaledBy100 = (t) => /\*100(?![\d.])|(?:^|[^\d.])100\*/.test(t);
 
-// 哪一側是「寫出來的結果」（裁定 26）：純數字的那一側，比對的位數就照它寫的位數。
+// 哪一側是「寫出來的結果」：純數字的那一側，比對的位數就照它寫的位數。
 // 兩側都是純數字時取帶百分號的那一側——它的值已經被縮小 100 倍，位數不跟著往後補就退化成整數比，
 // 「50%=0」這種一定被判成立；兩側都不是純數字時照舊用右側。
 const writtenSide = (L, R) => {
@@ -131,11 +132,11 @@ const writtenSide = (L, R) => {
 };
 
 // true＝算得出來且成立；false＝算得出來但不成立；null＝看不懂，不表態
-// 比到右邊寫的位數為止（裁定 20）：成品裡的佔比多半除不盡（6÷14），查核員照規則把算式寫進 calc 時只能四捨五入或截斷；
+// 比到右邊寫的位數為止：成品裡的佔比多半除不盡（6÷14），查核員照規則把算式寫進 calc 時只能四捨五入或截斷；
 // 用固定容差比，這種算式一定判不成立，查核員說 ok 反被程式翻成攔——真跑一趟九次誤攔全出在這裡。
-// 百分比再放行一層（裁定 24）：查核員把成品的「43%」搬到等號右邊時，不是寫 6/14=42.9% 就是漏寫百分號寫成 6/14=43，
-// 兩種寫法都要看得懂，否則裁定 20 只是把「除不盡」的假攔換成「差 100 倍」的假攔。
-// 位數取自寫成純數字的那一側（裁定 26）：一律照右邊取，百分號寫在左邊、右邊是算式或整數時位數退化成 0，
+// 百分比再放行一層：查核員把成品的「43%」搬到等號右邊時，不是寫 6/14=42.9% 就是漏寫百分號寫成 6/14=43，
+// 兩種寫法都要看得懂，否則 只是把「除不盡」的假攔換成「差 100 倍」的假攔。
+// 位數取自寫成純數字的那一側：一律照右邊取，百分號寫在左邊、右邊是算式或整數時位數退化成 0，
 // 等於整數比——0% 到 100% 之間隨便寫什麼都判成立（50%=6/14、50%=0 全被放行），等於這一整條驗算沒在驗。
 export function verifyArithmetic(calc) {
   const s = normalizeCalc(calc);
@@ -152,16 +153,16 @@ export function verifyArithmetic(calc) {
   const written = W === R ? right : left;
   const computed = W === R ? left : right;
   if (fitsAt(computed, written, decimalsOf(W.text) + (W.percent ? 2 : 0))) return true; // 42.9% 換成小數就是 0.429，位數往後兩位
-  // 恰一側寫百分號、上面那關過不了：退一步用兩側「剝掉百分號的原始數值」再比一次（裁定 29）——
+  // 恰一側寫百分號、上面那關過不了：退一步用兩側「剝掉百分號的原始數值」再比一次——
   // 查核員把佔比乘完 100 又補上百分號（6/14*100=42.9%）是最自然的寫法，硬判不成立就是假攔。
   // 只退這一步：50%=6/14 的原始值是 50 對 0.43，照樣不成立，百分號在左的恆真洞沒有被重新打開。
-  // 而且只有另一側真的乘過 100 才退（裁定 31）：沒設這道門檻就等於「剝掉百分號比整數位」，
+  // 而且只有另一側真的乘過 100 才退：沒設這道門檻就等於「剝掉百分號比整數位」，
   // 6/14=0%（0.43 對 0）、6+3+4+1=14%（14 對 14）一比就成立——假放行比假攔更難被發現。
   if (L.percent !== R.percent && scaledBy100((W === R ? L : R).text)) {
     return fitsAt(W === R ? lv : rv, W === R ? rv : lv, decimalsOf(W.text));
   }
   // 兩邊都沒寫百分號，一邊是比例、一邊是百分數（6/14=43）——比例乘 100 對得上就算成立
-  // （位數一樣取自寫出來的那一側，也就是這裡不小於 1 的那一側）
+  //（位數一樣取自寫出來的那一側，也就是這裡不小於 1 的那一側）
   if (L.percent || R.percent) return false;
   if (left > 0 && left < 1 && right >= 1) return fitsAt(left * 100, right, decimalsOf(R.text));
   if (right > 0 && right < 1 && left >= 1) return fitsAt(right * 100, left, decimalsOf(L.text));
@@ -169,7 +170,7 @@ export function verifyArithmetic(calc) {
 }
 
 // ---- JSON 解析 ----
-// 候選政策（裁定 8＋9）：查核員被要求「只輸出一個 JSON 物件」，所以回覆裡有幾份一樣像的結果＝交件不合格，誠實說沒查成，
+// 候選政策：查核員被要求「只輸出一個 JSON 物件」，所以回覆裡有幾份一樣像的結果＝交件不合格，誠實說沒查成，
 // 不准靠「第一個」「最後一個」「圍欄裡的」這種位置裁判去猜——猜錯一次，真的 mismatch 就被吞成 pass。
 //   (a) 全文一個池：```json 圍欄不優先——圍欄本來就在全文裡，掃全文就掃得到；圍欄裡放範例、正文放真結果的回覆一樣照名次比
 //   (b) 包含依名次：被別的候選整個包住的，名次不高於外層才丟（真結果裡塞的 meta 子物件不算）；內層更像就兩個都留給名次裁——
@@ -234,7 +235,7 @@ function selectCandidate(candidates, rank, normalize, ambiguousMessage) {
 }
 
 // 回覆裡挖 JSON：政策 (a)——全文一個池，圍欄不優先
-// 匯出給監工用（監工輪）：三份監工回覆走同一套候選政策，含糊與挑不出來的行為才會一致
+// 匯出給監工用：三份監工回覆走同一套候選政策，含糊與挑不出來的行為才會一致
 export const extractJson = (text, rank, normalize, ambiguousMessage) => selectCandidate(jsonCandidates(str(text)), rank, normalize, ambiguousMessage);
 
 // 非空、且每個元素都是物件的陣列＝逐項表。空陣列與 []、[1]、[来源1] 不算——那是正文裡的括號，收了就等於放行。
@@ -358,7 +359,7 @@ const OPENING_LINES_MUSTS_ONLY = [
 
 export function buildCheckPrompt({ title, requirements, sources, product }) {
   const req = requirements ?? {};
-  // 必守三路＝使用者寫的：驗收重點、停點規則、群組規矩（記憶輪；違反歸既有 must 攔）
+  // 必守三路＝使用者寫的：驗收重點、停點規則、群組規矩（違反歸既有 must 攔）
   const musts = [
     ...str(req.reviewFocus).split('\n').map((x) => x.trim()).filter(Boolean),
     ...arr(req.editRules).map((r) => str(r).trim()).filter(Boolean),
@@ -368,7 +369,7 @@ export function buildCheckPrompt({ title, requirements, sources, product }) {
   const factsOff = req.factsOff === true; // 流程關掉「數字對原始資料」：只對必守與格式
   // 監工備註是參考不是必守——自成一段擺在格式要求之後，永遠不併進 musts
   const notes = arr(req.supervisorNotes).map((x) => str(x).trim()).filter(Boolean);
-  // 必守第四路（移植合併輪，三層共用檔）：公司／部門規範整份貼成一段（不拆成條列——4,000 字的檔拆進 musts 會把清單撐爆），
+  // 必守第四路：公司／部門規範整份貼成一段（不拆成條列——4,000 字的檔拆進 musts 會把清單撐爆），
   // 判定規則加一句「違反規範歸 must」；classify 不動，違反走既有 must 攔。沒給＝一字不多
   // 規範內文行首 # 降一級、###### 封頂（同 host-adapter，手冊標題不與段標題同級）
   const demote = (text) => str(text).replace(/^(#{1,6})(?=\s)/gm, (m) => (m.length < 6 ? `#${m}` : m));
@@ -424,10 +425,35 @@ export function buildSources({ params = {}, paramLabels = {}, ancestors = [], su
 const PLAIN_EXT = ['md', 'txt', 'csv', 'json', 'html', 'htm'];
 
 // 成品是 Word／Excel 真檔時抽出可查核的文字；讀不出來、或抽出來只有空白＝等於沒抽到，一律回 null
-// （呼叫端一個 null 判斷就夠，不會拿空字串去查核然後說「查過了」）
+//（呼叫端一個 null 判斷就夠，不會拿空字串去查核然後說「查過了」）
 export async function extractFileText(buf, name) {
   const text = await readFileText(buf, str(name).toLowerCase().split('.').pop());
   return str(text).trim() ? text : null;
+}
+
+
+// pptx 抽文字。ppt/slides/slideN.xml 裡的 <a:t> 就是投影片上看得到的字；
+// <a:p> 是一段。沒有這一支的話，每張簡報成品都會被判「成品檔讀不出來，這次沒查」——交貨查核對簡報整個失效。
+// 查核員（readFileText）與頁內預覽（server.previewArtifact）共用這一支，兩邊看到的字才會一樣。
+const XML_ENT = { '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&apos;': "'" };
+export function pptxSlides(buf) {
+  const zip = new PizZip(buf);
+  const names = Object.keys(zip.files)
+    .filter((n) => /^ppt\/slides\/slide\d+\.xml$/.test(n))
+    .sort((a, b) => Number(a.match(/\d+/)[0]) - Number(b.match(/\d+/)[0]));
+  return names.map((name, i) => {
+    const xml = zip.files[name].asText();
+    const texts = [];
+    for (const para of xml.split('</a:p>')) {
+      // 同一段裡字型一變就會被切成好幾個 <a:t>，所以段內先接起來再當一行
+      const line = (para.match(/<a:t[^>]*>[\s\S]*?<\/a:t>/g) ?? [])
+        .map((m) => m.replace(/<[^>]+>/g, ''))
+        .join('')
+        .replace(/&(amp|lt|gt|quot|apos);/g, (m) => XML_ENT[m]);
+      if (line.trim()) texts.push(line.trim());
+    }
+    return { n: i + 1, texts };
+  });
 }
 
 async function readFileText(buf, ext) {
@@ -452,6 +478,7 @@ async function readFileText(buf, ext) {
       });
       return out.join('\n');
     }
+    if (ext === 'pptx') return pptxSlides(buf).map((s) => `【第 ${s.n} 張】\n${s.texts.join('\n')}`).join('\n\n');
     if (PLAIN_EXT.includes(ext)) return buf.toString('utf8');
   } catch {
     return null;
@@ -478,7 +505,7 @@ export async function runCheck({ adapter, meta, title, requirements, sources, pr
     return { ...classify(parseCheckResult(text), { editRules: requirements?.editRules ?? [] }), note: '' };
   } catch (e) {
     // 查核本身失敗不擋交貨：狀態 incomplete，原因翻成人話給卡片顯示（宿主原話裡的操作指示由卡片上的按鈕負責，不重複推給使用者）
-    // raw＝查核員這次到底回了什麼（裁定 21）：卷宗只存指示，沒有原文，「這次沒查成」事後永遠查不出為什麼
+    // raw＝查核員這次到底回了什麼：卷宗只存指示，沒有原文，「這次沒查成」事後永遠查不出為什麼
     return { status: 'incomplete', blocks: [], flags: [], missing: [], items: [], summary: '', note: `這次沒查成：${humanReason(e)}`, raw };
   }
 }

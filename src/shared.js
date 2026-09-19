@@ -1,4 +1,4 @@
-// shared — 三層共用檔的純函式（移植合併輪 U1a）：規範轉純文字、字數上限、跨層鍵。不碰檔案系統、不呼叫 AI。
+// shared — 三層共用檔的純函式：規範轉純文字、字數上限、跨層鍵。不碰檔案系統、不呼叫 AI。
 // 資料形狀見 規劃/2026-09-10-三層共用資料-設計.md §八：規範類（rule）每步都帶、參考類（ref）勾了才帶。
 import mammoth from 'mammoth';
 
@@ -30,7 +30,7 @@ export function checkRuleLimits(chars, layerChars) {
   return null;
 }
 
-// 排版輪 L7（上桌題 3b）：共用檔「查看」形態——md／txt 看原文（text）、docx／xlsx／csv 走成品預覽排版（preview）、其他（pdf、圖）頁內看不了（null）
+// （上桌b）：共用檔「查看」形態——md／txt 看原文（text）、docx／xlsx／csv 走成品預覽排版（preview）、其他（pdf、圖）頁內看不了（null）
 export function viewKind(name) {
   const ext = String(name ?? '').includes('.') ? extOf(name) : '';
   if (ext === 'md' || ext === 'txt') return 'text';

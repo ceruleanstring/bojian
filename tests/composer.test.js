@@ -66,7 +66,7 @@ test('拆出含分岔＋平行的草稿也能過（S3）', async () => {
   assert.ok(adapter.calls[0].includes('指示及格線'), 'prompt 要帶指示品質三要件（吃什麼輸入/做什麼判斷/交什麼成品）');
   assert.ok(adapter.calls[0].includes('handoff') && adapter.calls[0].includes('一律做成 params'), 'prompt 要教它純資料一律做欄位、人做步驟寫明完成時交出什麼（資料通道輪）');
   assert.ok(adapter.calls[0].includes('required: true') && adapter.calls[0].includes('hint'), 'prompt 要教它純資料欄位標必填＋hint、default 留空（排程與健檢輪）');
-  assert.ok(adapter.calls[0].includes('output_file 用 docx 或 xlsx') && adapter.calls[0].includes('template_file'), 'prompt 要教它 Word／Excel 是真檔、有範本就套（產檔輪）');
+  assert.ok(adapter.calls[0].includes('output_file 用 docx、xlsx 或 pptx') && adapter.calls[0].includes('template_file'), 'prompt 要教它 Word／Excel／簡報是真檔、有範本就套（產檔輪＋成品格式輪）');
 });
 
 test('資料通道輪：草稿裡人做步驟帶 handoff 欄位能過驗證', async () => {
@@ -93,7 +93,7 @@ test('連兩次都壞：ComposeError 人話', async () => {
   );
 });
 
-// ---- 記憶輪 M1c：拆解器多三段參考（你的分類／欄位詞典／分類守則）＋第 12 條 ----
+// ---- 拆解器多三段參考（你的分類／欄位詞典／分類守則）＋第 12 條 ----
 
 test('M1c：context 三段——你的分類、欄位詞典、分類守則；放在對話紀錄之前；沒給 context 的舊呼叫不多段', async () => {
   const { FACTORY_DICT } = await import('../src/memory.js');
@@ -141,7 +141,7 @@ test('M1c：AI 回的 yaml 頂層帶 category → 草稿保留它（存檔時前
   assert.equal(out.draft.name, '訂團隊聚餐餐廳');
 });
 
-// ---- 移植合併輪 U1b：拆解器帶公司／部門規範當已知條件（兩段，在分類守則之前） ----
+// ---- 拆解器帶公司／部門規範當已知條件（兩段，在分類守則之前） ----
 
 test('U1b ⑦：context 帶 companyRules／deptRules → 多「# 公司規範」「# 部門規範」兩段（每檔 ## 檔名＋全文），順序 公司→部門→分類守則→對話紀錄；給了但空 →（無）；沒給 context 不多段', async () => {
   const adapter = fakeAdapter([ok('拆好了', VALID_DEF)]);
@@ -183,9 +183,9 @@ test('U1b 覆核該修＋B2 ③：拆解器 context 裡規範內文行首 # 降�
   ]);
 });
 
-// ---- 拆法輪 B2（契約 D）：拆解器多帶「# 關於你」與「# 你能派工人做什麼」 ----
+// ---- 拆解器多帶「# 關於你」與「# 你能派工人做什麼」 ----
 
-const CAP_ALL = { web: true, files_default: true, office: ['docx', 'xlsx'], downgrade: ['pptx', 'pdf'], refs: true, connectors: [] };
+const CAP_ALL = { web: true, files_default: true, office: ['docx', 'xlsx', 'pptx'], downgrade: ['pdf'], refs: true, connectors: [] };
 
 test('B2 ①：context.coreNotes → 「# 關於你（拆的時候把這些當已知；不用問）」逐條、在「# 你的分類」之前；空或沒給 → 0 命中，不寫「（無）」', async () => {
   const adapter = fakeAdapter([ok('拆好了', VALID_DEF)]);
@@ -230,7 +230,7 @@ test('B2 ②：context.capabilities → 「# 你能派工人做什麼」五行�
     '- 上網查與讀網頁：可以（設定→執行與排程→AI 工人）',
     '- 讀使用者上傳的參考檔：可以（流程參考檔與公司／部門參考檔，勾了才帶）',
     '- 在產出資料夾寫檔：新流程預設可以',
-    '- 產真檔：Word（docx）、Excel（xlsx）可以；pptx／pdf 目前會降級成 .md',
+    '- 產真檔：Word（docx）、Excel（xlsx）、簡報（pptx）可以；pdf 目前會降級成 .md',
     '- 連接器（行事曆、信箱等）：目前沒有，別排「自動從 X 抓」的步驟',
   ].join('\n');
   assert.ok(p.includes(section), p);
@@ -248,14 +248,14 @@ test('B2 ②：context.capabilities → 「# 你能派工人做什麼」五行�
   assert.equal((bare.calls[0].match(/你能派工人做什麼|# 關於你/g) ?? []).length, 0, '舊呼叫端零變化');
 });
 
-// ---- 拆法輪 B3（契約 E 規矩改字；契約 A composer 側：兩趟 phase＋第一趟 JSON 解析） ----
-// 四個常數逐字照契約 E 貼；第 10 條原文照 HEAD（不動），用來釘「10 之後緊接 12」。
+// ---- （ composer 側：兩趟 phase＋第一趟 JSON 解析） ----
+// 四個常數逐字照；第 10 條原文照 HEAD（不動），用來釘「10 之後緊接 12」。
 
-const RULE3_TAIL = '   顆粒跟著成品走（拆法輪）：成品分幾段（下方「已確認的成品格子」的「分段」）就決定蒐集端拆幾支——分段 3 段以上：一個並行點分成同樣數量的蒐集步（每支各做一段、各自寫明查哪一段的什麼），再接一步彙整（挑題、合併、去重）；不到 3 段：一步蒐集就好。不要為了看起來細而多拆。停點：彙整那一步與最後交付前那一步 stop_point 設 always，其餘 never，除非使用者明說要看。執行時每一步都看得到前面全部步驟的產出，不必為了「拿得到資料」多接線。';
+const RULE3_TAIL = '   顆粒跟著成品走：成品分幾段（下方「已確認的成品格子」的「分段」）就決定蒐集端拆幾支——分段 3 段以上：一個並行點分成同樣數量的蒐集步（每支各做一段、各自寫明查哪一段的什麼），再接一步彙整（挑題、合併、去重）；不到 3 段：一步蒐集就好。不要為了看起來細而多拆。停點：彙整那一步與最後交付前那一步 stop_point 設 always，其餘 never，除非使用者明說要看。執行時每一步都看得到前面全部步驟的產出，不必為了「拿得到資料」多接線。';
 const RULE8 = '8. 資料通道（2026-09-16 改）：資料分兩種。(a) AI 上網查得到的（新聞、公開資訊、網頁、公開報告、公開行情）：讓 AI 步驟自己查，instruction 寫明查哪裡（網站或來源類型）、範圍多久（例「近 7 天」）、要幾則、挑選標準；不要做成欄位叫使用者貼。(b) 只有使用者才拿得到的（來信、內部名單、上週紀錄、營收數字、客戶資料）：一律做成 params，並在用到它的每個 AI 步驟 instruction 裡寫 {{key}} 引用——不要拆成「請使用者貼上」的 human 步驟；human 步驟只留 AI 代替不了的實體動作（開會、寄出、簽名、錄製）。human 步驟後面接 AI 步驟時，必填 handoff（字串：完成時要交出什麼，例「會議結論三條」），且下游 AI 的 instruction 明寫吃的是它交出的內容。純資料欄位一律 {key, label, default: \'\'（留空）, required: true, hint: 使用者該貼什麼（例「上個月每篇貼文的日期／讚數／留言數」）}——不要把提示文字塞進 default；其他可調欄位（份量、語氣、數量）照舊給實際預設值。';
 const RULE10 = '10. 交貨查核：使用者在對話裡講到的具體要求（數字、時限、格式、口味、禁忌、對象）一律寫進對應步驟的 review_focus（必守，交貨查核逐條對）或 constraints，不准只留在對話裡。';
-const RULE12 = '12. 分類與欄位名（記憶輪，拆法輪改）：分類由使用者在成品卡的下拉決定並隨第二趟送來（見「# 已確認的成品格子」），yaml 頂層寫 category: <那個分類>（只准現有的，或「未分類」）；不要在口語回覆裡問分類。params 的 label 先看「欄位詞典」——同一件事就沿用詞典裡的正式名；沒有才取新名並給 kind（appearance/audience/time/range/limits/method 六選一，寫在該 param 的 kind 欄）。「分類守則」列出的規矩，拆步驟時當成已知條件，寫進對應步驟的 review_focus 或 constraints，不要另外問。';
-const RULE13 = `13. 兩趟輸出（拆法輪）：下方「# 這一趟」會標明是第一趟還是第二趟。第一趟（定成品）：不要輸出 yaml。輸出一句口語回覆（講你猜的成品長什麼樣、哪裡不確定），接一個 \`\`\`json 圍欄：{"shape":{"deliverable":{"value","basis"},"type":…,"audience":…,"style":…,"length":…,"sections":…,"range":…},"sources":[{"name","from","note"}],"category":"…"}。七格＝成品（一句話講交出什麼）／型態（文章、表格、簡報稿、Excel、Word、講稿…）／對象（給誰看或聽）／段子或風格（語氣、口吻）／長度（字數、頁數、分鐘）／分段（成品分哪幾段，用「、」隔開）／範圍（時間範圍或涵蓋範圍）；每格答案要先填好——依序從「關於你」「你說的（對話紀錄）」「分類守則」「公司規範」推，推不出來給合理預設；basis 只能寫 自我介紹、你說的、分類守則、公司規範、預設 五選一，用不到的格 value 空字串、basis 寫 預設；不要反問。sources 的 from 只能是 web（AI 上網查）、paste（使用者貼，AI 拿不到的）、upload（使用者上傳檔案）、shared（公司或部門參考檔，note 寫檔名）、upstream（前一步產出）、later（要連接器才拿得到，目前沒有）。category 只准選現有分類，沒有合適的寫「未分類」。第二趟（落地）：下方會附「# 已確認的成品格子」與「# 資料來源」，照著做——每格變一個 param（label 對詞典正式名：對象→讀者、長度→長度、段子或風格→語氣、型態→型態、分段→分段、範圍→範圍；成品那格不做欄位，當流程 name 與交付步 instruction 的主詞），default＝確認過的值，用不到的格不做欄位；最後交付那一步的 output_type／output_structure／output_length／output_tone 分別填型態／分段／長度／段子或風格的值，instruction 用 {{key}} 引用；來源清單逐條落地：web→負責蒐集的 AI 步驟 instruction 寫明查哪裡與範圍（第 8 條 a）；paste→params required: true＋hint（第 8 條 b）；upload→該步 attachments 寫那個檔名，或做成 human 步驟交出（handoff 寫明交什麼）；shared→attachments 寫 {scope: company 或 category, name: 檔名}；upstream→接線；later→先做成 paste 欄位、hint 註明「連接器接上後可自動取得」。`;
+const RULE12 = '12. 分類與欄位名：分類由使用者在成品卡的下拉決定並隨第二趟送來（見「# 已確認的成品格子」），yaml 頂層寫 category: <那個分類>（只准現有的，或「未分類」）；不要在口語回覆裡問分類。params 的 label 先看「欄位詞典」——同一件事就沿用詞典裡的正式名；沒有才取新名並給 kind（appearance/audience/time/range/limits/method 六選一，寫在該 param 的 kind 欄）。「分類守則」列出的規矩，拆步驟時當成已知條件，寫進對應步驟的 review_focus 或 constraints，不要另外問。';
+const RULE13 = `13. 兩趟輸出：下方「# 這一趟」會標明是第一趟還是第二趟。第一趟（定成品）：不要輸出 yaml。輸出一句口語回覆（講你猜的成品長什麼樣、哪裡不確定），接一個 \`\`\`json 圍欄：{"shape":{"deliverable":{"value","basis"},"type":…,"audience":…,"style":…,"length":…,"sections":…,"range":…},"sources":[{"name","from","note"}],"category":"…"}。七格＝成品（一句話講交出什麼）／型態（文章、表格、簡報稿、Excel、Word、講稿…）／對象（給誰看或聽）／段子或風格（語氣、口吻）／長度（字數、頁數、分鐘）／分段（成品分哪幾段，用「、」隔開）／範圍（時間範圍或涵蓋範圍）；每格答案要先填好——依序從「關於你」「你說的（對話紀錄）」「分類守則」「公司規範」推，推不出來給合理預設；basis 只能寫 自我介紹、你說的、分類守則、公司規範、預設 五選一，用不到的格 value 空字串、basis 寫 預設；不要反問。sources 的 from 只能是 web（AI 上網查）、paste（使用者貼，AI 拿不到的）、upload（使用者上傳檔案）、shared（公司或部門參考檔，note 寫檔名）、upstream（前一步產出）、later（要連接器才拿得到，目前沒有）。category 只准選現有分類，沒有合適的寫「未分類」。第二趟（落地）：下方會附「# 已確認的成品格子」與「# 資料來源」，照著做——每格變一個 param（label 對詞典正式名：對象→讀者、長度→長度、段子或風格→語氣、型態→型態、分段→分段、範圍→範圍；成品那格不做欄位，當流程 name 與交付步 instruction 的主詞），default＝確認過的值，用不到的格不做欄位；最後交付那一步的 output_type／output_structure／output_length／output_tone 分別填型態／分段／長度／段子或風格的值，instruction 用 {{key}} 引用；來源清單逐條落地：web→負責蒐集的 AI 步驟 instruction 寫明查哪裡與範圍（第 8 條 a）；paste→params required: true＋hint（第 8 條 b）；upload→該步 attachments 寫那個檔名，或做成 human 步驟交出（handoff 寫明交什麼）；shared→attachments 寫 {scope: company 或 category, name: 檔名}；upstream→接線；later→先做成 paste 欄位、hint 註明「連接器接上後可自動取得」。`;
 
 const SHAPE = {
   deliverable: { value: '週報', basis: '你說的' },
@@ -290,7 +290,7 @@ test('B3 ②：第 8 條新文仍含「一律做成 params」「required: true�
   assert.ok(p.includes('(a) AI 上網查得到的') && p.includes('(b) 只有使用者才拿得到的'), '第 8 條分 (a)(b) 兩種');
   for (const s of [
     '1. 先寫一段給使用者的口語回覆', '2. 接著輸出一個 ```yaml 圍欄', '4. 使用者口述自己的做法時', '5. 關鍵產出步驟 stop_point 設 always',
-    '6. 若下方附有現有草稿', '7. 指示及格線（每一步都要過）', '9. 產檔（產檔輪）',
+    '6. 若下方附有現有草稿', '7. 指示及格線（每一步都要過）', '9. 產檔：',
   ]) assert.ok(p.includes(s), `第 ${s.slice(0, 1)} 條原句要在`);
 });
 
@@ -407,4 +407,29 @@ test('B3 ⑦：adapter.complete 的 meta＝{kind:\'compose\', phase}——shape�
   const old = fakeAdapter([ok('拆好了', VALID_DEF)]);
   await compose({ adapter: old, messages: MSGS });
   assert.deepEqual(old.metas[0], { kind: 'compose', phase: 'draft' });
+});
+const count = (s, n) => s.split(n).length - 1;
+
+test('成品格式輪：第二趟多一段「使用者已經選好的交付方式」——檔案種類與舊作品；沒選就不印', async () => {
+  const a1 = fakeAdapter([ok('拆好了', VALID_DEF)]);
+  await compose({ adapter: a1, messages: MSGS, phase: 'draft', shape: SHAPE, sources: SOURCES, category: '旅遊', outputFile: 'pptx', sampleName: '上季月報.pptx' });
+  const p = a1.calls[0];
+  assert.ok(p.includes('# 使用者已經選好的交付方式（不要改、不要問）'), p);
+  assert.ok(p.includes('output_file 就寫 pptx'), '講明最後一步寫哪個值');
+  assert.ok(p.includes('長度用張數'), '簡報要用張數不用頁數');
+  assert.ok(p.includes('「上季月報.pptx」') && p.includes('attachments'), '舊作品要進 attachments');
+  assert.ok(p.includes('不要抄它的數字'), '照樣子做、不照抄——不然會把舊數字寫進新報告');
+  assert.ok(p.indexOf('# 已確認的成品格子') < p.indexOf('# 使用者已經選好的交付方式'), '接在格子與來源之後');
+
+  const a2 = fakeAdapter([ok('拆好了', VALID_DEF)]);
+  await compose({ adapter: a2, messages: MSGS, phase: 'draft', shape: SHAPE, sources: SOURCES, category: '旅遊' });
+  assert.equal(count(a2.calls[0], '使用者已經選好的交付方式'), 0, '沒選＝不印（連跑那條路沒有卡）');
+
+  const a3 = fakeAdapter([ok('拆好了', VALID_DEF)]);
+  await compose({ adapter: a3, messages: MSGS, phase: 'draft', shape: SHAPE, sources: SOURCES, category: '旅遊', outputFile: 'md' });
+  assert.ok(a3.calls[0].includes('output_file 就寫 md') && !a3.calls[0].includes('長度用張數'), '文字檔不講張數');
+
+  const a4 = fakeAdapter([ok('拆好了', VALID_DEF)]);
+  await compose({ adapter: a4, messages: MSGS, phase: 'draft', shape: SHAPE, sources: SOURCES, category: '旅遊', outputFile: '../evil' });
+  assert.equal(count(a4.calls[0], '使用者已經選好的交付方式'), 0, '不認識的檔案種類一概不印');
 });

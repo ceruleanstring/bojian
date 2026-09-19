@@ -13,13 +13,14 @@ export class SchemaError extends Error {
 const EXECUTORS = ['ai', 'human'];
 const STOP_POINTS = ['always', 'never'];
 const KINDS = ['task', 'branch', 'fork', 'join'];
-// 檔案格式三級制（D19→產檔輪）：TIER1 引擎直接存文字；OFFICE 由工人在產出資料夾用剝繭自帶套件產真檔（需流程 permissions.files）；
-// TIER2（簡報／PDF）第二批才接，未接時降級存 .md 並講明
+// 檔案格式三級制（D19→；把簡報搬進 OFFICE）：TIER1 引擎直接存文字；
+// OFFICE 由工人在產出資料夾用剝繭自帶套件產真檔（需流程 permissions.files）；
+// TIER2 尚未接，未接時降級存 .md 並講明——只剩 PDF：要嵌中文字型（好幾 MB），與離線化衝突，已定案延後
 export const OUTPUT_TIER1 = ['md', 'txt', 'csv', 'html', 'json'];
-export const OUTPUT_OFFICE = ['docx', 'xlsx'];
-export const OUTPUT_TIER2 = ['pptx', 'pdf'];
+export const OUTPUT_OFFICE = ['docx', 'xlsx', 'pptx'];
+export const OUTPUT_TIER2 = ['pdf'];
 const OUTPUT_EXTS = [...OUTPUT_TIER1, ...OUTPUT_OFFICE, ...OUTPUT_TIER2];
-// 提前提醒九檔（D20）：步驟層 remind_leads 與全域設定 exec.remind_leads 共用
+// 提前提醒九檔：步驟層 remind_leads 與全域設定 exec.remind_leads 共用
 const REMIND_LEADS = ['10m', '30m', '1h', '2h', '3h', '6h', '12h', '1d', '2d'];
 const isLeadList = (v) => Array.isArray(v) && v.every((l) =>
   (typeof l === 'string' ? REMIND_LEADS.includes(l) : l && typeof l === 'object' && typeof l.at === 'string'));
@@ -44,16 +45,16 @@ export function validateWorkflow(def, { allowFloating = false } = {}) {
   if (!def || typeof def !== 'object') throw new SchemaError(['整份定義不是物件']);
   if (def.format !== 1) problems.push('format 必須是 1');
   if (typeof def.name !== 'string' || !def.name.trim()) problems.push('缺 name（Workflow 名稱）');
-  // 記憶輪：拆解器的草稿可帶頂層 category（放哪個分類）；這裡只驗型別，POST /api/workflows 存檔前剝掉（分類是路徑，不進 workflow.yaml）
+  // 拆解器的草稿可帶頂層 category（放哪個分類）；這裡只驗型別，POST /api/workflows 存檔前剝掉（分類是路徑，不進 workflow.yaml）
   if (def.category !== undefined && typeof def.category !== 'string') problems.push('category 要是文字');
-  // 流程權限（產檔輪）：files＝允許工人在這趟的產出資料夾寫檔與執行程式；沒帶＝關
+  // 流程權限：files＝允許工人在這趟的產出資料夾寫檔與執行程式；沒帶＝關
   if (def.permissions !== undefined) {
     const pm = def.permissions;
     if (!pm || typeof pm !== 'object' || Array.isArray(pm)) problems.push('permissions 要是物件');
     else if (pm.files !== undefined && typeof pm.files !== 'boolean') problems.push('permissions.files 要是開或關');
   }
-  // 交貨查核輪：流程層一個開關；缺省＝開（enabled !== false 即開）
-  // 監工輪：子開關 facts＝數字對原始資料；缺省也是開（facts !== false）
+  // 流程層一個開關；缺省＝開（enabled !== false 即開）
+  // 子開關 facts＝數字對原始資料；缺省也是開（facts !== false）
   if (def.check !== undefined) {
     const ck = def.check;
     if (!ck || typeof ck !== 'object' || Array.isArray(ck)) problems.push('check 要是物件');
@@ -62,7 +63,7 @@ export function validateWorkflow(def, { allowFloating = false } = {}) {
       if (ck.facts !== undefined && typeof ck.facts !== 'boolean') problems.push('check.facts 要是開或關');
     }
   }
-  // 監工輪：流程層監工開關；缺省＝開（enabled !== false）。只管開場備註、交接備註、派工、收尾紀錄——判路永遠跑
+  // 流程層監工開關；缺省＝開（enabled !== false）。只管開場備註、交接備註、派工、收尾紀錄——判路永遠跑
   if (def.supervisor !== undefined) {
     const sv = def.supervisor;
     if (!sv || typeof sv !== 'object' || Array.isArray(sv)) problems.push('supervisor 要是物件');
@@ -77,12 +78,12 @@ export function validateWorkflow(def, { allowFloating = false } = {}) {
     else paramKeys.add(p.key);
     if (!p || typeof p.label !== 'string' || !p.label.trim()) problems.push(`params[${i}] 缺 label`);
     if (!p || p.default === undefined) problems.push(`params[${i}] 缺 default`);
-    // required／hint（排程與健檢輪）：必填旗標＋「要貼什麼」提示；純資料欄位由拆解器標，開跑前健檢據此擋沒填
+    // required／hint：必填旗標＋「要貼什麼」提示；純資料欄位由拆解器標，開跑前健檢據此擋沒填
     if (p && p.required !== undefined && typeof p.required !== 'boolean') problems.push(`params[${i}] required 要是開或關`);
     if (p && p.hint !== undefined && typeof p.hint !== 'string') problems.push(`params[${i}] hint 要是文字`);
-    // kind（記憶輪）：欄位性質六類，拆解器給、詞典長新欄位時沿用；沒給（含 null）＝詞典補成「做法」
+    // kind：欄位性質六類，拆解器給、詞典長新欄位時沿用；沒給（含 null）＝詞典補成「做法」
     if (p && p.kind != null && !Object.hasOwn(FIELD_KINDS, p.kind)) problems.push(`params[${i}] kind 必須是 ${KIND_LIST}`);
-    // input（排版輪 L11，題 2 A）：'file'＝每次開跑上傳一個檔（只跟這一趟存）；缺省＝文字欄位（舊檔都沒有這個鍵）
+    // input：'file'＝每次開跑上傳一個檔（只跟這一趟存）；缺省＝文字欄位（舊檔都沒有這個鍵）
     if (p && p.input !== undefined && p.input !== 'file') problems.push(`params[${i}] input 只能是 file（每次上傳一個檔）`);
   });
 
@@ -91,7 +92,7 @@ export function validateWorkflow(def, { allowFloating = false } = {}) {
   for (const [i, n] of nodes.entries()) {
     const at = `nodes[${i}]`;
     if (!n || typeof n.id !== 'string' || !n.id.trim()) { problems.push(`${at} 缺 id`); continue; }
-    // 監工輪：底線開頭保留給 _brief／_record 兩個偽節點（用量帳本與卷宗都用它們當 node 鍵）
+    // 底線開頭保留給 _brief／_record 兩個偽節點（用量帳本與卷宗都用它們當 node 鍵）
     if (n.id.startsWith('_')) problems.push(`節點「${n.id}」步驟 id 不能以 _ 開頭`);
     if (ids.has(n.id)) problems.push(`節點 id「${n.id}」重複`);
     else ids.add(n.id);
@@ -99,14 +100,14 @@ export function validateWorkflow(def, { allowFloating = false } = {}) {
     const kind = nodeKind(n);
     if (!KINDS.includes(kind)) { problems.push(`節點「${n.id}」kind 必須是 task/branch/fork/join`); continue; }
     if (!Array.isArray(n.next)) problems.push(`${at} next 必須是陣列`);
-    // merge（排版輪 L13，題 1 A）：'any'＝任一條線到就開始；缺省＝等全部（舊檔都沒有這個鍵）
+    // merge：'any'＝任一條線到就開始；缺省＝等全部（舊檔都沒有這個鍵）
     if (n.merge !== undefined && n.merge !== 'any') problems.push(`節點「${n.id}」merge 只能是 any（任一條到）`);
     if (kind === 'task') {
       if (!EXECUTORS.includes(n.executor)) problems.push(`節點「${n.id}」executor 必須是 ai 或 human`);
       if (!STOP_POINTS.includes(n.stop_point)) problems.push(`節點「${n.id}」stop_point 必須是 always 或 never`);
       if (typeof n.instruction !== 'string' || !n.instruction.trim()) problems.push(`節點「${n.id}」缺 instruction`);
       if (n.output_format !== undefined && typeof n.output_format !== 'string') problems.push(`節點「${n.id}」output_format 要是文字`);
-      // handoff（資料通道輪）：人做步驟「完成時要交出什麼」——健檢據此判定下游 AI 有沒有內容來源
+      // handoff：人做步驟「完成時要交出什麼」——健檢據此判定下游 AI 有沒有內容來源
       for (const f of ['role_context', 'background', 'constraints', 'examples', 'review_focus', 'output_type', 'output_structure', 'output_length', 'output_tone', 'template_file', 'handoff']) {
         if (n[f] !== undefined && typeof n[f] !== 'string') problems.push(`節點「${n.id}」${f} 要是文字`);
       }
@@ -115,18 +116,18 @@ export function validateWorkflow(def, { allowFloating = false } = {}) {
       if (n.attachments !== undefined && (!Array.isArray(n.attachments) || !n.attachments.every(isAttachment))) {
         problems.push(`節點「${n.id}」attachments 要是檔名清單或 {scope, name}（不含路徑符號）`);
       }
-      // 步驟層提前提醒（D20）：等時刻步驟的擋時限升級用；元素=九檔字串或 {at: 自訂時刻}
+      // 步驟層提前提醒：等時刻步驟的擋時限升級用；元素=九檔字串或 {at: 自訂時刻}
       if (n.remind_leads !== undefined && !isLeadList(n.remind_leads)) {
         problems.push(`節點「${n.id}」remind_leads 要是提前量清單（${REMIND_LEADS.join('/')} 或 {at: 時刻}）`);
       }
-      // 等時刻（D20）：字串=固定時刻（ISO），物件 {from: nodeId}=由上游步驟產出決定（動態時刻）
+      // 等時刻：字串=固定時刻（ISO），物件 {from: nodeId}=由上游步驟產出決定（動態時刻）
       if (n.wait_until !== undefined) {
         const w = n.wait_until;
         const isFixed = typeof w === 'string' && w.trim();
         const isFrom = w && typeof w === 'object' && typeof w.from === 'string' && w.from.trim();
         if (!isFixed && !isFrom) problems.push(`節點「${n.id}」wait_until 要是時刻文字或 {from: 步驟id}`);
       }
-      // 監工輪：三個勾＝監工可以改這一步的什麼（缺省 note 開、tier 關（09-09 改）、tools 關，取值一律走 supervisor.supervisorFlags）
+      // 三個勾＝監工可以改這一步的什麼（缺省 note 開、tier 關（09-09 改）、tools 關，取值一律走 supervisor.supervisorFlags）
       if (n.supervisor !== undefined) {
         const sv = n.supervisor;
         if (!sv || typeof sv !== 'object' || Array.isArray(sv)) problems.push(`節點「${n.id}」supervisor 要是物件`);
@@ -139,7 +140,7 @@ export function validateWorkflow(def, { allowFloating = false } = {}) {
       if (n.model_tier !== undefined && !MODEL_TIERS.includes(n.model_tier)) problems.push(`節點「${n.id}」model_tier 必須是 fast/balanced/deep`);
       if (n.creativity !== undefined && !['strict', 'open'].includes(n.creativity)) problems.push(`節點「${n.id}」creativity 必須是 strict/open`);
       if (n.retry !== undefined && ![0, 1, 2].includes(n.retry)) problems.push(`節點「${n.id}」retry 必須是 0/1/2`);
-      // 一般節點多個 next＝並行分頭（畫布回饋輪：fork/join 盒退場，多出線即並行、多入線即會合）
+      // 一般節點多個 next＝並行分頭（fork/join 盒退場，多出線即並行、多入線即會合）
     } else if (kind === 'branch') {
       if (typeof n.instruction !== 'string' || !n.instruction.trim()) problems.push(`分岔「${n.id}」缺 instruction（判斷依據）`);
       const brs = Array.isArray(n.branches) ? n.branches : [];
@@ -205,13 +206,13 @@ export function validateWorkflow(def, { allowFloating = false } = {}) {
   if (problems.length) throw new SchemaError(problems);
 }
 
-// 預設補值（監工輪）：純函式，回新物件——把「缺省」寫成明值，好讓流程頁的開關有東西可顯示、可切換。
+// 預設補值：純函式，回新物件——把「缺省」寫成明值，好讓流程頁的開關有東西可顯示、可切換。
 // mode='create'（親手建的新流程、前端「存進流程庫」的 POST /api/workflows）：監工、查核、數字對原始資料三個都補。
 //   facts 看這條流程有沒有「必填的資料欄位」——有資料要對才對，沒有就不必每步都去翻原始資料。
 // mode='save'（PUT 存檔）：只補監工與查核，永遠不碰 facts——既有流程沒這個欄位＝缺省開，
 //   手改一個節點位置就把它靜默翻成關，等於使用者沒按過任何按鈕，「數字對原始資料」就自己關掉了。
 // 匯入不套（沿用缺省語意）。型別錯不在這裡表態，交給 validateWorkflow 報人話。
-// 記憶輪：第三參數 defaults＝設定頁「新流程的預設」（settings.json 的 defaults，缺鍵補程式缺省）。只有 create 吃它：
+// 第三參數 defaults＝設定頁「新流程的預設」（settings.json 的 defaults，缺鍵補程式缺省）。只有 create 吃它：
 //   產檔權限、查核開關、監工開關照設定；check_facts 'auto'＝現行 required 規則、'on'／'off'＝固定；
 //   每個 task 節點缺三個勾且設定值不等於程式缺省時才寫進節點（等於缺省就不寫，節點乾淨、supervisorFlags 取值一樣）。
 //   save 永遠只補兩個主開關（既有流程缺省語意＝開，不吃新流程的預設）。defaults 省略＝程式缺省，行為與以前一字不差。
@@ -243,7 +244,7 @@ export function applyDefaults(def, { mode, defaults } = {}) {
   return out;
 }
 
-// 全域設定逐欄驗證（記憶輪，PUT /api/settings）：回人話清單，空＝合法。缺鍵不報（readSettings 會補缺省），只驗有給的。
+// 全域設定逐欄驗證（PUT /api/settings）：回人話清單，空＝合法。缺鍵不報（readSettings 會補缺省），只驗有給的。
 const SENSITIVE_NAMES = { health: '健康', politics: '政治', religion: '宗教', finance: '財務' };
 export function validateSettings(s) {
   const out = [];
@@ -283,7 +284,7 @@ export function validateSettings(s) {
     chk(e.web, isBool, '允許查網路要是開或關');
   }
   chk(s.company_name, (v) => typeof v === 'string' && Array.from(v).length <= 60, '組織名稱要是文字、60 字內');
-  const c = s.compose; // 拆法輪（契約 F）
+  const c = s.compose; //
   chk(c, isObj, '設定的拆解格式不對');
   if (isObj(c)) chk(c.confirm_shape, isBool, '拆之前先確認成品長相要是開或關');
   return out;

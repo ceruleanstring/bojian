@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { inputSources, packInputs, preflight, uploadReaders } from '../src/preflight.js';
 import { ancestorIds } from '../src/graph.js';
 
-// ---- 排版輪 L14b：/api/preflight 的輸入來源不重複傳——原本每步列全部祖先（200 步 119 萬字元，隨步數平方成長） ----
+// ---- /api/preflight 的輸入來源不重複傳——原本每步列全部祖先（200 步 119 萬字元，隨步數平方成長） ----
 test('排版輪 L14b ④：packInputs——每個步驟名稱只傳一次、祖先用「前一步＋多出來的」表示；200→400 步回應約兩倍（不再平方成長）；祖先順序可還原', () => {
   const chain = (n) => ({ format: 1, name: '鏈', params: [], nodes: Array.from({ length: n }, (_, i) => ({ id: `s${i}`, title: `第 ${i} 步整理資料並寫成摘要`, executor: 'ai', stop_point: 'never', instruction: '依上一步', next: i < n - 1 ? [`s${i + 1}`] : [] })) });
   const size = (n) => JSON.stringify(packInputs(chain(n))).length;
@@ -45,7 +45,7 @@ test('inputSources：AI 上游＝upstream；人做上游＝human；引用欄位�
   const src = inputSources(def);
   assert.deepEqual(src.classify.map((s) => s.kind), ['human']);
   assert.equal(src.classify[0].id, 'paste');
-  // 拆法輪 B1：沿路全帶——隔一步的人做步驟 paste 也是 reply 的來源（最近在前）
+  // 沿路全帶——隔一步的人做步驟 paste 也是 reply 的來源（最近在前）
   assert.deepEqual(src.reply.map((s) => [s.kind, s.id]), [['upstream', 'classify'], ['human', 'paste'], ['param', 'tone'], ['attachment', '品牌手冊.txt']]);
   assert.deepEqual(src.paste.map((s) => [s.kind, s.id]), [['param', 'incoming_email']]);
 });
@@ -74,7 +74,7 @@ test('inputSources：穿透並行點與分岔往上找真正的內容來源', ()
   assert.deepEqual(src2.e.map((s) => [s.id, s.label]), [['c', '上一步《C》的產出'], ['a', '更早的步驟《A》的產出']]);
 });
 
-// ---- 拆法輪 B1（契約 C）：健檢的輸入來源與執行端同步——沿路全部祖先 task、最近在前 ----
+// ---- 健檢的輸入來源與執行端同步——沿路全部祖先 task、最近在前 ----
 
 test('B1 ⑥：a→b→c、c 指示「依據上一步」→ inputSources(def).c 兩條 upstream（b 上一步、a 更早的步驟）、不 block；隔兩步的產出算有輸入', () => {
   const def = {
@@ -154,7 +154,7 @@ test('preflight R3：人做步驟後接 AI 但沒寫 handoff → warn（R1 已�
   assert.deepEqual(w.fix, { kind: 'node', id: 'paste' });
 });
 
-// ---- 排程與健檢輪 R4：欄位還沒填 ----
+// ---- 欄位還沒填 ----
 const IG_DEF = {
   format: 1, name: 'IG 月報',
   params: [
@@ -191,18 +191,20 @@ test('R4：必填欄位空白 → 擋，detail 帶 hint；非佔位預設沒改�
   assert.ok(!r.issues.some((i) => i.code === 'param-unfilled' && i.param === 'unused'));
 });
 
-test('R5 file-permission：步驟要產 docx／xlsx 但流程沒開產檔權限 → 擋並指到 flow；開了就放行；pptx 不歸這條', () => {
+test('R5 file-permission：步驟要產 docx／xlsx／pptx 但流程沒開產檔權限 → 逐步擋並指到 flow；開了就放行（成品格式輪：簡報改歸這條）', () => {
   const def = structuredClone(IG_DEF);
   def.nodes[0].output_file = 'docx';
   def.nodes.push({ id: 'deck', title: '簡報', executor: 'ai', stop_point: 'never', instruction: '做簡報 {{top_count}}', output_file: 'pptx', next: [] });
   const r = preflight(def);
   const b = r.issues.filter((i) => i.code === 'file-permission');
-  assert.equal(b.length, 1);
-  assert.equal(b[0].level, 'block');
-  assert.equal(b[0].node, 'pick');
-  assert.deepEqual(b[0].fix, { kind: 'flow', id: 'permissions.files' });
-  assert.equal(b[0].title, '「挑熱門貼文」要產出 .docx 檔，但這條 Workflow 沒開產檔權限');
-  assert.equal(b[0].detail, '打開 Workflow 頁的「允許這條 Workflow 產出檔案」再按開始；不開的話會改存成 .md 文字檔。');
+  assert.equal(b.length, 2, '簡報那步也要擋——它現在會產真檔');
+  assert.deepEqual(b.map((i) => i.node).sort(), ['deck', 'pick']);
+  assert.ok(b.every((i) => i.level === 'block'));
+  assert.ok(b.find((i) => i.node === 'deck').title.includes('.pptx'), '簡報那條的標題要講 .pptx');
+  const pick = b.find((i) => i.node === 'pick');
+  assert.deepEqual(pick.fix, { kind: 'flow', id: 'permissions.files' });
+  assert.equal(pick.title, '「挑熱門貼文」要產出 .docx 檔，但這條 Workflow 沒開產檔權限');
+  assert.equal(pick.detail, '打開 Workflow 頁的「允許這條 Workflow 產出檔案」再按開始；不開的話會改存成 .md 文字檔。');
   def.permissions = { files: true };
   assert.ok(!preflight(def).issues.some((i) => i.code === 'file-permission'));
 });
@@ -214,7 +216,7 @@ test('preflight：inputs 回傳每一步的來源清單（給抽屜預覽用）'
   assert.ok(r.inputs.classify[0].label.includes('貼上客戶來信'));
 });
 
-// ---- 移植合併輪 U1b：attachments 混型——共用層的 {scope,name} 也算 attachment（健檢標籤標層、不誤判） ----
+// ---- attachments 混型——共用層的 {scope,name} 也算 attachment（健檢標籤標層、不誤判） ----
 
 test('U1b ⑤：inputSources attachments 混型 → 字串與 {scope,name} 各一條 attachment，id 用 scope:名稱、label 標「（公司）」「（分類）」、無 [object Object]；只掛共用層參考檔的 AI 步驟不被健檢擋', () => {
   const def = structuredClone(HUMAN_THEN_AI);
@@ -237,7 +239,7 @@ test('U1b ⑤：inputSources attachments 混型 → 字串與 {scope,name} 各�
   assert.deepEqual(pf.inputs.a.map((s) => s.id), ['company:範本.docx']);
 });
 
-// ---- 排版輪 L11（題 2 A）：每次上傳的欄位——必填沒給檔＝擋；讀檔的是「沒有 AI 祖先的 AI 步驟」 ----
+// ---- 每次上傳的欄位——必填沒給檔＝擋；讀檔的是「沒有 AI 祖先的 AI 步驟」 ----
 const UPLOAD_DEF = {
   format: 1, name: '月報',
   params: [
@@ -268,7 +270,7 @@ test('排版輪 L11 ⑧：input:file 必填沒給檔＝block upload-missing（�
   assert.equal(Object.values(inputSources(HUMAN_THEN_AI)).flat().filter((s) => s.kind === 'upload').length, 0);
 });
 
-// ---- 排版輪 L13（題 1 A）：任一條到——輸入來源照列全部前驅並標「任一條到」；誰讀上傳檔跟著改（有一條線沒有 AI 祖先就算） ----
+// ---- 任一條到——輸入來源照列全部前驅並標「任一條到」；誰讀上傳檔跟著改（有一條線沒有 AI 祖先就算） ----
 test('排版輪 L13 引擎⑤：preflight 輸入來源列全部前驅，直接接進來的線標「任一條到」、更早的步驟不標；缺省（等全部）字面照舊', () => {
   const def = {
     format: 1, name: '任一條到', params: [],
@@ -308,7 +310,7 @@ test('排版輪 L13 引擎⑤：uploadReaders——任一條到的卡只要有�
   assert.deepEqual(uploadReaders(UPLOAD_DEF), ['a1'], '舊定義照舊');
 });
 
-// ── 2026-09-18 審查修正輪 ──────────────────────────────────────────────
+// ── 2026-09-18  ──────────────────────────────────────────────
 
 test('必填欄位的預設值本來就是答案：不准因為「值等於預設」就永遠擋著不給開跑', () => {
   const mk = (dft) => ({
@@ -332,7 +334,7 @@ test('必填欄位的預設值本來就是答案：不准因為「值等於預�
     assert.deepEqual(codes(mk(dft), { len: dft }), ['len'], `佔位寫法沒擋到：${dft}`);
   }
   // 誤擋比漏擋嚴重（誤擋＝那個欄位永遠開不了跑，正是本測試上半段要拆的病）。
-  // 以下每條都貼著本輪新加的四段（此處填／放／寫／貼、例：、待填、XXX）的邊界，一個都不准擋——
+  // 以下每條都貼著新加的四段（此處填／放／寫／貼、例：、待填、XXX）的邊界，一個都不准擋——
   // 覆核兩輪退回的反例都在這裡：句中的「此處填」、字首不是「例」的「案例：」、帶其他字的「待填」。
   for (const dft of [
     '例行週會紀錄', '條列重點', '3 項', '本季', '5 頁內', '親切但不裝熟',

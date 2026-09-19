@@ -297,17 +297,17 @@ test('T5 ⑧ 畫布節點執行者 chip（canvas.js）：紫／藍退場、人�
   assert.ok(cv.includes(`'<i class="ph ph-user"></i>你來'`), '畫布人做節點 chip 該帶 ph-user');
 });
 
-// ---------- T6 文案 A：卡片鈕、記憶卡標籤、抽屜標籤、零碎短詞化（契約 B 第 1、2、3、6 組；不碰 src） ----------
+// ---------- T6 文案 A：卡片鈕、記憶卡標籤、抽屜標籤、零碎短詞化（ 1、2、3、6 組；不碰 src） ----------
 const T6_SCAN = ['我改一下', '回話重做', '就這樣過', '先放著', '晚點回來', '我補給你', '就用現有的做', '我處理好了', '重抓一次',
   '誰說的', '怎麼用', '從哪來', '做完給你看', 'AI 來做', '你來做', '開跑時會拿到', '這次的設定', '先跳過', '自動補跑（不勾',
   '問我補不補', '常用⋯', '存常用', '要你看一眼', '記住這三條', '存進去', '清掉重來', '存起來', '只有這一步', '重試這步',
   '用改過的版本往下', '取消，不改了'];
-// 例外表（契約 A-1：note／title／描述句不改）：命中行必含這些字面之一；表上的字面若已不存在也紅，免得例外表變殭屍
+// 例外表（-1：note／title／描述句不改）：命中行必含這些字面之一；表上的字面若已不存在也紅，免得例外表變殭屍
 const T6_SCAN_ALLOW = {
   '你來做': ['title="這步你來做，完成後回報一句"', '（你來做）交出的內容'], // :650 步驟 title 提示句；:1072 抽屜輸入清單描述句
-  '要你看一眼': ['需要你看一眼的'], // :2551 設定→記憶 h5 段標（契約 B 未列）；:2552 note
+  '要你看一眼': ['需要你看一眼的'], // :2551 設定→記憶 h5 段標；:2552 note
   '存起來': ['上面寫幾條存起來'], /* 排版輪 L7：規矩收進守則卡下方，左邊→上面；排版輪 L8：清單頂「這份 Workflow 會存起來…」提示句退場（工具列「準備執行」取代） */// :2255 note
-  '從哪來': ['<h3>資料從哪來</h3>', '成品長相卡（拆法輪 P4，契約 I'], // 拆法輪 P4：成品卡小表標題＝設計 §五-1 定名「資料從哪來」（批准的文案）；一處標題（排版輪 L9 h5→樣稿 h3）＋函式頭註解
+  '從哪來': ['<h3>資料從哪來</h3>', '成品長相卡（樣稿 uxProductCard）'], // 成品卡小表標題＝設計 §五-1 定名「資料從哪來」（批准的文案）；一處標題（ h5→樣稿 h3）＋函式頭註解
   // 「重試這步」原有一處 note 引用舊鈕名（設定→連線），鈕已改名「重試」，引用跟著改，不留例外
 };
 const btnsOf = (html) => [...html.matchAll(/<button class="btn[^"]*" data-act="([^"]+)"[^>]*>(.*?)<\/button>/g)].map((m) => [m[1], m[2].replace(/<[^>]+>/g, '')]);
@@ -407,7 +407,7 @@ test('T6 ⑥：GLOSSARY 六處改字、行數不超預算 100、「存為片段�
 
 // ---------- T7 文案 B 第 5 組：「分類守則」統一（UI 四處＋src 三段字串＋測試同步） ----------
 // 舊字用兩截拼起來，免得本檔自己被 grep -rn 三目錄掃到（完成定義：三字串在 ui／src／tests 0 命中）
-const T7_OLD = [['這類流程', '要守的'], ['這類流程', '都要守的'], ['這個分類', '要守的'], ['這類 Workflow ', '要守的'], ['這類 Workflow ', '都要守的'], ['這個部門', '要守的']].map((p) => p.join('')); // 後三＝排版輪 L2 新字版本
+const T7_OLD = [['這類流程', '要守的'], ['這類流程', '都要守的'], ['這個分類', '要守的'], ['這類 Workflow ', '要守的'], ['這類 Workflow ', '都要守的'], ['這個部門', '要守的']].map((p) => p.join('')); // 後三＝ 新字版本
 const walk = (dir) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((d) => (d.isDirectory() ? walk(path.join(dir, d.name)) : [path.join(dir, d.name)]));
 
 test('T7 ①：舊字掃描——「分類守則」三種舊寫法在 bojian/ui、bojian/src、bojian/tests 全部檔案 0 命中（＝grep -rn 三目錄為空）', () => {
@@ -426,7 +426,7 @@ test('T7 ②：memTagHtml 群組條 chip 印「分類守則」', () => {
 
 test('T7 ③：分類頁文字框 h5 為「分類守則（一行一條）」', () => {
   const html = uiFn('categoryPageHtml', { state: { categoryPage: { category: '旅遊', data: { rules: [], text: '' }, cards: [] }, keep: {}, run: null } })();
-  const h5 = /<h3>(.*?)<\/h3>/.exec(html)?.[1]; // 排版輪 L7：守則卡標題 h5→h3「分類守則」（樣稿 .guidelines h3）
+  const h5 = /<h3>(.*?)<\/h3>/.exec(html)?.[1]; // 守則卡標題 h5→h3「分類守則」（樣稿 .guidelines h3）
   assert.equal(h5, '分類守則', `分類頁第一個 h3：${h5}`);
 });
 
@@ -452,7 +452,7 @@ test('T7 ⑤：GLOSSARY 群組圈列中文欄加「分類守則」、卷宗與�
 test('T8 ①：SET_TABS 三組改名；「地圖與例外」「連接器與保險箱」「保險箱」「錯過的排程」「自動補跑」在 app.js 0 命中；儀表板「去看」跳記憶總覽', () => {
   const src = uiSrc();
   for (const w of ['地圖與例外', '連接器與保險箱', '保險箱', '錯過的排程', '自動補跑']) assert.equal(count(src, w), 0, `「${w}」該 0 命中`);
-  // 排版輪 L6（契約 K 設定）：只有「個人與記憶」留四分頁；連線、素材庫的子分頁退場（連線改單頁分段、素材庫搬共用素材頁）
+  // 只有「個人與記憶」留四分頁；連線、素材庫的子分頁退場（連線改單頁分段、素材庫搬共用素材頁）
   assert.ok(src.includes("const SET_TABS = { 個人與記憶: ['關於你', '身分', '記憶總覽', '欄位詞典'] };"), '個人與記憶四分頁（SET_TABS 只剩這組）');
   assert.equal(count(src, "連線: ['Claude', 'Google 行事曆']"), 0, '連線不再分頁');
   assert.equal(count(src, "素材庫: ['角色情境', '常用片段']"), 0, '素材庫組退場');
@@ -462,7 +462,7 @@ test('T8 ①：SET_TABS 三組改名；「地圖與例外」「連接器與保�
 });
 
 const t8DefCtx = (tab) => ({ state: { settings: { tab: {}, busy: null }, claude: true }, setTab: () => tab });
-// 排版輪 L6：設定各組改同一張卡分段（h3）；切出某一段＝從 <h3>段名</h3> 到下一個 <h3>
+// 設定各組改同一張卡分段（h3）；切出某一段＝從 <h3>段名</h3> 到下一個 <h3>
 const secOf = (html, t) => { const i = html.indexOf(`<h3>${t}</h3>`); assert.ok(i >= 0, `該有分段 <h3>${t}</h3>`); const j = html.indexOf('<h3>', i + 4); return html.slice(i, j < 0 ? undefined : j); };
 test('T8 ②：新流程的預設——監工總開關與三勾搬到「權限與查核」（數字對原始資料之後）；「AI 步驟」0 命中監工；停點句', () => {
   const all = uiFn('setDefaultsHtml', t8DefCtx('權限與查核'))({ cfg: { defaults: {} } });
@@ -474,7 +474,7 @@ test('T8 ②：新流程的預設——監工總開關與三勾搬到「權限�
   assert.equal(count(ai, '監工'), 0, 'AI 步驟不再有監工');
   assert.ok(ai.includes('模型檔位') && ai.includes('出錯自動重試'), 'AI 步驟留模型與重試');
   const stop = secOf(all, '停點');
-  // 說明文案輪：這一列沒有任何可操作的東西，作用是指路，所以話留在畫面上——但要講完整
+  // 這一列沒有任何可操作的東西，作用是指路，所以話留在畫面上——但要講完整
   assert.ok(stop.includes('哪幾步要停下來等你，在每個步驟自己的設定裡改，不在這一頁。'), '停點指路句');
 });
 
@@ -488,7 +488,7 @@ test('T8 ③：關於你——頂部介紹三列各附「修改」、敏感四�
   for (const t of ['你是誰、做什麼', '小公司負責人', '你做出來的東西通常給誰看', '給主管看', '你最受不了什麼', '受不了術語']) assert.ok(intro.includes(t), `介紹列缺「${t}」`);
   assert.equal(count(intro, '>修改</button>'), 3, '三列各一顆修改');
   assert.equal(count(intro, 'data-act="mem-card"'), 3, '修改＝開那張卡');
-  // 說明文案輪（09-19 裁示：「記敏感資訊的可以合成一欄」）：四列各印一次同樣的小字→合成一列，說明只講一次
+  // （09-19 裁示：「記敏感資訊的可以合成一欄」）：四列各印一次同樣的小字→合成一列，說明只講一次
   assert.equal(count(html, 'data-act="set-sens"'), 4, '四類還是四個可點項');
   assert.equal(count(html, '記敏感資訊'), 1, '合成一列');
   for (const t of ['記健康', '記政治', '記宗教', '記財務']) assert.ok(!html.includes(t), `「${t}」自成一列的寫法退場`);
@@ -496,7 +496,7 @@ test('T8 ③：關於你——頂部介紹三列各附「修改」、敏感四�
   assert.ok(html.includes('class="pill on" data-act="set-sens" data-k="health" aria-pressed="true"'), 'health 開');
   assert.ok(html.includes('class="pill" data-act="set-sens" data-k="politics" aria-pressed="false"'), 'politics 關');
   assert.ok(/記敏感資訊<button type="button" class="hint"[^>]*data-hint="[^"]*預設都不記[^"]*"/.test(html), '說明收進問號，只出現一次');
-  // 排版輪 L6（契約 K）：身分從「關於你」拆出成自己的分頁（原收在 details 裡）
+  // 身分從「關於你」拆出成自己的分頁（原收在 details 裡）
   assert.equal(count(html, 'data-fold="identity"') + count(html, 'data-act="id-add"'), 0, '關於你不再帶身分段');
   const idTab = uiFn('setMemoryHtml', { ...ctx, state: { ...ctx.state, settings: { idEdit: null, tab: { 個人與記憶: '身分' } } } })({ cfg: { memory: {} }, cards, identities: [] });
   assert.ok(idTab.includes('身分') && idTab.includes('data-act="id-add"'), '身分分頁有身分段與新增');
@@ -513,7 +513,7 @@ test('T8 ④：執行與排程→排程：「錯過時」二鍵「先詢問／�
 });
 
 test('T8 ⑤：記憶→連接器與金鑰：兩列「尚未提供」；記憶總覽底部收摺欄位詞典（表格照舊）；素材庫沒有身分分支', () => {
-  // 排版輪 L6：連接器與金鑰搬到「連線」分段；欄位詞典改「個人與記憶→欄位詞典」分頁；素材庫改共用素材整頁
+  // 連接器與金鑰搬到「連線」分段；欄位詞典改「個人與記憶→欄位詞典」分頁；素材庫改共用素材整頁
   const keys = uiFn('setConnHtml', { state: { settings: { busy: null, msg: null }, claude: true }, memAt: () => '' })({ snapshot: null });
   assert.equal(count(secOf(keys, '連接器與金鑰'), '尚未提供'), 2);
   assert.ok(keys.includes('連接器與金鑰') && keys.includes('雲端硬碟、信箱'));
@@ -524,7 +524,7 @@ test('T8 ⑤：記憶→連接器與金鑰：兩列「尚未提供」；記憶�
 });
 
 // ---------- T9 側欄：四全域項、分類樹收合（文字開頁／箭頭收合）、流程庫頁 ----------
-// 排版輪 F2：側欄草稿列改判 draftLive()（讀 state.chat），假 state 補上空的 chat
+// 側欄草稿列改判 draftLive()（讀 state.chat），假 state 補上空的 chat
 const t9Side = (extra = {}) => uiFn('sideHtml', { state: { categories: ['旅遊'], workflows: [{ id: 'a', name: 'A', category: '旅遊' }], trash: [], notices: { unread: [] }, catClosed: new Set(), categoryPage: null, wf: null, calendar: null, settings: null, library: null, dash: null, addingCategory: false, chat: emptyChatLike(), ...extra }, subjectIsDraft: () => false })();
 test('T9 ①：側欄四全域項依序 儀表板／流程庫／行事曆／設定、無 h4；分類樹＝details.cat open，summary 帶 open-category、箭頭 cat-toggle；流程列不變', () => {
   const html = t9Side();
@@ -536,9 +536,9 @@ test('T9 ①：側欄四全域項依序 儀表板／流程庫／行事曆／設�
   assert.ok(summary.includes('data-act="open-category" data-cat="旅遊" title="分類守則"'), 'summary 文字＝開分類頁');
   assert.ok(summary.includes('<i class="ph ph-caret-down catcaret" data-act="cat-toggle" data-cat="旅遊"'), '箭頭＝收合');
   assert.ok(html.includes('data-act="open" data-cat="旅遊" data-id="a"'), '流程列還在');
-  // 排版輪 L4（驗收第 2 條）：建立留側欄；匯入與垃圾桶搬到 Workflow 庫（L5 驗入口在庫頁）——側欄不再有
+  // （驗收第 2 條）：建立留側欄；匯入與垃圾桶搬到 Workflow 庫——側欄不再有
   assert.ok(html.includes('data-act="new-flow"') && !html.includes('data-act="pick-import"') && !html.includes('data-act="view-trash"'), '建立在側欄、匯入與垃圾桶不在側欄');
-  // 排版輪 L5：入口在 Workflow 庫頁（右上「匯入」、工具列「垃圾桶（N）」）
+  // 入口在 Workflow 庫頁（右上「匯入」、工具列「垃圾桶（N）」）
   const lib = uiFn('libraryHtml', { state: { categories: ['旅遊'], workflows: [], trash: [{}], library: { q: '', cat: '' } } })();
   assert.ok(lib.includes('data-act="pick-import"') && lib.includes('data-act="view-trash"'), '匯入與垃圾桶入口在 Workflow 庫頁');
 });
@@ -618,9 +618,9 @@ test('T10 ②：flowSettingsModalHtml——開著時三開關列（id 與 data-a
   assert.equal(uiFn('flowSettingsModalHtml', t10Ctx({ flowSettingsOpen: true }, { subjectIsDraft: () => true }))(), '');
 });
 
-const t10Stubs = { resumeHtml: () => '<div data-resume></div>', proposalsHtml: () => '', stepListHtml: () => '<div class="step" data-step></div>', startCheckHtml: () => '', habitChipsHtml: () => '', preflightFor: () => null, flowMemLineHtml: () => '<div data-flowmemline></div>', healthCardHtml: () => '' }; // 排版輪 L11：健檢卡會背景打 API，另測（L11 ②）
+const t10Stubs = { resumeHtml: () => '<div data-resume></div>', proposalsHtml: () => '', stepListHtml: () => '<div class="step" data-step></div>', startCheckHtml: () => '', habitChipsHtml: () => '', preflightFor: () => null, flowMemLineHtml: () => '<div data-flowmemline></div>', healthCardHtml: () => '' }; // 健檢卡會背景打 API，另測
 test('T10 ③：本次資料分頁＝任務卡＋展開的身分／欄位值，開始鈕在右欄摘要卡、不含步驟清單；設計流程的清單模式不再有開跑表單、留欄位定義與記憶一行', () => {
-  // 調整輪：開跑表單拆成主欄任務卡（展開＝身分＋欄位值）與右欄「開始這次執行」摘要卡，「開始」不再在 dataTabHtml 裡
+  // 開跑表單拆成主欄任務卡（展開＝身分＋欄位值）與右欄「開始這次執行」摘要卡，「開始」不再在 dataTabHtml 裡
   const data = uiFn('dataTabHtml', t10Ctx({}, t10Stubs))();
   assert.ok(data.includes('<h3>填寫這次的值<button type="button" class="hint"') && data.includes('id="mem-identity"') && data.includes('data-param="k1"'), '開跑表單三件（標題／身分／欄位值）');
   assert.ok(!data.includes('data-act="start"') && uiFn('dataAsideHtml', t10Ctx({}, t10Stubs))().includes('data-act="start"'), '開始鈕搬到右欄摘要卡');
@@ -704,7 +704,7 @@ test('T11 ④：「這一步會帶的記憶」0 命中、改「這一步會帶�
   for (const r of ['.cvmore{grid-column:1/-1', '.cvmore:not([open])>summary i{transform:rotate(-90deg)}', '.cvmore .cvgrid2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr)', '.cvmore .cvgrid2>.cvcol{overflow:auto}']) assert.ok(css.includes(r), r);
 });
 
-// ---------- U2a 移植合併輪：側欄公司節點、麵包屑、公司名稱載入 ----------
+// ---------- U2a 側欄公司節點、麵包屑、公司名稱載入 ----------
 const u2aSide = (extra = {}) => t9Side({ companyName: '範例公司', ...extra });
 test('U2a ①：側欄公司節點在「建立新流程」之後、第一個 details.cat 之前，class="wf companynode" data-act="open-company"；calentry 仍四個；分類樹包 .tree；名稱空→「公司」；看著公司頁→now', () => {
   const html = u2aSide();
@@ -712,7 +712,7 @@ test('U2a ①：側欄公司節點在「建立新流程」之後、第一個 det
   assert.ok(html.includes(node), '公司節點');
   const i = html.indexOf(node);
   assert.ok(html.indexOf('data-act="new-flow"') < i && i < html.indexOf('<details class="cat"'), '位置：newflow 之後、分類樹之前');
-  // 拆法輪 P2：內容改 DEMO 的小字「公司」＋粗體名（原本 <span class="wfname">名</span>）
+  // 內容改 DEMO 的小字「公司」＋粗體名（原本 <span class="wfname">名</span>）
   assert.ok(/class="wf companynode" data-act="open-company"[^>]*>[\s\S]*?<i class="ph ph-buildings"><\/i>[\s\S]*?<small>組織<\/small><strong>範例公司<\/strong>/.test(html), '圖標 buildings＋小字公司＋粗體公司名');
   const acts = [...html.matchAll(/class="wf calentry[^"]*" data-act="([^"]+)"/g)].map((m) => m[1]);
   assert.deepEqual(acts, ['open-dash', 'open-library', 'open-calendar', 'open-settings'], '四全域項不變（公司節點不是第五個）');
@@ -781,7 +781,7 @@ test('U2a ④：categoryPageHtml 對 _company 標題印公司名（P2 起「改�
   assert.ok(wh.startsWith('<nav class="crumbs"') && wh.includes('>範例公司</span>') && wh.includes('<h1>A</h1>'), '流程頁標題上方有麵包屑（排版輪 L8：h3→h1）');
 });
 
-// ---------- U2b 移植合併輪：公司頁／分類頁——規範區、參考區、上傳、刪除、流程卡 ----------
+// ---------- U2b 公司頁／分類頁——規範區、參考區、上傳、刪除、流程卡 ----------
 const realFmtInt = (n) => Number(n ?? 0).toLocaleString('en-US');
 const u2bPage = (category, cpExtra = {}, stateExtra = {}) => uiFn('categoryPageHtml', {
   fmtInt: realFmtInt,
@@ -878,7 +878,7 @@ test('U2b ⑤：#shared-file change 只放行 md／txt／docx 給 rule（前端�
   for (const r of ['.org-files .file{', '.sharedrow{', '.sharedsec .note.err{', '.section-title{']) assert.ok(css.includes(r), r);
 });
 
-// ---------- U0 移植合併輪：SPEC／GLOSSARY 對齊實作計畫（文件 task，計畫的驗證指令變斷言；☑ 留 U7） ----------
+// ---------- U0 SPEC／GLOSSARY 對齊實作計畫（文件 task，計畫的驗證指令變斷言；☑ 留 U7） ----------
 test('U0→U7：SPEC／GLOSSARY 對齊移植合併輪——run.shared 各 1、行數 198／93、⬜ 各 0（U7 收工 ☑）、sharedRulesSection 取代舊字、v0.22〜v0.25 全文在 SPEC-archive', () => {
   const root = path.join(UI, '..', '..');
   const spec = fs.readFileSync(path.join(root, 'SPEC.md'), 'utf8');
@@ -896,17 +896,18 @@ test('U0→U7：SPEC／GLOSSARY 對齊移植合併輪——run.shared 各 1、�
   assert.ok(spec.includes('計畫 規劃/2026-09-15-移植合併輪-實作計畫.md 文末「實作後差異」為準'), '總覽列尾');
   assert.ok(/\n- v0\.27 2026-09-16 移植合併輪/.test(spec) && spec.startsWith('# SPEC — 剝繭\n\n> ') && /\nv0\.\d+｜變更紀錄/.test(spec), 'v0.27 一行＋版本頭（拆法輪 W2 起版本頭 v0.28，活文件不寫死版號）');
   assert.ok(arc.includes('## 變更紀錄 v0.25（2026-09-16 自 SPEC 歸檔）') && arc.includes('- v0.25 2026-09-09 記憶輪 1＋設定頁＋群組圈（') && arc.includes('09-09 下午答五題'), 'v0.25 全文在 SPEC-archive');
-  assert.ok(/\n- v0\.25 2026-09-09 [^\n]*全文見 SPEC-archive\.md/.test(spec), 'SPEC 留 v0.25 短樁');
+  assert.ok(!/\n- v0\.25 2026-09-09 /.test(spec), 'v0.25 短樁已代謝進 SPEC-archive（成品格式輪為了騰行數搬的；全文仍在 archive，見上一條）');
   assert.ok(spec.includes('GET /api/workflows/:cat/:id/runs?detail=1'), 'US-076 API 名寫實');
   assert.ok(spec.includes("categoryPage.category==='_company'"), 'US-075 公司頁＝分類頁特例');
   assert.ok(spec.includes('執行頁右欄『這步會用到的資料』一行'), 'US-074');
   // budget_gate 歸檔：v0.22〜v0.24 全文搬到 SPEC-archive、SPEC 留短樁（證明沒丟）
   assert.ok(arc.includes('## 變更紀錄 v0.22〜v0.24（2026-09-16 自 SPEC 歸檔）'), '歸檔節標題');
   for (const [a, b] of [['- v0.24 2026-09-09 監工輪（', '09-09 答範圍表「過」、預算題「照原範圍做完」）：每趟多一個**監工**'], ['- v0.23 2026-09-08 交貨查核輪（', '09-08 答範圍表「1 過」＋長欄位不代進句子'], ['- v0.22 2026-09-03 產檔輪第一批（', '三題照建議＋範圍表「OK」）：流程權限 `permissions.files`']]) assert.ok(arc.includes(a) && arc.includes(b), `SPEC-archive 該含原文：${a.slice(0, 20)}`);
-  for (const v of ['v0.22', 'v0.23', 'v0.24']) assert.ok(new RegExp(`\\n- ${v.replace('.', '\\.')} 2026-09-0\\d [^\\n]*全文見 SPEC-archive\\.md`).test(spec), `SPEC 留 ${v} 短樁`);
+  // SPEC 撞到 200 行上限，v0.22〜v0.26 五條短樁一併代謝進 archive；全文仍在 archive（見上一條）
+  for (const v of ['v0.22', 'v0.23', 'v0.24']) assert.ok(!new RegExp(`\\n- ${v.replace('.', '\\.')} 2026-09-0\\d `).test(spec), `${v} 短樁已代謝，SPEC 不該再留`);
 });
 
-// U2b 覆核該修：共用檔與群組圈各自容錯——一方失敗不蓋整頁
+// U2b 共用檔與群組圈各自容錯——一方失敗不蓋整頁
 test('U2b 修正：shared 拋錯→分類頁仍有分類守則框、兩區印「共用檔讀不到：原因」＋重試；groups 拋錯→shared 區仍列檔、守則處錯誤卡；公司頁只打 shared、失敗印同一句；成功兩邊都清錯', async () => {
   const fakeApi = (fail) => async (method, p) => {
     if (p.includes('/api/shared/')) { if (fail === 'shared') throw new Error('共用夾壞了'); return { scope: '旅遊', rules: [{ name: 'a.md', chars: 12, bytes: 36, uploaded_at: '2026-09-15T08:00:00.000Z' }], refs: [], rule_chars: 12, limits: { per_file: 4000, per_layer: 8000 } }; }
@@ -993,7 +994,7 @@ test('U3 ③：set-company-name 的 change 處理 PUT /api/settings 帶 company_
   assert.equal(count(src, "case 'set-company-name'"), 0, '不走 setPut 的 data-act 路徑（setPut 會 alert＋重抓記憶）');
 });
 
-// ---------- U4b 移植合併輪：流程頁右側資料夾、共用檔浮窗、本次資料必填在前選填收摺 ----------
+// ---------- U4b 流程頁右側資料夾、共用檔浮窗、本次資料必填在前選填收摺 ----------
 const u4bRuns = [
   { run_id: 'r2', status: 'paused', started_at: '2026-09-15T10:00:00.000Z', finished_at: null, steps: { total: 2, done: 1, failed: 0 }, finals: [], files: [] },
   { run_id: 'r1', status: 'done', started_at: '2026-09-14T09:00:00.000Z', finished_at: '2026-09-14T09:06:00.000Z', steps: { total: 2, done: 2, failed: 0 }, finals: [{ node: 'w', title: '寫週報', preview: '# 週報', file: '寫週報.md' }], files: ['寫週報.md', '草稿.txt'] },
@@ -1114,7 +1115,7 @@ test('U4b ④：接線——render 工作區包 .flowlayout（只在 else 分支
 });
 
 test('U4b ⑤：本次資料——主欄任務卡（含續跑那張）＋展開的身分與欄位值；「開始」與「只用於本次」在右欄摘要卡', () => {
-  // 調整輪：主欄只剩任務卡與展開區；續跑卡的「接回去繼續／刪掉」改成展開「繼續上次執行」那張才看得到（resumeHtml 原樣沒動）
+  // 主欄只剩任務卡與展開區；續跑卡的「接回去繼續／刪掉」改成展開「繼續上次執行」那張才看得到（resumeHtml 原樣沒動）
   const ctx = () => u4bCtx({}, { ...t10Stubs, subjectDef: () => u4bDef });
   const data = uiFn('dataTabHtml', ctx())();
   assert.ok(data.includes('<h3>填寫這次的值<button type="button" class="hint"') && data.includes('id="mem-identity"') && data.includes('data-param="r1"'), '標題／身分／欄位');
@@ -1125,7 +1126,7 @@ test('U4b ⑤：本次資料——主欄任務卡（含續跑那張）＋展開�
   assert.ok(!data.includes('本次資料 · 只影響這一次'), '舊 h5 字退場');
 });
 
-// ---------- U4c 移植合併輪：抽屜參考檔三段、跨層勾選 {scope,name}、「這一步會帶」四段 ----------
+// ---------- U4c 抽屜參考檔三段、跨層勾選 {scope,name}、「這一步會帶」四段 ----------
 const u4cShared = { company: { rules: [{ name: 'r.md', chars: 10, bytes: 30 }], refs: [{ name: 'b.md', chars: 5, bytes: 15 }], rule_chars: 10 }, dept: { rules: [], refs: [], rule_chars: 0 } };
 const u4cRefs = (wfFiles, shared, node) => uiFn('refFilesInner', { state: { wfFiles, shared } })(node);
 test('U4c ①：refFilesInner 三段「這條流程／分類／公司」各一次；分類段「尚無參考」；流程檔與公司檔都 checked、id 帶 scope、data-att-scope；規範不進勾選；流程段有範本 chip、ref-del、上傳參考檔；上層讀不到→該段一句', () => {
@@ -1199,7 +1200,7 @@ test('U4c ④：drawerMemoryHtml——「關於你 3・分類守則 2・公司�
   assert.ok(paused.includes('關於你 暫停中・分類守則 2・組織規範 2・分類規範 1'), '暫停中照印規範');
 });
 
-// ---------- 移植合併輪 U5：儀表板兩欄＋最近完成三行版＋接下來的安排＋流程提議＋用量小圖與浮窗 ----------
+// ---------- 儀表板兩欄＋最近完成三行版＋接下來的安排＋流程提議＋用量小圖與浮窗 ----------
 const u5Recent = (n) => Array.from({ length: n }, (_, i) => ({
   category: 'a', id: 'x', run_id: `r${i}`, name: `趟${i}`, status: 'done', source: 'manual', makeup: false,
   started_at: '2026-09-14T09:00:00.000Z', finished_at: '2026-09-14T09:06:00.000Z', steps: { done: 2, total: 2, failed: 0 },
@@ -1224,7 +1225,7 @@ test('U5 ①：dashHtml 兩欄——左「要你處理」（1 列＋chip wait �
   assert.ok(h.includes('<div class="homegrid">') && h.includes('<section class="homemain">') && h.includes('<aside class="homeaside">'), '兩欄外殼');
   assert.ok(!h.includes('dashtop'), '舊的上下堆疊 .dashtop 退場');
   const [main, aside] = u5Split(h);
-  // 排版輪 L5：數字改樣稿「N 件」膠囊；Workflow 提議搬回左欄第三塊（樣稿位置，工程報備 8）——「要你處理」那塊仍不算提議
+  // 數字改樣稿「N 件」膠囊；Workflow 提議搬回左欄第三塊（樣稿位置，工程報備 8）——「要你處理」那塊仍不算提議
   const waitPanel = main.slice(0, main.indexOf('最近完成'));
   assert.ok(waitPanel.includes('要你處理') && waitPanel.includes('<span class="chip wait">1 件</span>'), `待辦數字不算提議：${waitPanel.match(/class="chip[^<]*</)}`);
   assert.equal(count(waitPanel, 'class="item '), 1, '只剩 stop 那列');
@@ -1310,7 +1311,7 @@ test('U5 ⑤：upcomingHtml——calendar null→讀不到；事件空→這個�
   const up = (calendar) => { const c = u5Ctx({ calendar }); return uiFn('upcomingHtml', c)(c.state.dash); };
   assert.ok(up(null).includes('讀不到'), 'null→讀不到');
   const empty = up({ events: [] });
-  // 排版輪 L5：「查看」搬到「接下來」白卡右上（dashHtml 的 section-head，L5 ① 驗），清單本身不再帶
+  // 「查看」搬到「接下來」白卡右上（dashHtml 的 section-head，L5 ① 驗），清單本身不再帶
   assert.ok(empty.includes('這個月沒有安排') && !empty.includes('data-act="open-calendar"'), '空態；查看鈕在卡片右上');
   const ev = (date, time, kind, title) => ({ date, time, kind, title });
   const h = up({ events: [
@@ -1325,7 +1326,7 @@ test('U5 ⑤：upcomingHtml——calendar null→讀不到；事件空→這個�
   assert.ok(!h.includes('這個月沒有安排'));
 });
 
-// ---------- U6a 移植合併輪：執行頁三欄骨架（左軌／中欄／右欄摺疊殼）＋ waiting_check 膠囊 ----------
+// ---------- U6a 執行頁三欄骨架（左軌／中欄／右欄摺疊殼）＋ waiting_check 膠囊 ----------
 const U6_NODES = () => [
   { id: 'n1', title: '收集', executor: 'ai', instruction: '做', next: ['n2'], review_focus: '件數要對' },
   { id: 'n2', title: '寫稿', executor: 'ai', instruction: '做', next: ['n3'] },
@@ -1454,7 +1455,7 @@ test('U6a ⑤：五張卡函式（stopCardHtml／checkCardHtml／humanCardHtml�
   for (const f of ['stopCardHtml', 'checkCardHtml', 'humanCardHtml', 'dataCardHtml']) assert.deepEqual(acts(fnOf(uiSrc(), f)), acts(fnOf(head, f)), `${f} data-act 清單前後相同`);
 });
 
-// ---------- U6b 移植合併輪：右欄接資料（這步會用到的資料／每次交卷／監工交代／當時指示浮窗共用） ----------
+// ---------- U6b 右欄接資料（這步會用到的資料／每次交卷／監工交代／當時指示浮窗共用） ----------
 const U6B_SHARED = { company: [{ name: '手冊.md', chars: 20 }, { name: '語氣.md', chars: 9 }], dept: [{ name: '分類規範.md', chars: 7 }], refs: [{ scope: 'category', name: '往期.md', chars: 18 }] };
 const u6bSteps = (n2 = {}) => ({ n1: { status: 'done', output: '成品一' }, n2: { status: 'waiting_review', output: '成品二', ...n2 }, n3: { status: 'pending' } });
 const u6bData = (h) => /<summary data-act="side-toggle" data-k="data">[\s\S]*?<\/details>/.exec(u6Cols(h).side)?.[0] ?? '';
@@ -1478,7 +1479,7 @@ test('U6b ①：這步會用到的資料——有 memory.shared→「帶了公�
   assert.ok(src.includes('來源：上一步《收集》的產出、設定欄位：期間、參考檔：範本.docx（公司）'), `來源一行：${src}`);
   assert.ok(u6bData(u6Html({}, { preflightFor: () => ({ inputs: { pred: {}, src: {}, at: { n2: { near: [], own: [] } } }, unused_params: [] }) })).includes('來源：沒有指定輸入'), '沒有輸入');
   assert.ok(src.includes('data-srcline'), '來源一行帶 data-srcline（健檢回來只補這一行）');
-  // 卡上「這步用了 N 條記憶」的空態：有規範／共用檔時不能說「沒帶任何記憶」（U1b 覆核 ⑩）
+  // 卡上「這步用了 N 條記憶」的空態：有規範／共用檔時不能說「沒帶任何記憶」
   const mu = uiFn('memoryUsedHtml', { state: { memOpen: {}, run: { workflow: { category: 'c' } } } });
   const node = { id: 'n2', title: '寫稿' };
   const ruleOnly = mu(node, { memory: { cards: [], overridden: [], paused: false, shared: U6B_SHARED } });
@@ -1553,7 +1554,7 @@ test('U6b ④：當時指示——promptModalHtml(view) 儀表板與執行頁共
   assert.ok(br.includes('data-pname="b1-判路.txt"'), `分岔用判路卷宗：${br}`);
 });
 
-// ---------- U6c 移植合併輪：左軌點步驟＝歷史視圖（demo runPage 的 inspect）；回到目前；停著的歷史步 inert 唯讀 ----------
+// ---------- U6c 左軌點步驟＝歷史視圖（demo runPage 的 inspect）；回到目前；停著的歷史步 inert 唯讀 ----------
 // mdBlock 給個看得見的假：印鍵＋原文，才斷得到「n1 的產出在 mdBlock 內」
 const MD_STUB = { mdBlock: (t, key, cls = 'output') => `<div class="${cls}" data-mdkey="${key}">${t}</div>` };
 const HIST_WORDS = ['data-act="run-current"', 'class="runbanner hist"', 'class="histcard" inert', '這一步的歷史'];
@@ -1636,7 +1637,7 @@ test('U6c ⑤：接線原文——schedulePoll 0 命中 runInspect；run-current
   const ghost = uiFn('runHtml', { ...CARD_STUBS, ...MD_STUB, preflightFor: () => null, state: st })();
   assert.equal(ghost, u6Html({}, MD_STUB), '找不到節點＝現況');
   assert.equal(st.runInspect, null, '找不到節點退回 null');
-  // 還沒開始的步：左軌鈕照 demo 灰掉（disabled、title「還沒跑到」），done／目前這步不灰（U6c 覆核該修）；歷史視圖那條路（鍵盤導航仍可到）不炸、橫幅在、一句「還沒開始」、沒有產出格
+  // 還沒開始的步：左軌鈕照 demo 灰掉（disabled、title「還沒跑到」），done／目前這步不灰；歷史視圖那條路（鍵盤導航仍可到）不炸、橫幅在、一句「還沒開始」、沒有產出格
   const { rail: r0, main: pend } = u6Cols(u6Html({ runInspect: 'n3' }, MD_STUB));
   assert.ok(/<button class="runstep[^"]*" data-act="run-inspect" data-node="n3" title="還沒跑到" disabled>/.test(r0), `pending 步鈕 disabled：${r0}`);
   assert.ok(/<button class="runstep[^"]*" data-act="run-inspect" data-node="n1" title="收集">/.test(r0) && /data-node="n2" title="寫稿" data-waiting>/.test(r0), `done／目前這步不 disabled：${r0}`);
@@ -1655,7 +1656,7 @@ test('U6c ⑤：接線原文——schedulePoll 0 命中 runInspect；run-current
   assert.ok(css.includes('.runbanner.hist{') && count(css, '.histcard') === 0 && count(src, 'histcard') === 0, 'CSS .runbanner.hist 留、.histcard 退場（排版輪 L12）');
 });
 
-// ---------- 拆法輪 P1 色彩分層與 token（契約 G 第一列、第二列；DEMO hierarchy.css :root） ----------
+// ----------  色彩分層與 token（第二列；DEMO hierarchy.css :root） ----------
 test('P1 ①：token 改靛藍／冷灰藍——--accent 四件、--accent-soft、--m1〜m4-bg、--wp、--paper-rail、--ink-900／500、--amber-text；--green-soft 新增；--amber-rgb／--red-text 不動', () => {
   assert.equal(cssVar('--accent'), '#445bc4', '--accent 靛藍');
   assert.equal(cssVar('--accent-hover'), '#3549a6');
@@ -1699,7 +1700,7 @@ test('P1 ③：舊藍 #0a84ff／舊紙 #fcfbf9 在 style.css 0 命中；非狀�
   assert.equal(cssRule('.step.sel'), 'background:rgb(var(--accent-rgb) / .12);outline:2px solid var(--accent);outline-offset:-2px', '.step.sel 與 HEAD 逐字相同');
 });
 
-// ---------- P2 拆法輪：側欄三層樹（公司→分類→流程）＋三層鉛筆改名浮窗＋同步（契約 B 前端側、G 側欄樹列） ----------
+// ---------- P2 側欄三層樹（公司→分類→流程）＋三層鉛筆改名浮窗＋同步（G 側欄樹列） ----------
 const p2Side = (extra = {}) => t9Side({ companyName: '範例公司', categories: ['旅遊', '未分類'], workflows: [{ id: 'a', name: 'A', category: '旅遊' }, { id: 'b', name: 'B', category: '旅遊' }], ...extra });
 test('P2 ①：sideHtml——.company-row 在 new-flow 之後（open-company＋小字公司＋粗體名＋鉛筆 company）；.company-children 包住全部 details.cat；summary 有 .dept-row／.dept-count＝流程數／鉛筆 category（未分類沒有）；.flow-row 有 flow-dot／wfdel／鉛筆 flow；calentry 仍四個、companynode 不是 calentry、cat-toggle 仍在', () => {
   const html = p2Side();
@@ -1711,7 +1712,7 @@ test('P2 ①：sideHtml——.company-row 在 new-flow 之後（open-company＋�
   assert.ok(row.includes('data-act="open-company"'), '公司列點了開公司頁（語意不變）');
   assert.ok(row.includes('<small>組織</small>') && row.includes('<strong>範例公司</strong>'), '小字「公司」＋粗體名');
   assert.ok(row.includes('data-act="rename-open" data-type="company"'), '公司鉛筆');
-  const kids = html.slice(iKids, html.indexOf('data-act="open-assets"')); // 排版輪 L4：新增分類搬走，切點改共用素材入口
+  const kids = html.slice(iKids, html.indexOf('data-act="open-assets"')); // 新增分類搬走，切點改共用素材入口
   assert.equal(count(kids, '<details class="cat"'), 2, '兩個分類都在 .company-children 裡');
   assert.equal(count(html, '<details class="cat"'), 2, '沒有分類漏在外面');
   const summaries = [...html.matchAll(/<summary[^>]*>[\s\S]*?<\/summary>/g)].map((m) => m[0]);
@@ -1812,7 +1813,7 @@ test('P2 ⑥：CSS——.company-row、.company-children 含 border-left、.tree
   for (const r of ['.company-row.active{', '.dept-row.active{', '.flow-branches{', '.dept-mark{', '.dept-count{', '.flow-dot{', '.companynode{']) assert.ok(css.includes(r), r);
 });
 
-// ---------- 拆法輪 P3：每流程各自的工作區狀態（契約 H）——wsByFlow、stashWorkspace／restoreWorkspace、草稿列、「有改動未存」chip ----------
+// ---------- 每流程各自的工作區狀態——wsByFlow、stashWorkspace／restoreWorkspace、草稿列、「有改動未存」chip ----------
 const J = (v) => JSON.stringify(v); // vm 另一個 realm 的物件，deepEqual 會嫌原型不同——比字串
 const p3Pkg = () => ({ chat: { messages: [{ role: 'user', text: 'hi' }], draft: null, busy: false }, mode: 'canvas', flowTab: 'data', canvasSel: 'n1', drawerOpen: true, paramNow: { x: '1' }, memPicks: { x: 'c1' }, memChanged: ['c2'], memIdentity: 'id1', memIdentitySet: true, folderOpen: { refs: false, runs: true, optional: null, refsAll: false, runsAll: false }, expanded: new Set(['n1']), cvWork: { name: 'A', nodes: [], params: [] }, cvDirty: true });
 const p3State = (extra = {}) => ({ wf: { category: '旅遊', id: 'a', def: { name: 'A', nodes: [], params: [] }, runs: [] }, run: null, chat: { messages: [], draft: null, busy: false }, mode: 'list', flowTab: 'design', canvasSel: null, drawerOpen: false, paramNow: {}, memPicks: {}, memChanged: [], memIdentity: '', memIdentitySet: false, folderOpen: { refs: true, runs: true, optional: null, refsAll: false, runsAll: false }, expanded: new Set(), cvWork: null, cvDirty: false, versions: [{ version: 3 }], wfRuns: [{ run_id: 'r' }], wfFiles: [{ name: 'f' }], shared: { company: [], dept: [], err: null }, ...extra });
@@ -1863,7 +1864,7 @@ test('P3 ②：vm——restoreWorkspace：有包→mode／flowTab／paramNow／c
   assert.equal(ws.has('旅遊/a'), false, '讀回即取走（不留過期副本）');
   assert.equal(restore('旅遊/a'), false, '沒包回 false');
   assert.equal(state.mode, 'list'); assert.equal(state.flowTab, 'design'); assert.equal(J(state.paramNow), '{}'); assert.equal(state.canvasSel, null);
-  assert.equal(state.drawerOpen, false); assert.equal(J(state.chat), J(uiFn('emptyChat')())); assert.equal(J(state.memPicks), '{}'); assert.equal(J(state.memChanged), '[]'); // 拆法輪 P4：預設 chat 改由 emptyChat() 給（多 shape／sources／category／shapeEdit）
+  assert.equal(state.drawerOpen, false); assert.equal(J(state.chat), J(uiFn('emptyChat')())); assert.equal(J(state.memPicks), '{}'); assert.equal(J(state.memChanged), '[]'); // 預設 chat 改由 emptyChat() 給（多 shape／sources／category／shapeEdit）
   assert.equal(state.memIdentity, ''); assert.equal(state.memIdentitySet, false); assert.equal(J(state.folderOpen), J({ refs: true, runs: true, optional: null, refsAll: false, runsAll: false }));
   assert.equal(state.expanded.size, 0); assert.equal(state.cvWork, null); assert.equal(state.cvDirty, false);
   restore('__draft__');
@@ -1897,7 +1898,7 @@ test('P3 ③：vm——stashWorkspace：已存流程→wsByFlow.get(key) 十四�
   const ws4 = new Map();
   uiFn('stashWorkspace', { state: p3State({ chat: { messages: [], draft, busy: false } }), wsByFlow: ws4 })();
   assert.equal(ws4.size, 0, 'wf 開著但主體是草稿→不存（同舊 chatByFlow 規則）');
-  // 排版輪 L1（契約 J）：第一趟還在等（只有訊息、busy）或只有訊息→也算草稿，打包進 __draft__
+  // 第一趟還在等（只有訊息、busy）或只有訊息→也算草稿，打包進 __draft__
   const ws5 = new Map();
   uiFn('stashWorkspace', { state: p3State({ wf: null, chat: { messages: [{ role: 'user', text: 'hi' }], draft: null, shape: null, busy: true } }), wsByFlow: ws5 })();
   assert.ok(ws5.has('__draft__'), '第一趟等待中離開→__draft__');
@@ -1906,7 +1907,7 @@ test('P3 ③：vm——stashWorkspace：已存流程→wsByFlow.get(key) 十四�
   assert.ok(ws6.has('__draft__'), '只有訊息→__draft__');
 });
 
-// 排版輪 F2：側欄草稿列改判 draftLive()（跟 stashWorkspace／dsSnapshot 同一式），假 state 要有 chat
+// 側欄草稿列改判 draftLive()（跟 stashWorkspace／dsSnapshot 同一式），假 state 要有 chat
 const emptyChatLike = (extra = {}) => ({ messages: [], draft: null, shape: null, busy: false, ...extra });
 
 test('P3 ④：sideHtml——wsByFlow 有 __draft__→一列 .flow-row.draftrow data-act="open-draft"「草稿・還沒存」（排版輪 F3：挪到「＋ 建立新 Workflow」下方，不再進分類樹）；有沒有「未分類」都同一個位置；正在看的草稿→.active；沒有草稿→0 命中；CSS .flow-row.draftrow 虛線框', () => {
@@ -1929,7 +1930,7 @@ test('P3 ④：sideHtml——wsByFlow 有 __draft__→一列 .flow-row.draftrow 
   assert.ok(cssRule('.flow-row.draftrow')?.includes('dashed'), `.flow-row.draftrow 虛線框：${cssRule('.flow-row.draftrow')}`);
 });
 
-// 排版輪 L8（驗收第 4 條）：「有改動未存」chip 改成版本標籤本身——有未存改動時「未儲存」優先顯示（取代版本號）、點了開履歷；工具列另有「有改動未存檔」一句
+// （驗收第 4 條）：「有改動未存」chip 改成版本標籤本身——有未存改動時「未儲存」優先顯示（取代版本號）、點了開履歷；工具列另有「有改動未存檔」一句
 test('P3 ⑤：workHeadHtml——cvDirty→標題旁 <span class="chip wait vertag" data-act="mode-history">未儲存（取代 v3・現行）；乾淨→v3・現行、無未儲存；草稿 chip wait；標題列內 chip amber 0 命中', () => {
   const base = { chat: { draft: null }, versions: [{ version: 3 }], categories: ['旅遊'], flowTab: 'design', mode: 'canvas', companyName: '範例公司', wf: { category: '旅遊', id: 'a', def: { name: 'A', nodes: [] } } };
   const dirty = uiFn('workHeadHtml', { state: { ...base, cvDirty: true } })();
@@ -1946,7 +1947,7 @@ test('P3 ⑤：workHeadHtml——cvDirty→標題旁 <span class="chip wait vert
   assert.equal(count(head, 'chip amber'), 0);
 });
 
-// ---------- 拆法輪 P4：聊天窗成品卡空殼（契約 I）----------
+// ---------- 聊天窗成品卡空殼----------
 const SHAPE_FIX = () => ({
   deliverable: { value: '新聞播報稿', basis: '你說的' }, type: { value: '文字稿', basis: '預設' }, audience: { value: 'VTuber 觀眾', basis: '自我介紹' },
   style: { value: '輕鬆', basis: '分類守則' }, length: { value: '800 字', basis: '公司規範' }, sections: { value: '3 段', basis: '預設' }, range: { value: '本週', basis: '你說的' },
@@ -1991,7 +1992,7 @@ test('P4 ②：shapeCardHtml——shape:null→\'\'；來源空→仍印小表�
     assert.ok(six.includes(`<span class="srcname">${f}</span><span class="${cls}">${txt}</span>`), `${f}→${txt}（${cls}）`);
   }
   assert.ok(six.includes('<span class="srcname">zzz</span><span class="chip wait">你貼・必填</span>'), '不認識的 from 當 paste');
-  // 覆核該修①：value 空（契約 A「用不到＝value:''＋basis:'預設'」）→排版輪 L9：輸入框空值、提示「（空）」，不印空膠囊
+  // 覆核該修①：value 空（「用不到＝value:''＋basis:'預設'」）→輸入框空值、提示「（空）」，不印空膠囊
   const blank = uiFn('shapeCardHtml', { state: p4State({ chat: { ...p4State().chat, shape: { ...SHAPE_FIX(), sections: { value: '', basis: '預設' } } } }) })();
   assert.ok(/data-shape-input="sections"[^>]*value=""[^>]*placeholder="（空）"/.test(blank), `空值格提示「（空）」：${/<input[^>]*data-shape-input="sections"[^>]*>/.exec(blank)?.[0]}`);
   assert.equal(count(blank, '（空）'), 1, '只有那一格');
@@ -2029,7 +2030,8 @@ test('P4 ③：七格一直是輸入框——<input data-keep data-shape-input>�
   typed.chat.shape.type = { value: '打到一半', basis: '你說的' };
   assert.ok(uiFn('shapeCardHtml', { state: typed })().includes('value="打到一半"'), '輪詢重繪：打的字已寫進 state，重繪放回輸入框');
   const busy = uiFn('shapeCardHtml', { state: p4State({ chat: { ...p4State().chat, busy: true } }) })();
-  assert.equal(count(busy, 'disabled'), 9, '七格＋兩鈕 disabled');
+  // 卡下半段多了四顆檔案種類與一顆選舊作品，busy 時也要一起鎖住（PDF 那顆本來就點不下去，不算）
+  assert.equal(count(busy, 'disabled'), 14, '七格＋兩鈕＋四顆檔案種類＋一顆選舊作品 disabled');
 });
 
 test('P4 ④：chatModeHtml——有 shape→含 data-shapecard、卡在表單與訊息之後（排版輪 L9：表單卡在上、對話紀錄在下、卡最後）、有草稿也不印 save-draft；沒 shape→現況（草稿印 save-draft、無卡）；busy→兩鈕 disabled', () => {
@@ -2057,7 +2059,7 @@ test('P4 ⑤：原文——shape-confirm／shape-redo 分支只 console.info、0
   assert.equal(count(src, 'function emptyChat()'), 1);
   assert.equal(count(src, "act === 'shape-edit'"), 0, '排版輪 L9：點改分支退場（七格常駐輸入框）');
   assert.ok(src.includes("t.matches?.('[data-shape-input]')") && src.includes('shapeInput(t.dataset.shapeInput, t.value)') && src.includes("e.target.id === 'shape-category'"), '兩個事件：打字寫回 state、分類下拉');
-  // 分身實走抓到的：render 換 DOM 拔掉聚焦中的輸入框→瀏覽器同步發 blur→巢狀 render 炸 NotFoundError。旗標留著；排版輪 L9：常駐輸入框不靠 blur 收尾，重繪後焦點與游標放回打字中的那格
+  // 分身實走抓到的：render 換 DOM 拔掉聚焦中的輸入框→瀏覽器同步發 blur→巢狀 render 炸 NotFoundError。旗標留著；常駐輸入框不靠 blur 收尾，重繪後焦點與游標放回打字中的那格
   assert.equal(count(src, 'let rendering = false'), 1, 'rendering 旗標');
   assert.equal(count(src, 'commitShapeEdit('), 0, 'focusout 收尾退場');
   const rd = /function render\(\) \{[\s\S]*?\n\}\n/.exec(src)[0];
@@ -2079,11 +2081,11 @@ test('P4 ⑤：原文——shape-confirm／shape-redo 分支只 console.info、0
   assert.ok(cssRule('.shapein')?.includes('width:100%') && cssRule('.shapein').includes('border-radius:9px'), `常駐輸入框：${cssRule('.shapein')}`);
 });
 
-// ---------- 拆法輪 P5：其餘頁面換皮（契約 G 第三列「選取語彙」＋頁面級頂線）----------
+// ---------- 其餘頁面換皮（「選取語彙」＋頁面級頂線）----------
 test('P5 ①：dashHtml——「要你處理」<section class="crs panel-wait">、「最近完成」dashsec panel-done、右欄四塊 asideblock、只有「流程提議」那塊 panel-blue；U5①／T5③ 續綠', () => {
   const h = uiFn('dashHtml', u5Ctx())();
   const [main, aside] = u5Split(h);
-  // 排版輪 L5：三塊都換樣稿 .panel 白卡；提議搬左欄第三塊（藍底），右欄三塊 asideblock
+  // 三塊都換樣稿 .panel 白卡；提議搬左欄第三塊（藍底），右欄三塊 asideblock
   assert.ok(main.includes('<section class="panel panel-wait">'), `要你處理＝琥珀頂線：${main.slice(0, 120)}`);
   assert.ok(main.includes('<section class="panel panel-done">'), '最近完成＝低彩綠頂線');
   assert.equal(count(main, 'panel-'), 3, '左欄三個頂線／底色 class');
@@ -2157,7 +2159,7 @@ test('P5 ⑥（收 P2 範圍外兩條）：sideHtml——儀表板開著時流�
   assert.ok(nm?.includes('font-size:12px') && nm.includes('cursor:pointer') && !nm.includes('10.5px'), `.cat .nm 直接寫 DEMO 分類列字級：${nm}`);
 });
 
-// ---------- 拆法輪 W1：接線——前端兩趟（契約 A 前端側）＋設定開關列（契約 F 前端側）＋自動確認灰字（契約 I 兩鈕）----------
+// ---------- 接線——前端兩趟＋設定開關列＋自動確認灰字----------
 const fnSrc = (name) => { const m = new RegExp(`(?:async )?function ${name}\\([^)]*\\) \\{[\\s\\S]*?\\n\\}\\n`).exec(uiSrc()); assert.ok(m, `app.js 有頂層 function ${name}`); return m[0]; };
 const actBranch = (act) => { const m = new RegExp(`else if \\(act === '${act}'\\) \\{?[\\s\\S]*?(?=\\n {4}(?:\\}\\n {4})?else if \\(|\\n {4}\\}\\n {2}\\})`).exec(uiSrc()); assert.ok(m, `事件委派有 ${act} 分支`); return m[0]; };
 
@@ -2198,7 +2200,7 @@ test('W1 ③：shape-redo 分支——重送最後一句 phase: \'shape\'（明�
 });
 
 test('W1 ④：setDefaultsHtml 停點分頁——「拆之前先確認成品長相」列＋data-act="set-compose-sw" 開（confirm_shape:true）；compose 缺→仍視為開；false→關；「權限與查核」「AI 步驟」0 命中', () => {
-  const on = secOf(uiFn('setDefaultsHtml', t8DefCtx('停點'))({ cfg: { defaults: {}, compose: { confirm_shape: true } } }), '停點'); // 排版輪 L6：分頁改分段
+  const on = secOf(uiFn('setDefaultsHtml', t8DefCtx('停點'))({ cfg: { defaults: {}, compose: { confirm_shape: true } } }), '停點'); // 分頁改分段
   assert.ok(on.includes('拆之前先確認成品長相'), '開關列標題');
   assert.ok(on.includes('關掉＝一句話直接出草稿；等分類拆法偏好學會了再關比較保險。'), '契約 F 原句');
   assert.ok(/<span class="sw on" data-act="set-compose-sw" data-k="confirm_shape" role="switch" aria-checked="true">開<i><\/i><\/span>/.test(on), `開關開：${/<span class="sw[^>]*set-compose-sw[^<]*<i><\/i><\/span>/.exec(on)?.[0]}`);
@@ -2236,18 +2238,18 @@ test('W1 ⑥：set-compose-sw 分支——setPut({ compose: { confirm_shape: 反
   assert.ok(b.includes('cfg.compose?.confirm_shape === false'), '缺值視為開、反轉＝關（同 set-def-sw 寫法）');
 });
 
-// ---------- 拆法輪 W2：成品卡底「這次拆解會參考」一行（純顯示） ----------
-test('W2 ①：shapeCardHtml——卡底 <p class="note shaperefs">「這次拆解會參考：關於你 N 條・公司規範 N 份・分類規範 N 份・工人能：上網查／讀參考檔／產 Word、Excel」；查網關→無「上網查」；暫停→「關於你 暫停中」；某段 null→「讀不到」；refs null→「讀取中」；sendChat 第一趟叫 refreshShapeRefs、它打 _company 與 /api/settings、數字不進第二趟 body；countCore 照 selectCore；CSS .shaperefs', () => {
-  // 排版輪 L9（契約 D-聊天）：卡底一行搬到聊天右欄「這次拆解會參考」逐項列；字與數字規則不變
+// ---------- 成品卡底「這次拆解會參考」一行（純顯示） ----------
+test('W2 ①：shapeCardHtml——卡底 <p class="note shaperefs">「這次拆解會參考：關於你 N 條・公司規範 N 份・分類規範 N 份・工人能：上網查／讀參考檔／產 Word、Excel、簡報」；查網關→無「上網查」；暫停→「關於你 暫停中」；某段 null→「讀不到」；refs null→「讀取中」；sendChat 第一趟叫 refreshShapeRefs、它打 _company 與 /api/settings、數字不進第二趟 body；countCore 照 selectCore；CSS .shaperefs', () => {
+  // 卡底一行搬到聊天右欄「這次拆解會參考」逐項列；字與數字規則不變
   const refs = { core: 2, company: 1, dept: 0, web: true, paused: false };
   const html = uiFn('shapeCardHtml', { state: p4State({ chat: { ...p4State().chat, refs } }) })();
   assert.equal(count(html, 'shaperefs') + count(html, '這次拆解會參考'), 0, '卡底那行退場');
   const items = uiFn('shapeRefsItems', {});
   const text = (r) => [...items(r)]; // vm 另一個 realm 的陣列：展開成本 realm 才能 deepEqual
-  assert.deepEqual(text(refs), ['關於你 2 條', '組織規範 1 份', '分類規範 0 份', '工人能：上網查／讀參考檔／產 Word、Excel']);
-  assert.deepEqual(text({ ...refs, web: false }), ['關於你 2 條', '組織規範 1 份', '分類規範 0 份', '工人能：讀參考檔／產 Word、Excel'], '查網關掉不印上網查');
+  assert.deepEqual(text(refs), ['關於你 2 條', '組織規範 1 份', '分類規範 0 份', '工人能：上網查／讀參考檔／產 Word、Excel、簡報']);
+  assert.deepEqual(text({ ...refs, web: false }), ['關於你 2 條', '組織規範 1 份', '分類規範 0 份', '工人能：讀參考檔／產 Word、Excel、簡報'], '查網關掉不印上網查');
   assert.equal(text({ ...refs, paused: true })[0], '關於你 暫停中', '整層暫停');
-  assert.deepEqual(text({ ...refs, company: null }), ['關於你 2 條', '組織規範 讀不到', '分類規範 0 份', '工人能：上網查／讀參考檔／產 Word、Excel'], '讀不到的段');
+  assert.deepEqual(text({ ...refs, company: null }), ['關於你 2 條', '組織規範 讀不到', '分類規範 0 份', '工人能：上網查／讀參考檔／產 Word、Excel、簡報'], '讀不到的段');
   assert.deepEqual(text(null), ['讀取中⋯']);
   assert.ok(uiFn('chatAsideHtml', { state: p4State() })().includes('讀取中⋯'), '舊 fixture 沒 refs→讀取中');
   assert.equal(uiFn('shapeCardHtml', { state: p4State({ chat: { ...p4State().chat, shape: null } }) })(), '', 'shape null 仍空');
@@ -2267,12 +2269,12 @@ test('W2 ①：shapeCardHtml——卡底 <p class="note shaperefs">「這次拆�
   const shapeBranch = /if \(out\.phase === 'shape' && !out\.auto\) \{([\s\S]*?)\} else if/.exec(sc)[1];
   assert.ok(shapeBranch.includes('chat.refs = null') && shapeBranch.includes('if (state.chat === chat) refreshShapeRefs();'), '第一趟出卡→清舊數字、另抓（排版輪 L1：只在沒切走時抓）');
   assert.equal(count(actBranch('shape-confirm'), 'refs'), 0, '數字不進第二趟 body');
-  assert.ok(src.includes("function emptyChat() { return { messages: [], draft: null, busy: false, shape: null, sources: [], category: null, shapeBase: null, autoShape: null, refs: null }; }"), 'emptyChat 多 refs（排版輪 L9：shapeEdit→shapeBase）');
+  assert.ok(src.includes("function emptyChat() { return { messages: [], draft: null, busy: false, shape: null, sources: [], category: null, shapeBase: null, autoShape: null, refs: null, fileKind: null, sample: null }; }"), 'emptyChat 多 refs（排版輪 L9）＋ fileKind／sample（成品格式輪：檔案種類與舊作品）');
   assert.equal(cssRule('.shaperefs'), null, '卡底一行 CSS 退場');
   assert.ok(cssRule('.refrow')?.includes('border-bottom:1px solid'), `右欄逐項：${cssRule('.refrow')}`);
 });
 
-// ---------- 排版輪 L1：sendChat 綁發問工作區（契約 J）——等待中切頁，回覆寫回發問的那個工作區 ----------
+// ---------- sendChat 綁發問工作區——等待中切頁，回覆寫回發問的那個工作區 ----------
 // 假 api：POST /api/compose 回一個手動放行的 promise（模擬拆解器還在想），其餘立即回 {}；render／refreshShapeRefs 記次數
 const l1Env = (stateExtra = {}, chatExtra = {}) => {
   const calls = [];
@@ -2430,13 +2432,13 @@ test('L1 ⑤：vm——沒切頁＝現況：第一趟出卡（分類空→第一
   assert.ok(s.includes('if (state.chat === chat) refreshShapeRefs();'), '只替發問的工作區抓數字');
 });
 
-// ---------- 排版輪 L2：全站換字（契約 C：公司→組織、流程→Workflow；排版輪 F2 起中間層改回「分類」＝組織 › 分類 › Workflow；鍵名／API／data-act／資料值不動） ----------
+// ---------- 全站換字（公司→組織、流程→Workflow； 起中間層改回「分類」＝組織 › 分類 › Workflow；鍵名／API／data-act／資料值不動） ----------
 // 去掉整行註解與行尾「 // 」註解；資料值 '未分類' 不算畫面字
 const l2Visible = (src) => src.split('\n').map((ln) => (/^\s*\/\//.test(ln) ? '' : ln.replace(/\s\/\/\s.*$/, '').replaceAll("'未分類'", '')));
 // 例外表：命中行必含這些字面之一（表上字面不存在也紅）
 const L2_SCAN_ALLOW = {
-  公司: ['例：小公司負責人', '讀者、公司、進行中的事', "'公司規範': '組織規範'"], // 前二＝使用者自己的真實公司（例句），不是組織層；末項 BASIS_TXT 鍵（排版輪 L6：素材庫舊輸入框「例：公司一句話簡介」隨共用素材頁退場）
-  部門: [], // 排版輪 F2：中間層改回「分類」，畫面上不該再有「部門」；拆解器回的 basis 資料值「分類守則」現在與畫面同字，不必換字、也不進例外表
+  公司: ['例：小公司負責人', '讀者、公司、進行中的事', "'公司規範': '組織規範'"], // 前二＝使用者自己的真實公司（例句），不是組織層；末項 BASIS_TXT 鍵（素材庫舊輸入框「例：公司一句話簡介」隨共用素材頁退場）
+  部門: [], // 中間層改回「分類」，畫面上不該再有「部門」；拆解器回的 basis 資料值「分類守則」現在與畫面同字，不必換字、也不進例外表
 };
 test('L2 ①：換字掃描——app.js／canvas.js 去註解後「流程」「公司」「部門」0 命中（資料值 \'未分類\' 與例外表除外；例外表逐行核）', () => {
   const bad = [];
@@ -2478,10 +2480,10 @@ test('L2 ④：shapeCardHtml 依據小字顯示「分類守則」「組織規範
   assert.ok(/<option value="未分類"\s*>不分類<\/option>\s*<\/select>/.test(html), '末項不分類（值仍未分類）');
   assert.ok(html.includes('<label class="label" for="shape-category">分類</label>'), '下拉標籤分類');
   const src = uiSrc();
-  for (const s of ["'/api/categories'", 'data-act="open-company"', "categoryPage = { category: '_company'", 'data-act="open-category"', 'data-act="add-category"']) assert.ok(src.includes(s), `還在：${s}`); // 排版輪 L7：「新增分類」放組織頁，改回原字面
+  for (const s of ["'/api/categories'", 'data-act="open-company"', "categoryPage = { category: '_company'", 'data-act="open-category"', 'data-act="add-category"']) assert.ok(src.includes(s), `還在：${s}`); // 「新增分類」放組織頁，改回原字面
 });
 
-// ---------- 排版輪 L3 外框（契約 A）：拿掉頂欄、側欄貼左到底、白卡退場、頁標題元件、元件尺標 ----------
+// ----------  外框：拿掉頂欄、側欄貼左到底、白卡退場、頁標題元件、元件尺標 ----------
 test('L3 ①：index.html 沒有 <header 與 hostdot；app.js 0 命中 hostdot；uiFn 骨架只跳過 app', () => {
   const index = fs.readFileSync(path.join(UI, 'index.html'), 'utf8');
   assert.equal(count(index, '<header'), 0, 'index.html 頂欄退場');
@@ -2551,7 +2553,7 @@ test('L3 ⑤：側欄底部依 state.claude 印 data-claude="ok|down"（null 不
   assert.ok(!/document|innerHTML|className/.test(rh), `refreshHealth 只寫 state：${rh}`);
 });
 
-// ---------- 排版輪 L4：側欄（契約 B；樣稿 uxWorkspaceNav＋驗收第 1／2／3／13 條）----------
+// ---------- 側欄（樣稿 uxWorkspaceNav＋驗收第 1／2／3／13 條）----------
 const l4Side = (extra = {}) => t9Side({ companyName: '範例組織', categories: ['旅遊', '未分類'], workflows: [{ id: 'a', name: 'A', category: '旅遊' }, { id: 'b', name: 'B', category: '旅遊' }], claude: true, ...extra });
 test('L4 ①：側欄由上而下 .brand（剝繭／MAKE WORK CLEAR）→四全域項→建立新 Workflow→分隔線→小標「工作空間」→.company-row→.company-children→共用素材 open-assets→.sidefoot', () => {
   const html = l4Side();
@@ -2623,7 +2625,7 @@ test('L4 ④：rowMenuHtml——state.rowMenu 有值→移至分類（子清單�
   assert.ok(/if \(e\.key === 'Escape' && state\.rowMenu\) \{/.test(src), 'Esc 關');
   assert.ok(/if \(state\.rowMenu && !e\.target\.closest\('\.rowmenu'\) && !e\.target\.closest\('\[data-act="row-menu"\]'\)\) \{/.test(src), '點外面關');
   assert.ok(src.includes('rowMenu: null,'), 'state.rowMenu 初值 null');
-  // 複製（上桌題 3a）：讀定義→名字加「（副本）」→POST 同分類，不帶執行紀錄（新 id 由後端配）
+  // 複製（上桌a）：讀定義→名字加「（副本）」→POST 同分類，不帶執行紀錄（新 id 由後端配）
   const calls = [];
   const st = { rowMenu: { cat: '旅遊', id: 'a' }, wf: null, run: null };
   const api = async (method, p, body) => { calls.push([method, p, body]); return method === 'GET' ? { name: 'A', nodes: [{ id: 'n1' }], params: [] } : { category: '旅遊', id: 'wf-new' }; };
@@ -2722,7 +2724,7 @@ test('L4 ⑦（L1 覆核補）：vm——已存 Workflow 對話修改等待中�
   assert.equal(e4.calls.find((c) => c.method === 'PUT').path, `/api/workflows/${encodeURIComponent('旅遊')}/a`, '同 id 兩條不猜');
 });
 
-// ---------- 排版輪 L5：儀表板＋Workflow 庫（契約 K；驗收第 2／5／9 條） ----------
+// ---------- 儀表板＋Workflow 庫 ----------
 test('L5 ①：dashHtml——page-head「工作，逐件有進展。」＋日期與件數＋建立鈕；左 要你處理→最近完成→Workflow 提議（.panel）；右 接下來（右上查看）→系統通知→用量；舊 dashhead／crs 退場', () => {
   const h = uiFn('dashHtml', u5Ctx())();
   assert.ok(h.includes('<div class="page-head"><div><h1>工作，逐件有進展。</h1>'), 'page-head 大標');
@@ -2824,7 +2826,7 @@ test('L5 ⑦：垃圾桶頁、匯入預覽頁、讀不懂卡換 page-head＋.pan
   for (const h of [trash, imp, bad]) assert.equal(count(h, 'class="tophead"'), 0, '舊 tophead 退場');
 });
 
-// ---------- 排版輪 L6：行事曆（樣稿 uxCalendar＋驗收第 10 條）、設定（uxSettings）、共用素材頁（uxAssets，驗收第 13 條） ----------
+// ---------- 行事曆（樣稿 uxCalendar＋驗收第 10 條）、設定（uxSettings）、共用素材頁（uxAssets，驗收第 13 條） ----------
 // 多行分支（`} else if (act === 'x') {` … `\n    }`）切到本分支結尾為止（actBranch 遇 `} else if` 同行接續時會切過頭）
 const l6Br = (act) => { const m = new RegExp(`act === '${act}'\\) \\{([\\s\\S]*?)\\n {4}\\}`).exec(uiSrc()); assert.ok(m, `事件委派有 ${act} 分支`); return m[1]; };
 const l6Cal = (month, cal = {}, extra = {}) => uiFn('calendarHtml', { state: { calendar: { month, data: { events: [], today: '2026-02-10', snapshot: null }, scheds: [], snapErr: null, ...cal }, calPicker: null, calMore: false, ...extra } })();
@@ -2905,7 +2907,7 @@ test('L6 ③：settingsHtml——page-head 設定；.setnav 五組兩行鈕（�
     ['個人與記憶', '個人與記憶', '偏好、身分與資訊範圍', true], ['Workflow 預設', 'Workflow 預設', '只影響新建的 Workflow', false], ['連線', '連線', 'AI 與行事曆快照', false],
     ['執行與排程', '執行與排程', '啟動、提醒與補跑', false], ['資料管理', '資料管理', '備份、垃圾桶與版本', false]]), `五組兩行：${nav}`);
   assert.equal(count(html, '素材庫'), 0, '素材庫組退場（驗收第 13 條）');
-  // 說明文案輪：白卡頂的 <p class="lead"> 整條退場，那句話收進 h2 旁的說明鈕
+  // 白卡頂的 <p class="lead"> 整條退場，那句話收進 h2 旁的說明鈕
   assert.ok(/<section class="setbody" data-group="個人與記憶"><h2>個人與記憶<button type="button" class="hint" aria-expanded="false" aria-label="說明" data-hint="[^"]+">\?<\/button><\/h2>/.test(html), `右邊白卡 h2＝組名＋說明鈕：${html.slice(html.indexOf('class="setbody"'), html.indexOf('class="setbody"') + 220)}`);
   assert.equal(count(html, 'class="lead"'), 0, '白卡頂不再印說明段');
   const down = uiFn('settingsHtml', l6SetCtx({ claude: false, settings: { group: '連線', tab: {}, data: null, err: null } }))();
@@ -3004,7 +3006,7 @@ test('L6 ⑧（L5 範圍外遺留）：Workflow 庫「匯入」選檔取消＝�
   assert.ok(/data-act="close-trash">(<i[^>]*><\/i>)?回工作區<\/button>/.test(uiFn('trashViewHtml', { state: { trash: [], trashFromLib: false } })()), '其他入口照舊「回工作區」');
 });
 
-// ---------- 排版輪 L7：組織頁（樣稿 uxOrgPage）＋分類頁（樣稿分類版＋驗收第 2／7 條）；共用檔「查看」（上桌題 3b） ----------
+// ---------- 組織頁（樣稿 uxOrgPage）＋分類頁（樣稿分類版＋驗收第 2／7 條）；共用檔「查看」（上桌b） ----------
 const l7Shared = (over = {}) => ({ rules: [{ name: 'a.md', chars: 1200, bytes: 3600, uploaded_at: '2026-09-15T08:00:00.000Z' }], refs: [{ name: '範本.docx', chars: null, bytes: 15360, uploaded_at: '2026-09-15T08:00:00.000Z' }], rule_chars: 1200, limits: { per_file: 4000, per_layer: 8000 }, ...over });
 const l7Page = (category, cpExtra = {}, stateExtra = {}) => uiFn('categoryPageHtml', {
   fmtInt: realFmtInt,
@@ -3138,7 +3140,7 @@ test('L7 ⑥（L6 範圍外遺留）：從 Workflow 庫匯入，預覽頁「不�
   assert.ok(src.includes('importFromLib: false,'), 'state 初值');
 });
 
-// ---------- 排版輪 L8：Workflow 頁框＋清單大卡＋右欄步驟檢視器＋執行需要的資料＋履歷（契約 D；驗收第 4／5／7／8 條） ----------
+// ---------- Workflow 頁框＋清單大卡＋右欄步驟檢視器＋執行需要的資料＋履歷 ----------
 const l8Nodes = [{ id: 'n1', title: '一', executor: 'ai', stop_point: 'always', next: ['n2'] }, { id: 'n2', title: '二', executor: 'human', next: [] }, { id: 'f', kind: 'fork', next: [] }];
 const l8Base = { chat: { draft: null }, versions: [{ version: 3 }], categories: ['旅遊', '行銷'], flowTab: 'design', mode: 'list', companyName: '範例公司', cvDirty: false, wf: { category: '旅遊', id: 'a', def: { name: 'A', params: [], nodes: l8Nodes } } };
 const l8Head = (extra = {}) => uiFn('workHeadHtml', { state: { ...l8Base, ...extra } })();
@@ -3321,7 +3323,7 @@ test('L8 ⑧：接線與 CSS——render 清單／畫布（已存聊天）右欄
   assert.ok(pchip?.includes('white-space:normal') && pchip.includes('overflow-wrap:anywhere') && pchip.includes('max-width:100%') && !pchip.includes('white-space:nowrap'), `.pchip 可換行：${pchip}`);
 });
 
-// ---------- 排版輪 L9：聊天＋建立新 Workflow＋成品卡版型（契約 D-聊天；樣稿 uxChatPage／uxProductCard／uxNewFlow；驗收第 1／12 條；題 5-4） ----------
+// ---------- 聊天＋建立新 Workflow＋成品卡版型（樣稿 uxChatPage／uxProductCard／uxNewFlow；驗收第 1／12 條 ----------
 const l9State = (extra = {}, chat = {}) => ({ wf: { category: '旅遊', id: 'a', def: { name: 'A', nodes: [], params: [] } }, run: null, categories: ['旅遊', '未分類'], keep: {}, claude: true, mode: 'chat', flowTab: 'design', versions: [{ version: 2 }], cvDirty: false, companyName: '範例公司', ...extra, chat: { ...uiFn('emptyChat')(), ...chat } });
 
 test('L9 ①：已存 Workflow 聊天——表單卡 .panel.chatform（caption 調整目前 Workflow、h3 告訴我想改哪裡、textarea#chat-input data-keep、send-chat「送出修改」）在上；對話紀錄一則一張 .msg 卡（角色 chip＋內容）在下；render 聊天右欄＝chatAsideHtml 兩塊 .panel', () => {
@@ -3399,9 +3401,9 @@ test('L9 ④：成品卡版型（樣稿 uxProductCard）——.panel.shapecard�
 
 test('L9 ⑤：右欄「這次拆解會參考」逐項（關於你 N 條／組織規範 N 份／分類規範 N 份／工人能…；讀取中／讀不到照 W2）；沒卡也抓：草稿聊天 render 補抓一次、openWorkflow 抓；vm 沒卡的草稿抓得到', async () => {
   const rows = (refs) => [...uiFn('chatAsideHtml', { state: l9State({}, { refs }) })().matchAll(/<div class="refrow">([^<]*)<\/div>/g)].map((m) => m[1]);
-  assert.deepEqual(rows({ core: 2, company: 1, dept: 0, web: true, paused: false }), ['關於你 2 條', '組織規範 1 份', '分類規範 0 份', '工人能：上網查／讀參考檔／產 Word、Excel']);
+  assert.deepEqual(rows({ core: 2, company: 1, dept: 0, web: true, paused: false }), ['關於你 2 條', '組織規範 1 份', '分類規範 0 份', '工人能：上網查／讀參考檔／產 Word、Excel、簡報']);
   assert.deepEqual(rows(null), ['讀取中⋯']);
-  assert.deepEqual(rows({ core: null, company: 1, dept: null, web: false, paused: false }), ['關於你 讀不到', '組織規範 1 份', '分類規範 讀不到', '工人能：讀參考檔／產 Word、Excel']);
+  assert.deepEqual(rows({ core: null, company: 1, dept: null, web: false, paused: false }), ['關於你 讀不到', '組織規範 1 份', '分類規範 讀不到', '工人能：讀參考檔／產 Word、Excel、簡報']);
   const src = uiSrc();
   const rd = /function render\(\) \{[\s\S]*?\n\}\n/.exec(src)[0];
   assert.ok(rd.includes("if (state.mode === 'chat' && !state.wf && !state.chat.refs && refsFor !== state.chat) refreshShapeRefs();"), '草稿聊天沒數字＝補抓（抓的中途不重複打）');
@@ -3434,7 +3436,7 @@ test('L9 ⑦（L6 覆核該修）：行事曆 Google 快照事件左色條＝圖
   assert.ok(src.includes('<b style="background:#c9cfdb"></b>Google 快照（唯讀）') && src.includes('<b style="background:var(--ink-300)"></b>AI 自動'), '圖例兩色不同');
 });
 
-// ---------- 排版輪 L10：步驟編輯置中彈窗（契約 E；11） ----------
+// ---------- 步驟編輯置中彈窗 ----------
 const l10Def = () => ({ name: 'W', params: [], nodes: [{ id: 'n0', title: '收集', executor: 'ai', instruction: 'a', next: ['n1'] }, { id: 'n1', title: '整理', executor: 'ai', instruction: 'b', next: [] }] });
 const l10State = (extra = {}) => ({ drawerOpen: true, run: null, mode: 'list', flowTab: 'design', canvasSel: 'n1', drawerTabFor: null, cvMore: null, keep: {}, ...extra });
 test('L10 ①：drawerHtml——第一行條件續含設計分頁；輸出 .pvback.stepmodal（cv-close-drawer）包 .modal.stepdlg role=dialog＋h2「編輯步驟 NN」＋✕；清單與畫布都開得起來；本次資料／關著＝空；換節點清掉 cv-* 暫存字、關著時忘記節點；render 掛浮窗串尾、不在 .work 內', () => {
@@ -3551,11 +3553,11 @@ test('L10 ⑥：關窗——背景只認按下與放開都在遮罩本身（框�
   assert.ok(src.includes("app.addEventListener('pointerdown', (e) => { backDown = e.target; }, true);"), '記住按下點');
   assert.ok(/if \(e\.key === 'Escape' && !e\.isComposing && state\.drawerOpen && document\.querySelector\('\.stepmodal'\)\) \{ if \(state\.stepAsk\) hideStepAsk\(\); else if \(stepModalDirty\(\)\) showStepAsk\(\); else \{ closeStepModal\(\); render\(\); \} return; \}/.test(src), 'Esc 關（輸入法組字中不關；排版輪 L12：有未套用改動先問）');
   assert.ok(src.includes("target.dispatchEvent(new Event('input', { bubbles: true }))"), '常用片段帶入走 input（存進暫存字）');
-  assert.ok(src.includes("if (document.querySelector('.stepmodal')) return; // 排版輪 L10"), '彈窗開著畫布快捷鍵不動');
+  assert.ok(src.includes("if (document.querySelector('.stepmodal')) return; // 彈窗開著"), '彈窗開著畫布快捷鍵不動');
   assert.ok(uiFn('textFieldHtml', { state: { presets: {}, keep: {} } })('cv-x', '任務', 'v', 'p', null).startsWith('<label class="label" for="cv-x">任務</label>'), '欄名 label for');
 });
 
-// ---------- 排版輪 L11 本次資料（契約 F；樣稿 uxDataPage／uxHealth）：必填標示、常駐開跑健檢、本次上傳（題 2 A）、本次補充（題 3f）、Claude 連不上 ----------
+// ----------  本次資料（樣稿 uxDataPage／uxHealth）：必填標示、常駐開跑健檢、本次上傳 A）、本次補充f）、Claude 連不上 ----------
 const l11Def = { ...t10Def, params: [
   { key: 'r1', label: '必一', default: '', required: true },
   { key: 'src', label: '原始資料', default: '', input: 'file', required: true },
@@ -3563,7 +3565,7 @@ const l11Def = { ...t10Def, params: [
 ] };
 const l11Ctx = (extra = {}, helpers = {}) => u4bCtx({ runUploads: {}, runNote: '', health: null, ...extra }, { ...t10Stubs, subjectDef: () => l11Def, healthCardHtml: () => '<div class="healthcard" data-healthcard></div>', ...helpers });
 test('L11 ①（調整輪改寫）：dataTabHtml 在 .dataform——四張任務卡→展開的「填寫這次的值」（身分→必填 chip→上傳框→選填 details→本次補充）→常駐健檢卡；上傳欄位不印成文字框；草稿空', () => {
-  // 調整輪：核可的任務卡版（原型 PROTO/設定與本次資料-任務卡-demo.html）。主欄不再是一張白卡開跑表單，
+  // 核可的任務卡版（原型 PROTO/設定與本次資料-任務卡-demo.html）。主欄不再是一張白卡開跑表單，
   // 改成四張 .prep-card ＋內嵌 .focus-editor；「只用於本次／回設計／開始」搬到右欄摘要卡（見 L11 ④）。
   const h = uiFn('dataTabHtml', l11Ctx())();
   const order = ['<section class="dataform">', 'data-prep="resume"', 'data-prep="data"', 'data-prep="auto"', 'data-prep="execution"',
@@ -3625,7 +3627,7 @@ test('L11 ②：常駐開跑健檢——healthCardHtml 檢查中／讀不到／b
 });
 
 test('L11 ③（調整輪改寫）：Claude 連不上——紅卡在右欄「開始」上方、重新連線；連得上沒有卡；頂端整頁 hostAlert 退場', () => {
-  // 調整輪：「開始」搬到右欄摘要卡，這張紅卡跟著搬（驗收第 1 條：要在「開始」附近）
+  // 「開始」搬到右欄摘要卡，這張紅卡跟著搬（驗收第 1 條：要在「開始」附近）
   const down = uiFn('dataAsideHtml', l11Ctx({ claude: false }))();
   const card = down.indexOf('class="claudecard runclaude"');
   assert.ok(card > down.indexOf('class="meter') && card < down.indexOf('data-act="start"'), '在進度條之後、開始之前');
@@ -3638,7 +3640,7 @@ test('L11 ③（調整輪改寫）：Claude 連不上——紅卡在右欄「開
 });
 
 test('L11 ④（調整輪改寫）：右欄＝一張「開始這次執行」摘要卡（必填 x/y、開跑健檢、交貨查核、進度條、開始）；「這次會帶入／執行選項」改由主欄任務卡展開；讀取中／讀不到；render 本次資料分頁接 dataAsideHtml', () => {
-  // 調整輪：原型把右欄兩塊靜態面板收進主欄任務卡，右欄換成 .sticky-start 摘要卡
+  // 原型把右欄兩塊靜態面板收進主欄任務卡，右欄換成 .sticky-start 摘要卡
   const a = uiFn('dataAsideHtml', l11Ctx())();
   assert.ok(a.startsWith('<aside class="right dataside"><section class="panel sticky-start" data-startcard>') && count(a, '<section class="panel') === 1, a.slice(0, 120));
   for (const w of ['<h3>開始這次執行</h3>', '<span>必填資料</span><strong>0 / 2</strong>', '<span>開跑健檢</span>', '<span>交貨查核</span><strong>開啟</strong>', 'class="meter partial"', 'data-act="start"', 'data-act="pf-recheck"', 'data-act="flow-tab" data-tab="design"', '只用於本次']) assert.ok(a.includes(w), w);
@@ -3713,10 +3715,10 @@ test('L11 ⑥⑦：本次補充 #run-note data-keep、值讀 state.runNote、2,0
   assert.ok(uiFn('dataTabHtml', l11Ctx({}, { startCheckHtml: () => '<div data-startcheck></div>' }))().includes('data-startcheck'), '按開始後的確認卡照舊掛在本次資料');
 });
 
-// ---------- 大跑輪：本次附件（原型 .upload-box「本次附件」）＝檔案版的本次補充，接在本次補充下方 ----------
+// ---------- 本次附件（原型 .upload-box「本次附件」）＝檔案版的本次補充，接在本次補充下方 ----------
 test('大跑輪 UI ①：本次附件框在「本次補充」下方、沿用既有 uploadBoxHtml（不新造元件）、保留鍵 __run__、沒有必填 chip；選檔／移除走既有 run-upload 分支；開始時 body 帶 uploads.__run__', () => {
   const h = uiFn('dataTabHtml', l11Ctx({ runNote: '留意新品' }))();
-  // 說明文案輪：那句從 textarea 下方收進「本次補充」label 旁的說明鈕，所以排到 run-note 前面
+  // 那句從 textarea 下方收進「本次補充」label 旁的說明鈕，所以排到 run-note 前面
   ['這一趟每個 AI 步驟都看得到這段話。', 'id="run-note"', '<label class="label">本次附件</label>', 'data-upload-box="__run__"', 'data-healthcard']
     .reduce((prev, s) => { const i = h.indexOf(s, prev + 1); assert.ok(i > prev, `順序：${s}（${i} vs ${prev}）`); return i; }, -1);
   // 同一顆元件：本次附件框的 html＝uploadBoxHtml 出來的那串，一字不差
@@ -3744,7 +3746,7 @@ test('大跑輪 UI ①：本次附件框在「本次補充」下方、沿用既�
   assert.ok(uiSrc().includes("const RUN_ATTACH_KEY = '__run__';"), '前端保留鍵與伺服器 RUN_ATTACH_KEY 同字');
 });
 
-// ---------- 排版輪 L12 執行頁（契約 G；樣稿 uxRunPage／uxRunOutput／uxRunComplete）：三欄白卡、中欄只放一步、看原文貼成品、監工與回饋擺放 ----------
+// ----------  執行頁（樣稿 uxRunPage／uxRunOutput／uxRunComplete）：三欄白卡、中欄只放一步、看原文貼成品、監工與回饋擺放 ----------
 const L12_MD = { ...MD_STUB, mdToggleHtml: (k) => `<span class="pbtn mdtoggle" data-act="md-toggle" data-key="${k}">看原文</span>` };
 const l12Html = (extra = {}, stubs = {}) => u6Html(extra, { ...L12_MD, ...stubs });
 const l12Stop = (st, i, step) => uiFn('stopCardHtml', { ...CARD_STUBS, ...L12_MD, state: st })(st.run.def.nodes[i], step);
@@ -3903,7 +3905,7 @@ test('L12b ①：連續操作（同一個 state 沿用）——看過等你的�
   assert.ok(isNow(poll()), '多次切換後在 n3 上處理完仍回目前這步');
 });
 
-// ---------- 排版輪 L12 附帶（L10 覆核新風險，主 agent 定案）：步驟彈窗有未套用改動——背景不關、Esc／✕／取消先問 ----------
+// ---------- （L10 覆核新風險，主 agent 定案）：步驟彈窗有未套用改動——背景不關、Esc／✕／取消先問 ----------
 const l12Dlg = (fields) => ({ querySelectorAll: () => fields });
 const l12F = (o) => ({ matches: (sel) => (sel === '[data-preset-field]' ? !!o.preset : false), dataset: o.dataset ?? {}, ...o });
 test('L12 彈窗 ①：stepFormValues／stepModalDirty——任一欄位值（含勾選、參考檔勾選）跟開窗時不同＝有改動；常用片段選單不算；後來才長出來的欄位補進開窗值；沒開窗＝沒改動', () => {
@@ -3971,7 +3973,7 @@ test('L12 彈窗 ②：有改動時——背景點一下不關（框線閃一下
   assert.ok(cssRule('.stepask')?.includes('position:sticky') && cssRule('.stepdlg.nudge')?.includes('animation:stepnudge'), 'CSS 詢問列黏在彈窗上緣、閃框動畫');
 });
 
-// ---------- 排版輪 L13 畫布資料模型（契約 H）：款 A 同時做／擇一／等全部的顯示模型、存檔轉換、由上往下自動排、舊結構相容 ----------
+// ----------  畫布資料模型：款 A 同時做／擇一／等全部的顯示模型、存檔轉換、由上往下自動排、舊結構相容 ----------
 import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import yaml from 'js-yaml';
@@ -4330,7 +4332,7 @@ test('L13 彈窗套用：cv-apply 寫回怎麼挑、每條線條件、入口（�
   assert.ok(aCard.includes('<span class="chip quiet">擇一 2 條</span>'), aCard);
 });
 
-// ---------- 排版輪 L14：畫布畫面與互動＋效能（契約 I，款 A） ----------
+// ---------- 畫布畫面與互動＋效能（款 A） ----------
 const cvSrc = () => fs.readFileSync(path.join(UI, 'canvas.js'), 'utf8');
 const L14_HELP = ['雙擊空白處：新增步驟', '拖卡片：移動位置', '從圓點拉線：接到下一步', '一張卡拉出兩條以上的線：決定同時做或擇一', '點線、按 Delete：刪掉這條線', 'Ctrl+Z／Ctrl+Y：復原／重做', '滾輪＋Ctrl：縮放'];
 
@@ -4518,14 +4520,14 @@ test('L14 ⑦：點線選取後按 Delete＝剪線——cvKeyDelete 剪 state.cv
   assert.equal(J(st2.cvEdgeSel), J({ from: 'a', to: 'b', arm: null }));
   assert.equal(J(picked), J(st2.cvEdgeSel));
   const src = uiSrc();
-  const kd = src.slice(src.indexOf("if (document.querySelector('.stepmodal')) return; // 排版輪 L10"), src.indexOf("if (!(e.ctrlKey || e.metaKey)) return;"));
+  const kd = src.slice(src.indexOf("if (document.querySelector('.stepmodal')) return; // 彈窗開著"), src.indexOf("if (!(e.ctrlKey || e.metaKey)) return;"));
   assert.ok(kd.includes('if (cvKeyDelete(e)) return;'), `Delete 在彈窗那行之後、Ctrl 判斷之前：${kd}`);
   const cv = cvSrc();
   assert.ok(cv.includes('handlers.onEdgeSel?.(last.edgeByKey.get(hit))') && /onEdgeSel: \(edge\) => cvEdgeSelect\(edge\)/.test(src), '點線 → 選取');
   assert.ok(cv.includes("handlers.onCut?.(edge)") && cv.includes("handlers.onInsert?.(edge"), '線上滑過的插入一步／剪線照留（W9）');
 });
 
-// 契約 I 門檻（與 tools/canvas-perf.mjs 的 GATE 同一張表；x4 主判準）
+//（與 tools/canvas-perf.mjs 的 GATE 同一張表；x4 主判準）
 const L14_GATE = {
   4: { moveMs: 6, handlerP95: 2, longTasks: 0, frameMax: 50, rafP95: 16.7, renders: 0, releaseMs: 60, jumpPx: 1, openMs: 233 },
   1: { moveMs: 2, handlerP95: 0.5, longTasks: 0, frameMax: 20, rafP95: 16.7, renders: 0, releaseMs: 25, jumpPx: 1, openMs: 50 },
@@ -4564,7 +4566,7 @@ test('L14 ⑧：canvas-perf 全表達標——w200 與 w200c、x1 與 x4、25／
   }
 });
 
-// ---------- 排版輪 L14b：L14 自報的四項畫布遺留（序號跳號、列距、線穿卡／條件格壓卡、健檢回應平方成長） ----------
+// ---------- L14 自報的四項畫布遺留（序號跳號、列距、線穿卡／條件格壓卡、健檢回應平方成長） ----------
 // SVG 路徑（M／C／L）取樣成點；卡片矩形；兩矩形相交
 const l14bPathPts = (d) => {
   const tk = d.match(/[MCL]|-?\d+(?:\.\d+)?/g);
@@ -5012,14 +5014,14 @@ test('F3b ⑦（F3 覆核退回）：連讀 localStorage 本身都丟例外的�
   assert.doesNotThrow(() => vm.runInContext('dsBind("D:/data"); dsLoad();', c3), 'dsLoad 讀不到 localStorage 也不准壞畫面');
   assert.equal(vm.runInContext('wsByFlow.size', c3), 0, '讀不到就什麼都不還原');
 
-  // setItem 丟例外那條（F3 ④ 的舊情境）續綠：兩種「存不進去」都抓得到
+  // setItem 丟例外那條續綠：兩種「存不進去」都抓得到
   const c4 = f3Ctx(f3Live(), new Map(), fakeLS({}, { full: true }));
   vm.runInContext('dsBind("D:/data"); dsSave();', c4);
   assert.equal(vm.runInContext('dsFailed', c4), true, 'setItem 丟例外照舊記下存不進去');
   assert.equal(vm.runInContext('dsAtRisk()', c4), true);
 });
 
-// ---------- 大跑輪：切組織會吃掉最後幾個字——重載前強制把節流還沒到期的那次草稿寫進去 ----------
+// ---------- 切組織會吃掉最後幾個字——重載前強制把節流還沒到期的那次草稿寫進去 ----------
 test('大跑輪 UI ②：切換組織（org-go）在 PUT 與 location.reload() 之前先 dsSaveNow()——打字後 500ms 內切換，字不會跟著重載沒了；dsSave／dsSchedule 的節流機制一字未動', () => {
   const src = uiSrc();
   const iGo = src.indexOf("else if (act === 'org-go')");
@@ -5050,7 +5052,7 @@ test('大跑輪 UI ②：切換組織（org-go）在 PUT 與 location.reload() �
   assert.equal(vm.runInContext('dsTimer', context), null, '節流計時器清掉，重載前不會再排一次');
 });
 
-// ---------- 排版輪 F2（09-18 裁示選項 B）：中間層改回「分類」＝組織 › 分類 › Workflow；草稿列成品卡階段就顯示 ----------
+// ---------- （09-18 裁示選項 B）：中間層改回「分類」＝組織 › 分類 › Workflow；草稿列成品卡階段就顯示 ----------
 // 送到畫面的 src：composer／host-adapter／checker／supervisor 是組工作單給 AI 看的（段標題「# 部門規範」照舊），不在掃描表
 const F2_SRC_SCREEN = ['store.js', 'server.js', 'memory.js', 'shared.js', 'schema.js', 'porter.js', 'optimizer.js', 'preflight.js', 'runner.js', 'scheduler.js', 'notices.js', 'calendar.js', 'graph.js'];
 test('F2 ①：後端送到畫面的字——上列 src 去註解後「部門」0 命中；AI 工作單段標題「# 部門規範」原封不動', () => {
@@ -5094,7 +5096,7 @@ test('F2 ③：側欄草稿列——只有成品卡（還沒拆出 chat.draft）
   assert.ok(/const draftNow = !onPage && draftLive\(\)/.test(src), '側欄走 draftLive');
 });
 
-// ---------- 多組織（調整輪）：側欄切換器＋設定→資料管理的組織管理 ----------
+// ---------- 多組織：側欄切換器＋設定→資料管理的組織管理 ----------
 const orgSide = (orgs, extra = {}) => t9Side({ companyName: '明遠設計', orgs, orgId: orgs[0]?.id ?? '', orgMenu: false, ...extra });
 const ORG2 = [{ id: 'main', name: '明遠設計', workflows: 3 }, { id: 'org-b', name: '青石', workflows: 1 }];
 // orgManageHtml 的假 state：kept 要 keep／run，setMsgHtml 要 settings
@@ -5154,7 +5156,7 @@ test('組織 ③：切換＝PUT /api/orgs/current 後 location.reload()（順序
 test('組織 ④：refreshCompanyName 追加抓 /api/orgs——函式名不變、順序在 /api/settings 之後；讀不到只影響組織清單', async () => {
   const src = uiSrc();
   assert.equal(count(src, 'async function refreshCompanyName()'), 1, '函式名沒改（init 那串不動）');
-  assert.equal(count(src, 'await refreshCompanyName(); // 移植合併輪 U2a'), 1, 'init 沒有多一支新步驟');
+  assert.equal(count(src, 'await refreshCompanyName(); // 清單多一個'), 1, 'init 沒有多一支新步驟');
   const run = async (settings, orgsRes) => {
     const calls = [];
     const { sandbox } = uiCtx({
@@ -5197,7 +5199,7 @@ test('組織 ⑤：切組織後瀏覽器草稿鍵換一把——dsBind 綁 GET /
   assert.ok(/dsBind\(s\.data_dir\)/.test(uiSrc()), 'dsBind 吃的就是 data_dir');
 });
 
-// 大跑輪（覆核退回①・阻擋）：⑤只驗「鍵不同」，擋不住「開站把別的組織那把鍵刪掉」。這條走完整的切走→切回來。
+// ⑤只驗「鍵不同」，擋不住「開站把別的組織那把鍵刪掉」。這條走完整的切走→切回來。
 test('組織 ⑤b：切到別的組織再切回來，原本沒存的草稿還在——開站清殘骸只清「已經不在的組織」那把，現存組織的不准清', () => {
   const dirOf = (id) => `D:/d/orgs/${id}`;
   const keyOf = (dir) => { const c = f3Ctx(f3Live(), new Map(), fakeLS()); vm.runInContext(`dsBind(${JSON.stringify(dir)});`, c); return vm.runInContext('dsKey', c); };
@@ -5302,7 +5304,7 @@ test('組織 ⑨：新增組織——一格名字＋鈕；POST /api/orgs 成功�
   assert.equal(count(src, 'orgManageHtml'), 2, '只有定義與這一處呼叫，沒有溢出到別的 setSec');
 });
 
-// ── 2026-09-18 審查修正輪 ──────────────────────────────────────────────
+// ── 2026-09-18  ──────────────────────────────────────────────
 
 test('出錯重試：0 是明確選擇「馬上停下來問我」，存檔不准當假值刪掉', () => {
   const src = uiSrc();
@@ -5357,7 +5359,7 @@ test('時間未定（time_pending）：中欄要有可以操作的卡，不然�
   assert.ok(bare.includes('寄出確認信') && bare.includes('要幾號幾點繼續'), bare);
 });
 
-// ---------- 說明文案輪（09-19 三案草稿選 C，理由「簡潔是最重要的」）：說明收進問號 ----------
+// ---------- （09-19 三案草稿選 C，理由「簡潔是最重要的」）：說明收進問號 ----------
 // 病根：說明小字是開發當下「補一句解釋」寫出來的——同一句印很多次、或只是把標題換句話說。
 // 方案 C＝畫面上不印說明，收進標題旁一顆鈕，滑過就出現、點一下釘住。
 
@@ -5448,7 +5450,7 @@ test('C6：設定五組——畫面上留下的 .d 只准是值或即時狀態�
   assert.ok(src.includes("const setLater = (l, dsc) => setRow(`${l}${hint(dsc)}`"), '「下一輪」佔位列的說明也收進問號');
 });
 
-// ---------- 執行頁調整輪（09-19 裁定：先做執行頁，技術帳直接修）：列管六條 ----------
+// ---------- （09-19 裁定：先做執行頁，技術帳直接修）：列管六條 ----------
 
 test('E1（L029）：isTyping 一顆共用的——認 SELECT 與可編輯區塊，不再四處各抄一份只認 INPUT／TEXTAREA', () => {
   const src = uiSrc();
@@ -5504,4 +5506,97 @@ test('E6（L025）：並行兩支同時等你——左軌兩顆都標得出來�
   assert.ok(fn.includes("${waiting ? ' data-waiting' : ''}"), '等你的標起來');
   assert.ok(fn.includes("${node.id === activeId ? ' active' : ''}"), 'active 照舊只有一顆——「現在看哪一步」跟「哪幾步在等你」是兩件事');
   assert.ok(cssSrc().includes('.runstep[data-waiting]{box-shadow:inset 3px 0 var(--amber)}'), '琥珀色邊條');
+});
+
+// ---------- （已定案三案草稿選 C）：成品卡下半段「怎麼做出來」 ----------
+
+test('F1：卡下半段三件——四顆檔案種類（預設文字檔亮）、PDF 那顆點不下去、三列規範、舊作品未選時是一顆選檔鈕', () => {
+  const html = uiFn('shapeCardHtml', { state: p4State() })();
+  assert.ok(html.includes('<div class="shapemake">') && html.includes('怎麼做出來'), '下半段有自己的標題（草稿 C：卡從中間切開）');
+  assert.ok(html.indexOf('成品長相') < html.indexOf('怎麼做出來'), '上半長相在前、下半做法在後');
+  const kinds = [...html.matchAll(/data-act="shape-kind" data-kind="(\w+)"/g)].map((m) => m[1]);
+  assert.deepEqual(kinds, ['md', 'docx', 'xlsx', 'pptx'], '四種可選的檔案種類');
+  assert.ok(/data-kind="md"[^>]*aria-pressed="true"/.test(html), '沒選過＝文字檔（維持舊行為）');
+  assert.equal(count(html, 'data-kind="pptx" aria-pressed="true"'), 0, '簡報不是預設');
+  assert.ok(html.includes('PDF・還沒好') && !/data-act="shape-kind" data-kind="pdf"/.test(html), 'PDF 出現但點不下去——藏起來會讓人以為永遠不做');
+  const withRefs = uiFn('shapeCardHtml', { state: p4State({ chat: { ...p4State().chat, refs: { core: 3, company: 1, dept: 2, paused: false, web: true } } }) })();
+  for (const r of ['組織規範', '分類守則', '你的習慣（關於你）']) assert.ok(withRefs.includes(r), `規範列要有「${r}」`);
+  assert.ok(html.includes('data-act="shape-sample"') && html.includes('選一份舊作品'), '沒選舊作品＝一顆選檔鈕');
+  assert.ok(html.includes('id="shape-len-unit">字數／頁數<'), '文字檔：長度問字數頁數');
+  const deck = uiFn('shapeCardHtml', { state: p4State({ chat: { ...p4State().chat, fileKind: 'pptx' } }) })();
+  assert.ok(deck.includes('id="shape-len-unit">幾張<'), '選了簡報：長度改問幾張（US-095 後半）');
+  assert.ok(/data-shape-input="length"[^>]*value="800 字"/.test(deck), '只換提示字，不動你打的值');
+  assert.equal(count(html, 'data-act="shape-sample-del"'), 0, '沒選就沒有移除鈕');
+});
+
+test('F2：規範三列的數字照 refs——讀取中／讀不到／暫停中；已選舊作品→印檔名＋移除鈕', () => {
+  const loading = uiFn('shapeCardHtml', { state: p4State() })();
+  assert.ok(loading.includes('讀取中⋯'), 'refs 還沒回來＝讀取中，不要先印 0 份騙人');
+  const st = p4State();
+  st.chat.refs = { core: 3, company: null, dept: 0, paused: false, web: true };
+  const html = uiFn('shapeCardHtml', { state: st })();
+  assert.ok(/組織規範[\s\S]{0,60}讀不到/.test(html), '某段讀不到就標讀不到');
+  assert.ok(/分類守則[\s\S]{0,60}0 份/.test(html), '0 份照印');
+  assert.ok(/你的習慣（關於你）[\s\S]{0,60}3 條/.test(html), '關於你 3 條');
+  const paused = p4State();
+  paused.chat.refs = { core: 3, company: 1, dept: 0, paused: true, web: true };
+  assert.ok(/你的習慣（關於你）[\s\S]{0,60}暫停中/.test(uiFn('shapeCardHtml', { state: paused })()), '關於你暫停中要講');
+  const picked = p4State();
+  picked.chat.sample = { name: '上季社群月報.pptx', b64: 'x' };
+  const ph = uiFn('shapeCardHtml', { state: picked })();
+  assert.ok(ph.includes('上季社群月報.pptx') && ph.includes('data-act="shape-sample-del"'), '選了就印檔名並給移除鈕');
+  assert.equal((ph.match(/data-act="shape-sample"[^-]/g) ?? []).length, 0, '選了之後不再出選檔鈕（sample-del 不算）');
+});
+
+test('F3：選檔案種類就地改不重繪（七格打字中的焦點不能被搶走）；第二趟把 output_file 與 sample_name 帶下去', () => {
+  const branch = actBranch('shape-kind');
+  assert.ok(branch.includes('state.chat.fileKind = el.dataset.kind'), '寫回 state');
+  const kindOnly = branch.slice(0, branch.indexOf("act === 'shape-sample'") + 1 || undefined);
+  assert.ok(kindOnly.includes('classList.toggle') && !kindOnly.includes('render()'), '就地換 class，不整頁重繪（列管 L015：重繪會搶焦點）');
+  assert.ok(kindOnly.includes("getElementById('shape-len-unit')") && kindOnly.includes('lenUnit(state.chat.fileKind)'), '長度那格的單位提示跟著換（US-095 後半）');
+  const confirm = actBranch('shape-confirm');
+  assert.ok(confirm.includes("output_file: state.chat.fileKind"), '第二趟帶檔案種類');
+  assert.ok(confirm.includes('sample_name: state.chat.sample?.name'), '第二趟帶舊作品的檔名');
+  assert.equal(count(confirm, 'b64'), 0, '檔案內容不進 compose 的 body——那是給拆解器看的名字，不是內容');
+});
+
+test('F4：舊作品先擱前端、存進庫那一刻才上傳；上傳失敗不擋存檔', () => {
+  const src = uiSrc();
+  const up = /document\.getElementById\('sample-file'\)\.addEventListener\([\s\S]*?\n\}\);/.exec(src);
+  assert.ok(up, 'sample-file 有 change 事件');
+  assert.ok(up[0].includes('state.chat.sample = { name: file.name, b64: btoa(bin) }'), '只擱在 state，不打 API（草稿還沒有地方掛檔案）');
+  assert.equal(count(up[0], "api('POST'"), 0, '選檔當下不上傳');
+  const save = actBranch('confirm-save-draft');
+  assert.ok(save.includes("/files`, { name: sample.name, content_b64: sample.b64 }"), '存進庫之後補上傳成流程參考檔');
+  assert.ok(save.indexOf("api('POST', '/api/workflows'") < save.indexOf('sample.b64'), '先存流程、再上傳檔案（沒有流程就沒有地方放）');
+  assert.ok(save.includes('try {') && save.includes('window.alert'), '上傳失敗只講一句，不能把已經存好的流程也回滾');
+});
+
+test('F5（覆核退回）：class 不撞名、底色框貼齊卡緣、沒動過檔案種類就不送、舊作品不進瀏覽器備份', () => {
+  const css = cssSrc();
+  const html = uiFn('shapeCardHtml', { state: p4State({ chat: { ...p4State().chat, refs: { core: 1, company: 1, dept: 1, paused: false, web: true } } }) })();
+  assert.ok(html.includes('class="shaperules"') && !/<div class="rules">/.test(html), '規範框不能叫 .rules——聊天步驟卡早就佔了這名字，且它的規則在後面會贏');
+  assert.ok(/\.shaperules\{[^}]*background:#fff/.test(css) && /\.shaperules\{[^}]*border-radius:9px/.test(css), '白底圓角框（照 C 案草稿）');
+  assert.ok(/\.shapemake\{margin:18px -20px 0/.test(css), '左右負邊距要等於 .panel 的內距才貼得齊卡緣');
+
+  const confirm = actBranch('shape-confirm');
+  assert.ok(confirm.includes('output_file: state.chat.fileKind,'), '沒動過＝送 null，不硬塞 md（不然「最後一步是寄信」的流程也會被掛檔案屬性）');
+  assert.equal(count(confirm, "?? 'md'"), 0, '不要在送出時補預設值');
+
+  const src = uiSrc();
+  assert.ok(/const dsChat = \(c\) => \(c\?\.sample\?\.b64/.test(src), '存進瀏覽器前要把舊作品的內容剝掉');
+  assert.ok(/dsPack = [^\n]*dsChat\(src\[k\]\)/.test(src), 'dsPack 真的有用它——1MB 額度塞不下一份簡報，會把別的草稿擠掉');
+});
+
+test('F6（覆核退回）：選檔當下就擋壞檔名與過大檔；存完看得到剛上傳的參考檔', () => {
+  const src = uiSrc();
+  const bad = /function badSampleName\([\s\S]*?\n\}/.exec(src);
+  assert.ok(bad, '有前端檔名檢查');
+  for (const s of ['..', 'WIN_RESERVED', '控制字元']) assert.ok(bad[0].includes(s) || src.includes(s), `檢查要涵蓋「${s}」（對齊後端 store.safeFileName）`);
+  const up = /document\.getElementById\('sample-file'\)\.addEventListener\([\s\S]*?\n\}\);/.exec(src)[0];
+  assert.ok(up.includes('badSampleName(file.name)') && up.includes('10 * 1024 * 1024'), '選檔當下就擋——等按儲存才炸的話，attachments 已經寫進去了');
+  assert.ok(up.indexOf('badSampleName') < up.indexOf('arrayBuffer'), '先擋再讀檔');
+  const save = actBranch('confirm-save-draft');
+  assert.ok(save.includes('uploadedFiles = up?.files'), '接住上傳回應帶的檔案清單');
+  assert.ok(save.includes('state.wfFiles = uploadedFiles ?? []'), '不然剛存好的 Workflow 頁會說「還沒有參考檔」');
 });

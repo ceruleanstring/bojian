@@ -11,9 +11,9 @@ export function exportText(def, schedule = null) {
   const doc = {
     bojian_export: EXPORT_FORMAT,
     exported_at: new Date().toISOString(),
-    workflow: def, // 只含定義（含欄位與停點設定）；不含履歷與 run 紀錄（US-019）
+    workflow: def, // 只含定義（含欄位與停點設定）；不含履歷與 run 紀錄
   };
-  // 排程設定隨檔（D20，選填、往前相容）：只帶節奏設定，不帶單次覆寫與啟用狀態——匯入端一律停用起步
+  // 排程設定隨檔：只帶節奏設定，不帶單次覆寫與啟用狀態——匯入端一律停用起步
   if (schedule) {
     doc.schedule = {
       freq: schedule.freq, weekday: schedule.weekday, day: schedule.day,
@@ -43,7 +43,7 @@ export function parseImport(text) {
     if (e instanceof SchemaError) throw new PorterError(`Workflow 檔內容不完整：${e.problems.slice(0, 3).join('；')}`);
     throw e;
   }
-  // 產檔輪定案：匯入的流程一律關產檔權限——寫檔與執行程式的能力只給你親手打開的流程
+  // 定案：匯入的流程一律關產檔權限——寫檔與執行程式的能力只給你親手打開的流程
   const def = { ...doc.workflow, permissions: { ...(doc.workflow.permissions ?? {}), files: false } };
   return { def, schedule: doc.schedule ?? null };
 }

@@ -16,18 +16,18 @@ function fakeAdapter() {
   const spans = []; // {nodeId, start, end} 併發驗證用
   let failOn = null;
   let delay = 0;
-  const delayFor = {}; // 排版輪 L13：單一步驟的延遲（任一條到要一快一慢）
+  const delayFor = {}; // 單一步驟的延遲（任一條到要一快一慢）
   let seq = 0;
   let failTimes = Infinity;
-  const outputs = {}; // 指定某步下一次的回覆（資料通道輪：模擬【資料不全】，用一次即清）
+  const outputs = {}; // 指定某步下一次的回覆（模擬【資料不全】，用一次即清）
   let fileWriter = null;
-  let checkReply = null; // 查核輪：kind='check' 的回覆（字串，或 (第幾次查, meta)=>字串／丟錯）
-  let editRulesReply = null; // 查核輪：kind='edit-rules' 的回覆
-  // 監工輪：kind='supervisor' 依 meta.phase 分三種回覆，缺省都是合法 JSON（監工缺省是開，每趟都會被問到）
+  let checkReply = null; // kind='check' 的回覆（字串，或 (第幾次查, meta)=>字串／丟錯）
+  let editRulesReply = null; // kind='edit-rules' 的回覆
+  // kind='supervisor' 依 meta.phase 分三種回覆，缺省都是合法 JSON（監工缺省是開，每趟都會被問到）
   let briefReply = '{"note":"（測試）開場備註"}';
   let handoffReply = '{"note":"（測試）交接","tier":null,"web":null,"route":null}';
   let recordReply = '{"text":"（測試）這趟的紀錄","suggestions":[]}';
-  let routeReply = '{"cards":[]}'; // 記憶輪 M2：kind='memory'（三問路由）的回覆
+  let routeReply = '{"cards":[]}'; // kind='memory'（三問路由）的回覆
   const checkSeq = {}; // nodeId → 這一步查到第幾次
   const reply = (x, meta, prompt) => (typeof x === 'function' ? x(meta, prompt) : x);
   return {
@@ -35,7 +35,7 @@ function fakeAdapter() {
     spans,
     setFailOn(nodeId, times = Infinity) { failOn = nodeId; failTimes = times; },
     setOutput(nodeId, text) { outputs[nodeId] = text; },
-    setFileWriter(fn) { fileWriter = fn; }, // 產檔輪：模擬工人在 fileMode.cwd 寫出檔案（回 true＝寫預設文字、回內容＝寫那份內容）
+    setFileWriter(fn) { fileWriter = fn; }, // 模擬工人在 fileMode.cwd 寫出檔案（回 true＝寫預設文字、回內容＝寫那份內容）
     setDelay(ms) { delay = ms; },
     setDelayFor(nodeId, ms) { delayFor[nodeId] = ms; },
     setBriefReply(x) { briefReply = x; }, // 字串，或 (meta, prompt)=>字串／丟錯
@@ -149,9 +149,9 @@ test('單步自動重試：重試用盡仍失敗 → 標失敗停下', async () 
   assert.equal(r.status, 'paused');
 });
 
-test('D19 降級：output_file=pptx 未接工具鏈 → 存 .md＋file_note 講明；docx 沒開產檔權限 → 存 .md＋講明要開權限', async () => {
+test('D19 降級：output_file=pdf 未接工具鏈 → 存 .md＋file_note 講明；docx 沒開產檔權限 → 存 .md＋講明要開權限（成品格式輪：pptx 已離開降級清單，只剩 pdf）', async () => {
   const def = structuredClone(LINEAR3);
-  def.nodes[0].output_file = 'pptx';
+  def.nodes[0].output_file = 'pdf';
   def.nodes[1].output_file = 'docx';
   const { runner, store, adapter } = setup(def);
   const run = runner.startRun('測試', 'wf', {});
@@ -187,7 +187,7 @@ test('產檔輪：流程開產檔權限＋docx → 工人收到 fileMode（產�
   assert.equal(r.steps.a.file_note, null);
   // 停點修改的是摘要，不覆蓋真檔、也不多存一份 .md
   r = runner.edit('測試', 'wf', run.run_id, 'a', '改過的摘要', null);
-  runner.resume('測試', 'wf', run.run_id); // 裁定 28：edit 不再自己翻狀態，放行是獨立動作
+  runner.resume('測試', 'wf', run.run_id); //：edit 不再自己翻狀態，放行是獨立動作
   assert.equal(r.steps.a.edited_output, '改過的摘要');
   assert.equal(store.readArtifact('測試', 'wf', run.run_id, 'A.docx').toString('utf8'), 'FILE:A.docx');
   r = await runner.runUntilPause('測試', 'wf', run.run_id);
@@ -195,6 +195,22 @@ test('產檔輪：流程開產檔權限＋docx → 工人收到 fileMode（產�
   assert.equal(r.steps.b.file, 'B.md', '工人沒交出 .xlsx → 文字產出存 .md');
   assert.ok(r.steps.b.file_note.includes('沒交出'));
   assert.deepEqual(store.listArtifacts('測試', 'wf', run.run_id), ['A.docx', 'B.md']);
+});
+
+test('成品格式輪：流程開產檔權限＋pptx → 進產檔模式產真檔，不再降級成 .md', async () => {
+  const def = structuredClone(LINEAR3);
+  def.permissions = { files: true };
+  def.nodes[0].output_file = 'pptx';
+  const { runner, store, adapter } = setup(def);
+  adapter.setFileWriter((fm) => fm.fileName.endsWith('.pptx'));
+  const run = runner.startRun('測試', 'wf', {});
+  await runner.runUntilPause('測試', 'wf', run.run_id);
+  const a = adapter.calls.find((c) => c.nodeId === 'a');
+  assert.ok(a.fileMode, 'pptx 要進產檔模式（以前會被降級掉）');
+  assert.ok(a.fileMode.fileName.endsWith('.pptx'), a.fileMode?.fileName);
+  assert.ok(store.listArtifacts('測試', 'wf', run.run_id).some((f) => f.endsWith('.pptx')), '產出資料夾要有真的 .pptx');
+  const r = store.readRun('測試', 'wf', run.run_id);
+  assert.ok(!r.steps.a.file_note, '沒降級就不該有降級說明');
 });
 
 test('D19 範本填空：{{參數}} 與 {{output}} 都代入，存成範本的格式', async () => {
@@ -234,11 +250,11 @@ test('runUntilPause：無停點流程一路跑完；產出串鏈、參數注入�
   const done = await runner.runUntilPause('測試', 'wf', run.run_id);
   assert.equal(done.status, 'done');
   assert.ok(done.finished_at);
-  const steps = adapter.calls.filter((c) => c.nodeId); // 查核輪：查核員的呼叫也記在 calls 裡，工人的用 nodeId 篩
+  const steps = adapter.calls.filter((c) => c.nodeId); // 查核員的呼叫也記在 calls 裡，工人的用 nodeId 篩
   assert.equal(steps.length, 3);
   assert.ok(steps[0].instruction.includes('本季'), '參數預設值要注入指示');
   assert.equal(steps[1].upstream, '產出:a', '下游輸入=上游產出');
-  // 拆法輪 B1：第三步拿沿路全部產出（最近在前、多段加標頭）
+  // 第三步拿沿路全部產出（最近在前、多段加標頭）
   assert.equal(steps[2].upstream, '（沿路全部產出，最近的在前）\n【B】\n產出:b\n\n【A】\n產出:a');
   const saved = store.readRun('測試', 'wf', run.run_id);
   for (const s of Object.values(saved.steps)) assert.equal(s.status, 'done');
@@ -265,7 +281,7 @@ test('停點核可→續跑；停點修改→改過的版本進下游；人步�
   r = await runner.runUntilPause('測試', 'wf', run.run_id);
   assert.equal(r.steps.compose.status, 'waiting_review', '第二停：做成報告＋講稿');
   const analyzeCall = adapter.calls.find((c) => c.nodeId === 'analyze');
-  // 拆法輪 B1：沿路全帶——修改後版本排最前（最近在前），更早的抓資料產出跟在後面
+  // 沿路全帶——修改後版本排最前（最近在前），更早的抓資料產出跟在後面
   assert.ok(analyzeCall.upstream.startsWith('（沿路全部產出，最近的在前）\n【整理歸納】\n改過的彙總\n\n【'), `下游吃修改後版本：${analyzeCall.upstream}`);
   assert.ok(!analyzeCall.upstream.includes('產出:organize'), '原版不進下游');
   r = runner.approve('測試', 'wf', run.run_id, 'compose');
@@ -305,7 +321,7 @@ test('核可只在等你過目時有效：對非停點步驟 approve → 擋下'
 // ---- S3：有向圖（平行／分岔）----
 import { DAG_DEF, PAR_DEF, PAR_DIRECT_DEF } from './fixtures.js';
 
-// 畫布回饋輪：fork/join 退場後的直連寫法——多出線同時跑、多入線自動匯流（含來源標頭）
+// fork/join 退場後的直連寫法——多出線同時跑、多入線自動匯流（含來源標頭）
 test('直連並行：task 多出線兩支同時執行、多入線匯流兩支產出', async () => {
   const { adapter, runner } = setup(PAR_DIRECT_DEF);
   adapter.setDelay(20);
@@ -333,7 +349,7 @@ test('平行段：兩支同時執行、join 匯流兩支產出、收尾吃 join 
   assert.ok(finalCall.upstream.includes('產出:t-a') && finalCall.upstream.includes('產出:t-b'), 'join 匯流要含兩支產出');
 });
 
-// 監工輪遷移：判路併進監工的交接——分岔節點的選路由 handoff 的 route 欄（選項編號字串）決定
+// 遷移：判路併進監工的交接——分岔節點的選路由 handoff 的 route 欄（選項編號字串）決定
 test('分岔：AI 依條件選路→未選支跳過；選到人做步驟則停等', async () => {
   const { adapter, runner } = setup(DAG_DEF);
   adapter.setHandoffReply('{"route":"2"}'); // 2＝五千以下
@@ -597,14 +613,14 @@ test('複查 M2：parseWhen 嚴格——不存在的日期不准被捲到別日'
   assert.equal(parseWhen('2026-02-29T14:00'), null, '平年 2/29 不合法');
 });
 
-// ===== 儀表板輪：prompt 卷宗＋用量帳 meta 歸戶 =====
+// ===== prompt 卷宗＋用量帳 meta 歸戶 =====
 
 test('儀表板輪：每步執行前存卷宗（renderPrompt 全文）；executeNode 帶 meta 歸戶', async () => {
   const { runner, adapter, store } = setup();
   const run = runner.startRun('測試', 'wf', {});
   await runner.runUntilPause('測試', 'wf', run.run_id);
-  // 查核輪：查核員的指示也進卷宗（每步一份 checkN），所以清單裡工人與查核員各一份
-  // 監工輪：再加開場（_brief）、收尾（_record）與每個非第一層步驟的交接，各存指示與回覆原文兩份
+  // 查核員的指示也進卷宗（每步一份 checkN），所以清單裡工人與查核員各一份
+  // 再加開場（_brief）、收尾（_record）與每個非第一層步驟的交接，各存指示與回覆原文兩份
   assert.deepEqual(store.listPromptRecords('測試', 'wf', run.run_id), [
     '_brief.reply.txt', '_brief.txt', '_record.reply.txt', '_record.txt',
     'a.check1.txt', 'a.txt',
@@ -642,7 +658,7 @@ test('儀表板輪：分岔判路的 prompt 也入卷宗（.handoff.txt），met
   assert.equal(bc.meta.run, run.run_id);
 });
 
-// ---- 資料通道輪：人做步驟交出內容、補資料、資料不全診斷 ----
+// ---- 人做步驟交出內容、補資料、資料不全診斷 ----
 const HUMAN_HANDOFF = {
   format: 1,
   name: '人做交接',
@@ -728,7 +744,7 @@ test('資料通道輪：補資料時原上游也照給（補的在前、原上�
   assert.equal(r.status, 'done');
 });
 
-// ===== 查核輪 T3：長欄位不代進句子（runner injectParams sink）=====
+// ===== 長欄位不代進句子（runner injectParams sink）=====
 const FIELD_DEF = {
   format: 1,
   name: '長欄位測試',
@@ -822,7 +838,7 @@ test('長欄位保護涵蓋所有代入欄位：background／examples 等欄位�
   assert.equal(a.paramBlocks.filter((b) => b.label === '備註').length, 1, '同一 key 跨欄位共用同一 sink，只收一次');
 });
 
-// ===== 交貨查核輪：查核接線、重做一次、waiting_check、三個動作、停點規則往下游 =====
+// ===== 查核接線、重做一次、waiting_check、三個動作、停點規則往下游 =====
 
 const CHECK_PASS = JSON.stringify({
   items: [{ claim: '總數 14 件', source: '明細共 14 件', scope: '全月', calc: '6+3+4+1=14', verdict: 'ok' }],
@@ -1031,7 +1047,7 @@ test('查核輪：查核看到的原始資料含全部欄位、所有祖先步�
   assert.ok(p.includes('# 成品'), '成品也在查核指示裡');
 });
 
-// ===== 監工輪：facts 開關與監工備註進查核 =====
+// ===== facts 開關與監工備註進查核 =====
 
 test('監工輪：流程關掉「數字對原始資料」→ 查核指示講明沒開、一份原始資料都不組', async () => {
   const def = structuredClone(LINEAR3);
@@ -1171,7 +1187,7 @@ const MIXED_CHECK = {
   ],
 };
 
-// ---- 查核輪（補件）：查核員與擬規則的指示也進卷宗，存的全文＝送出的全文 ----
+// ---- （補件）：查核員與擬規則的指示也進卷宗，存的全文＝送出的全文 ----
 
 test('查核輪：查核員的指示進卷宗（check1），全文＝送給查核員的那份、含成品', async () => {
   const { runner, adapter, store } = setup();
@@ -1214,7 +1230,7 @@ test('查核輪：重做那次的查核另存 check2；回話重做的重跑照�
   );
 });
 
-// 裁定 21：卷宗只存指示不存回覆，真跑遇到一次「查核員交了不只一份結果」就再也查不出為什麼
+//：卷宗只存指示不存回覆，真跑遇到一次「查核員交了不只一份結果」就再也查不出為什麼
 test('查核輪：查核沒查成時回覆原文另存 check1.reply.txt；查成了就不留', async () => {
   const { runner, adapter, store } = setup();
   adapter.setCheckResponse('我看不懂這一步要查什麼');
@@ -1231,7 +1247,7 @@ test('查核輪：查核沒查成時回覆原文另存 check1.reply.txt；查成
   const run2 = clean.runner.startRun('測試', 'wf', {});
   await clean.runner.runUntilPause('測試', 'wf', run2.run_id);
   const kept = clean.store.listPromptRecords('測試', 'wf', run2.run_id);
-  // 監工輪：監工的回覆原文一律留（_brief／_record／*.handoff），這裡只管查核員那幾份
+  // 監工的回覆原文一律留（_brief／_record／*.handoff），這裡只管查核員那幾份
   assert.ok(!kept.some((x) => x.includes('.check') && x.endsWith('.reply.txt')), `查成了就沒有查核回覆原文檔：${kept}`);
 });
 
@@ -1280,7 +1296,7 @@ test('查核輪：setEditRules 整份覆寫——丟掉空文字、scope 看不�
   assert.throws(() => runner.setEditRules('測試', 'wf', run.run_id, '沒這步', []), /找不到步驟/);
 });
 
-// ===== 監工輪 K2：三個接線點（開場、交接、收尾）＋派工覆寫＋插話 =====
+// ===== 三個接線點（開場、交接、收尾）＋派工覆寫＋插話 =====
 
 const supCalls = (adapter, phase, nodeId) =>
   adapter.calls.filter((c) => c.meta?.kind === 'supervisor' && c.meta.phase === phase && (!nodeId || c.meta.node === nodeId));
@@ -1583,7 +1599,7 @@ test('監工交接一步只問一次：被查核退回、回話重做都沿用�
   assert.equal(supCalls(adapter, 'handoff', 'b').length, 1, '重做不重問監工');
 });
 
-// ---- 記憶輪 M2：開跑收三個記憶欄位寫 run.memory；記路①（開跑同值連兩趟）在 startRun 後由門面判 ----
+// ---- 開跑收三個記憶欄位寫 run.memory；記路①（開跑同值連兩趟）在 startRun 後由門面判 ----
 
 test('M2 startRun：memoryPicks／memoryChanged／memoryIdentity 寫進 run.memory；沒給＝空殼；memory 省略照舊', () => {
   const { runner, store } = setup();
@@ -1668,7 +1684,7 @@ test('M2 startRun：memory.onRunStart 丟錯→run 照樣建立、照樣回傳',
   assert.deepEqual(run.memory.notices, []);
 });
 
-// ---- 記憶輪 M3a：每步工作單帶「關於你」與群組規矩、查核必守含群組規矩、steps[n].memory、設定缺省接線 ----
+// ---- 每步工作單帶「關於你」與群組規矩、查核必守含群組規矩、steps[n].memory、設定缺省接線 ----
 
 function setupMemory(def = LINEAR3) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bojian-runner-'));
@@ -1883,7 +1899,7 @@ test('M3a 設定缺省：節點沒設檔位→用 settings.defaults.model_tier�
   assert.equal(workerCalls(s3.adapter, 'a')[0].web, true);
 });
 
-// ---- 移植合併輪 U1b：規範開跑鎖版本（run.shared）、參考檔跨層（attachments 混型）、查核第四路、舊 run 相容 ----
+// ---- 規範開跑鎖版本（run.shared）、參考檔跨層（attachments 混型）、查核第四路、舊 run 相容 ----
 
 const seedShared = (store) => {
   store.addShared('_company', { name: '手冊.md', kind: 'rule', buf: Buffer.from('語氣要親切。'), text: '語氣要親切。' });
@@ -1972,7 +1988,7 @@ test('U1b ④：attachments 混型——字串走流程參考檔、{scope} 走�
   assert.ok(brief.includes('【參考檔：沒有的.md（組織）】') && !brief.includes('[object Object]'), '讀不到的只列名字');
   assert.deepEqual(r.steps.a.memory.shared, {
     company: [], dept: [],
-    refs: [{ scope: 'company', name: 'b.md', chars: '公司層內容'.length }, { scope: 'category', name: 'c.md', chars: '部門層內容'.length }], // U1a 修正輪：md／txt 參考的 chars＝字元數（5），不是位元組
+    refs: [{ scope: 'company', name: 'b.md', chars: '公司層內容'.length }, { scope: 'category', name: 'c.md', chars: '部門層內容'.length }], // U1a md／txt 參考的 chars＝字元數（5），不是位元組
   });
   assert.equal(r.steps.b.memory, undefined, '沒勾共用檔、沒規範的步驟不多寫');
 });
@@ -2027,7 +2043,7 @@ test('U1b 卷宗：真 host-adapter → prompts/a.txt 有「# 公司規範」「
   assert.ok(ck.includes('# 公司／部門規範（一定要守）\n## 公司規範：手冊.md\n語氣要親切。') && ck.includes('違反規範歸 must'), ck);
 });
 
-// ===== 拆法輪 B1：執行端沿路全帶（契約 C）——每一步的輸入＝全部祖先 task 的產出，最近在前、80,000 整段截斷、並行點不轉運 =====
+// ===== 執行端沿路全帶——每一步的輸入＝全部祖先 task 的產出，最近在前、80,000 整段截斷、並行點不轉運 =====
 import { capUpstream, UPSTREAM_CAP } from '../src/runner.js';
 
 const PREFACE = '（沿路全部產出，最近的在前）';
@@ -2161,7 +2177,7 @@ test('B1 ⑧：舊 run（並行點產出仍是舊式轉運文字、run.yaml 無�
   assert.ok(fin.includes('【做A】\n產出:t-a') && fin.includes('【做B】\n產出:t-b') && fin.includes('【起步】\n產出:start'), fin);
 });
 
-// ---- 排版輪 L11：本次補充（題 3f）與本次上傳（題 2 A） ----
+// ---- 本次補充f）與本次上傳 A） ----
 const UPLOAD_RUN_DEF = {
   format: 1, name: '上傳月報',
   params: [{ key: 'src', label: '原始資料', default: '', input: 'file', required: true }, { key: 'range', label: '範圍', default: '本季' }],
@@ -2200,7 +2216,7 @@ test('排版輪 L11 ⑥：不帶 note／上傳的 run 沒有新鍵、upstream �
   assert.equal(up.store.listRuns('測試', 'wf').length, 0, '擋下的不落地');
 });
 
-// ===== 排版輪 L13（題 1 A）：入口「任一條到」＝nodes[].merge:'any'——第一條線做完就開始，其他線照跑完但產出不再送進這張卡（與它的下游） =====
+// ===== 入口「任一條到」＝nodes[].merge:'any'——第一條線做完就開始，其他線照跑完但產出不再送進這張卡（與它的下游） =====
 import { exportText, parseImport } from '../src/porter.js';
 
 const ANY_DEF = {
@@ -2382,7 +2398,7 @@ test('排版輪 L13 引擎⑥：舊 run 續跑不炸——伺服器重啟時 d �
   assert.ok(callsOf(adapter3, 'd')[0].upstream.includes('產出:c'));
 });
 
-// ── 2026-09-18 審查修正輪 ──────────────────────────────────────────────
+// ── 2026-09-18  ──────────────────────────────────────────────
 
 test('必填上傳欄位：留著舊的預設文字也不算有檔，開跑要直接擋下來', () => {
   const { runner, store } = setup({

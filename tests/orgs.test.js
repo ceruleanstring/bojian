@@ -1,4 +1,4 @@
-// 多組織輪 O1：組織清單＋舊扁平版面遷移。全部在 os.tmpdir() 造假資料，不碰 bojian/data
+// 組織清單＋舊扁平版面遷移。全部在 os.tmpdir() 造假資料，不碰 bojian/data
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';

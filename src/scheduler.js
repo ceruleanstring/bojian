@@ -1,4 +1,4 @@
-// scheduler — 排程器（D20，ADR-005）：server 內建 tick、到點全發（不限流＝定案）、
+// scheduler — 排程器：server 內建 tick、到點全發（不限流＝定案）、
 // 觸發指紋防重、錯過偵測（睡眠關機同路）、疊發偵測、擋時限提醒升級（複數提前量＋離線補升）。
 // 時鐘一律用注入的 now()；tick 冪等，每分鐘重跑安全。
 import { parseWhen } from './runner.js';
@@ -250,7 +250,7 @@ export function createScheduler({ store, runner, kick = () => {}, now = () => Da
         try { r = store.readRun(category, id, rid); } catch { continue; }
         if (r.status === 'done') continue;
         for (const [nodeId, step] of Object.entries(r.steps ?? {})) {
-          // 無人值守失敗（US-040）：自動 run 的步驟重試用盡仍失敗 → 通知（人話原因＋重試），不默默終止
+          // 無人值守失敗：自動 run 的步驟重試用盡仍失敗 → 通知（人話原因＋重試），不默默終止
           if (r.source === 'schedule' && step.status === 'failed') {
             const fnode = r.def.nodes.find((n) => n.id === nodeId);
             pushNotice(store, {

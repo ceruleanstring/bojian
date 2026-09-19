@@ -1,4 +1,4 @@
-// preflight — 開跑前健檢（資料通道輪）：每一步「開跑時會拿到什麼」＋固定規則（不花 AI）。
+// preflight — 開跑前健檢：每一步「開跑時會拿到什麼」＋固定規則（不花 AI）。
 // 規則只擋一種：AI 步驟根本沒有內容來源（上游只有沒宣告交出內容的人做步驟、或什麼都沒有）且指示明說要吃上一步。
 // 其餘一律提醒（可照跑）。前端抽屜預覽與 POST /runs 擋門走同一份結果——單一真相。
 import { nodeKind, outgoing, OUTPUT_OFFICE } from './schema.js';
@@ -19,7 +19,7 @@ function paramsUsedBy(node) {
   return keys;
 }
 
-// 沿路全部內容來源（拆法輪，契約 C，與 runner.upstreamText 同一套）：所有祖先裡的 task（AI／人做），最近在前；
+// 沿路全部內容來源（與 runner.upstreamText 同一套）：所有祖先裡的 task（AI／人做），最近在前；
 // 並行點與分岔只是結構不算來源、同一步只出現一次。ancestorIds 第一參數是 run，preflight 只有 def，包一層（地雷 4）
 function contentSources(def, nodeId, predMap, byId) {
   return ancestorIds({ def }, nodeId, predMap)
@@ -42,8 +42,8 @@ function nearestSources(nodeId, predMap, byId, seen = new Set()) {
   return out;
 }
 
-// 排版輪 L11（題 2 A）：每次上傳的檔由誰讀——沒有 AI 祖先的 AI 步驟（通常就是第一個 AI 步驟）；後面的步驟靠沿路全帶拿它的產出
-// 排版輪 L13（題 1 A）：任一條到的卡只收先到的那條線——只要有一條線（連同它的祖先）沒有 AI，就可能沒 AI 讀過檔，算「可能沒有 AI 祖先」。
+// 每次上傳的檔由誰讀——沒有 AI 祖先的 AI 步驟（通常就是第一個 AI 步驟）；後面的步驟靠沿路全帶拿它的產出
+// 任一條到的卡只收先到的那條線——只要有一條線（連同它的祖先）沒有 AI，就可能沒 AI 讀過檔，算「可能沒有 AI 祖先」。
 // 沒有任一條到的定義：等於「全部祖先都不是 AI」，與原寫法同一結果
 export function uploadReaders(def) {
   const byId = new Map(def.nodes.map((n) => [n.id, n]));
@@ -74,7 +74,7 @@ export function inputSources(def) {
     if (nodeKind(n) !== 'task') continue;
     const list = [];
     const near = new Set(nearestSources(n.id, predMap, byId));
-    // 排版輪 L13（題 1 A）：任一條到＝直接接進來的線不一定都趕得上，照列但標出來；更早的祖先一定到，不標
+    // 任一條到＝直接接進來的線不一定都趕得上，照列但標出來；更早的祖先一定到，不標
     const anyTag = (s) => (n.merge === 'any' && near.has(s.id) ? '（任一條到）' : '');
     for (const s of contentSources(def, n.id, predMap, byId)) {
       list.push(s.executor === 'human'
@@ -90,7 +90,7 @@ export function inputSources(def) {
   return result;
 }
 
-// 排版輪 L14b：/api/preflight 傳給前端的輸入來源（不重複的寫法）——原本每步列全部祖先的整句，200 步 119 萬字元、隨步數平方成長。
+// /api/preflight 傳給前端的輸入來源（不重複的寫法）——原本每步列全部祖先的整句，200 步 119 萬字元、隨步數平方成長。
 // pred[id]＝[第一個前驅, ...之後多出來的祖先]：order(id)＝order(第一個前驅)＋[第一個前驅]＋多出來的（與 ancestorIds 同順序，單線時只有一個 id）；
 // src[task]＝{t 名稱, h 人做, o 交出什麼} 只傳一次；at[task]＝{near 直接來源, any 任一條到, own 欄位／參考檔／上傳}。前端 pfInputs 展開，與 inputSources 逐項相同
 export function packInputs(def) {
@@ -116,21 +116,21 @@ export function packInputs(def) {
   return { pred, src, at };
 }
 
-// 欄位預設值長得像「提示你要貼什麼」而不是真正的內容（排程與健檢輪：新使用者沒填照樣開跑）
+// 欄位預設值長得像「提示你要貼什麼」而不是真正的內容（新使用者沒填照樣開跑）
 // 2026-09-18 二次審查補：R4 放寬成「只有預設像佔位文字才擋」之後，必填欄位的守門就只剩這條規則，
 // 而它漏掉同樣常見的「例：…」「此處填…」「待填」「XXX」——漏掉的代價是 AI 拿那句範例當主題
 // 花錢跑完一整趟，交出一份標著完成的報告。
-// 取捨（覆核退回兩次後定）：誤擋的代價比漏擋大得多——漏擋只是回到補這條之前的狀態，誤擋卻讓
+// 取捨：誤擋的代價比漏擋大得多——漏擋只是回到補這條之前的狀態，誤擋卻讓
 // 那個欄位永遠開不了跑（正是 R4 這次要拆掉的病）。所以本次新加的四段一律綁句首或整串：
 //   「例：」限句首（不然「案例：A 公司違約」「前例：無」被擋）；「此處填／放／寫／貼」限句首
-//   （不然「會議紀錄請於此處填寫收件地址」這種表單文案被擋）；「待填」限整串就這兩個字
-//   （不然「待填人力需求評估表」被擋）；XXX 同樣限整串。
+//（不然「會議紀錄請於此處填寫收件地址」這種表單文案被擋）；「待填」限整串就這兩個字
+//（不然「待填人力需求評估表」被擋）；XXX 同樣限整串。
 //   曾經加過的「填寫」「你的…」全數撤掉：「填寫月報」「你的訂單已成立」都是合理答案，字面分不開。
 //   代價＝「填寫客戶名稱」「TBD」「N/A」「尚未填寫」這類佔位漏得掉，由必填欄位的 hint 與使用者把關。
-// 【已知缺陷，本輪不動，記在 STATE 列管】前五段（貼上／請填／填入／輸入／範例）是排程與健檢輪就有的
+// 【已知缺陷，不動，記在 STATE 列管】前五段（貼上／請填／填入／輸入／範例）是就有的
 // 舊規則，任何位置命中就擋，沒有邊界——「已貼上出貨憑證」「本月輸入項目共 12 筆」「以範例 A 版為準」
-// 這類真答案會被誤擋（2026-09-18 覆核實測 24/27）。它不是本輪改出來的，且補邊界會同時放掉一批
-// 原本擋得住的佔位，屬於要單獨開一輪、要先確認代價的改動，不在本輪順手動。
+// 這類真答案會被誤擋（實測 24/27）。它不是改出來的，且補邊界會同時放掉一批
+// 原本擋得住的佔位，屬於要單獨開一輪、要先確認代價的改動，不在順手動。
 const PLACEHOLDER_RE = /貼上|請填|填入|輸入|範例|^\s*此處[填放寫貼]|^\s*例[：:]|^\s*待填\s*$|^\s*[xXｘＸ]{3,}\s*$|^\s*[（(\[]/;
 
 // 固定規則 → { issues, inputs, unused_params }；values＝這次的值（開跑前才給；抽屜預覽不給就不查欄位值）
@@ -195,7 +195,7 @@ export function preflight(def, values = null) {
     });
   }
 
-  // R5 file-permission（擋，產檔輪）：步驟要產 Word／Excel 真檔，但這條流程沒開產檔權限
+  // R5 file-permission（擋，步驟要產 Word／Excel 真檔，但這條流程沒開產檔權限
   if (def.permissions?.files !== true) {
     for (const n of def.nodes) {
       if (nodeKind(n) !== 'task' || n.executor !== 'ai' || !OUTPUT_OFFICE.includes(n.output_file)) continue;
@@ -227,7 +227,7 @@ export function preflight(def, values = null) {
     const usedByAi = new Set();
     for (const n of def.nodes) if (nodeKind(n) === 'task' && n.executor === 'ai') for (const k of paramsUsedBy(n)) usedByAi.add(k);
     for (const p of def.params ?? []) {
-      // R6 upload-missing（擋，排版輪 L11）：必填的上傳欄位這一趟沒有檔（values 裡是上傳檔名，沒傳＝空）
+      // R6 upload-missing（擋，必填的上傳欄位這一趟沒有檔（values 裡是上傳檔名，沒傳＝空）
       if (p.input === 'file') {
         if (p.required === true && !String(values[p.key] ?? '').trim()) {
           issues.push({

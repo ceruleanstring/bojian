@@ -1,4 +1,4 @@
-// supervisor — 監工（監工輪）：一趟流程開跑前寫開場備註、每一步開跑前寫交接、跑完寫執行紀錄。
+// supervisor — 監工：一趟流程開跑前寫開場備註、每一步開跑前寫交接、跑完寫執行紀錄。
 // 監工是每次一次全新的 adapter.complete（meta.kind='supervisor'，不帶工具、不帶側寫）；業務 prompt 只在這裡組。
 // 三條紀律：
 //   1. 存的全文＝送出的全文——prompt 一律經這裡的三個 build* 函式，卷宗由 onPrompt／onReply 回呼收。
@@ -321,7 +321,7 @@ export function buildRecordTable({ run, usageRows }) {
       check: ck ? { status: str(ck.status), blocks: arr(ck.blocks).length, flags: arr(ck.flags).length, attempts: Number(ck.attempts ?? 0) } : null,
       edited: s.edited_output !== null && s.edited_output !== undefined,
       edit_note: s.edit_note ?? null,
-      cards: arr(s.memory?.cards).map((c) => str(c?.id)).filter(Boolean), // 記憶輪：這步用了哪幾條，只鏡像 steps[n].memory 的 id
+      cards: arr(s.memory?.cards).map((c) => str(c?.id)).filter(Boolean), // 這步用了哪幾條，只鏡像 steps[n].memory 的 id
       usage: usageOf(n.id),
     };
   });
@@ -342,7 +342,7 @@ const bigrams = (s) => {
 };
 
 // 字元二元組的 Jaccard：|A∩B|/|A∪B|。任一方不足兩字→聯集可能為空，一律回 0，永不回 NaN
-// （優化員訊號 E 用它判「連續兩趟的交接是不是同一句話」，NaN 會讓比較永遠為假，該提的提議就不見了）
+//（優化員訊號 E 用它判「連續兩趟的交接是不是同一句話」，NaN 會讓比較永遠為假，該提的提議就不見了）
 export function bigramJaccard(a, b) {
   const A = bigrams(a);
   const B = bigrams(b);

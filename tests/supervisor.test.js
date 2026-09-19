@@ -1,4 +1,4 @@
-// supervisor — 監工模組（監工輪 K1）：三份固定交代、三個 prompt 組裝、三個解析、三個呼叫、對應表、相似度
+// supervisor — 監工模組：三份固定交代、三個 prompt 組裝、三個解析、三個呼叫、對應表、相似度
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { CheckParseError } from '../src/checker.js';
@@ -356,7 +356,7 @@ test('二元組相似度：像的過半、不像的低、不足兩字回 0（永
   assert.equal(bigramJaccard('按三類分節', '按三類分節'), 1);
 });
 
-// ---- 移植合併輪 U1b：開場 prompt 的參考檔 attachments 混型（共用層 {scope,name} 用「名稱（公司）」當鍵與顯示名） ----
+// ---- 開場 prompt 的參考檔 attachments 混型（共用層 {scope,name} 用「名稱（公司）」當鍵與顯示名） ----
 
 test('U1b ⑥：開場 prompt attachments 混型——{scope,name} 顯示「名稱（公司）」「名稱（分類）」並以此當 refTexts 的鍵；不炸、無 [object Object]', () => {
   const def = structuredClone(DEF);
@@ -368,7 +368,7 @@ test('U1b ⑥：開場 prompt attachments 混型——{scope,name} 顯示「名�
   assert.ok(!p.includes('[object Object]'));
 });
 
-// ---- 拆法輪 B2 ⑤（契約 D）：能耐表只給拆解器，監工三個 prompt 不帶 ----
+// ----  ⑤：能耐表只給拆解器，監工三個 prompt 不帶 ----
 
 test('B2 ⑤：監工開場／交接／收尾 prompt 0 命中「你能派工人做什麼」與「# 關於你」', () => {
   const brief = buildBriefPrompt({ def: DEF, params: {}, paramLabels: {}, refTexts: {} });

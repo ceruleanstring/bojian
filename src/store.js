@@ -36,10 +36,10 @@ function readYaml(filePath, subject) {
 // 檔名護欄：擋路徑跳脫與 Windows 禁字（參考檔與產出物共用）
 // Windows 保留裝置名（CON／PRN／AUX／NUL／COM1–9／LPT1–9）：不分大小寫、帶副檔名也算（CON.md 一樣寫不進 NTFS）
 const RESERVED_NAMES = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
-const UPLOAD_OWNER = 'owner..json'; // 本次上傳暫存夾的綁定記號（排版輪 L13 附帶）
+const UPLOAD_OWNER = 'owner..json'; // 本次上傳暫存夾的綁定記號
 export function safeFileName(name) {
   const n = String(name ?? '').trim();
-  // 排版輪 L13 附帶：控制字元（NUL 等）先擋——落到寫檔才炸的話，系統錯誤訊息會帶出伺服器絕對路徑
+  // 控制字元（NUL 等）先擋——落到寫檔才炸的話，系統錯誤訊息會帶出伺服器絕對路徑
   if (/[\x00-\x1f\x7f]/.test(n)) throw new StoreError('檔名裡有看不見的控制字元，換個名字再傳', 'BAD_NAME');
   if (!n || /[\\/:*?"<>|]/.test(n) || n.includes('..')) throw new StoreError(`檔名「${name}」不合法（不能含路徑符號）`, 'BAD_NAME');
   if (RESERVED_NAMES.test(n)) throw new StoreError(`檔名「${name}」是系統保留字，換個名字`, 'BAD_NAME');
@@ -55,7 +55,7 @@ function safeSegment(value, subject) {
   return n;
 }
 
-// 全域設定缺省（記憶輪）：缺檔＝全部缺省；readSettings 深合併（物件逐鍵補、陣列整個取代）
+// 全域設定缺省：缺檔＝全部缺省；readSettings 深合併（物件逐鍵補、陣列整個取代）
 export const DEFAULT_SETTINGS = Object.freeze({
   version: 1,
   memory: { paused: false, sensitive: { health: false, politics: false, religion: false, finance: false }, intro_done_at: null },
@@ -64,8 +64,8 @@ export const DEFAULT_SETTINGS = Object.freeze({
     supervisor_flags: { note: true, tier: false, tools: false }, model_tier: null, retry: null,
   },
   exec: { auto_makeup: false, remind_leads: [], web: true },
-  company_name: '', // 三層共用檔（移植合併輪）：側欄最上層節點的名字，空＝「公司」
-  compose: { confirm_shape: true }, // 拆法輪（契約 F）：一句話進來先出成品卡再拆；關掉＝伺服器連跑兩趟直接出草稿
+  company_name: '', // 三層共用檔：側欄最上層節點的名字，空＝「公司」
+  compose: { confirm_shape: true }, // 一句話進來先出成品卡再拆；關掉＝伺服器連跑兩趟直接出草稿
 });
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -93,7 +93,7 @@ export function createStore(dataDir, { root: backupRoot = dataDir } = {}) {
   const schedulesFile = path.join(dataDir, 'schedules.json');
   const noticesFile = path.join(dataDir, 'notices.json');
   const snapshotFile = path.join(dataDir, 'calendar-snapshot.json');
-  // 記憶輪：兩本帳（habits/、profile/）、詞典、群組圈、身分、記憶垃圾桶都在 memory/ 底下；設定檔在資料根
+  // 兩本帳（habits/、profile/）、詞典、群組圈、身分、記憶垃圾桶都在 memory/ 底下；設定檔在資料根
   const memoryDir = path.join(dataDir, 'memory');
   const CARD_DIRS = { habit: 'habits', profile: 'profile' };
   const bucketDir = (bucket) => {
@@ -170,7 +170,7 @@ export function createStore(dataDir, { root: backupRoot = dataDir } = {}) {
         for (const id of fs.readdirSync(catPath)) {
           if (!fs.existsSync(path.join(catPath, id, 'workflow.yaml'))) continue;
           let name = id;
-          let steps = null; // 排版輪 L5：Workflow 庫卡片「N 步驟・M 步你來」——只加回應欄位，定義檔不動；壞檔＝null
+          let steps = null; // Workflow 庫卡片「N 步驟・M 步你來」——只加回應欄位，定義檔不動；壞檔＝null
           let human_steps = null;
           try {
             const def = readYaml(path.join(catPath, id, 'workflow.yaml'), 'Workflow');
@@ -213,9 +213,9 @@ export function createStore(dataDir, { root: backupRoot = dataDir } = {}) {
       fs.mkdirSync(path.join(dataDir, 'workflows', n), { recursive: true });
     },
 
-    // 分類改名（拆法輪 B0）：分類名＝目錄名＝到處的鑰匙，九處一起搬——流程夾、群組 yaml、共用夾（三者缺哪個就跳）、
+    // 分類改名：分類名＝目錄名＝到處的鑰匙，九處一起搬——流程夾、群組 yaml、共用夾（三者缺哪個就跳）、
     // schedules.json 的 workflow_id 前綴、提議隊列 workflow.category、習慣卡與認識卡 scope.category（只認 category／workflow 兩層）、
-    // 身分 categories、垃圾桶 meta.yaml 的 category、未讀通知的 run.category（第九處，B0 覆核該修：未讀通知是要點來操作的佇列，
+    // 身分 categories、垃圾桶 meta.yaml 的 category、未讀通知的 run.category（第九處，B0 未讀通知是要點來操作的佇列，
     // 不是被動歷史；不改的話「重試」會拿舊分類去找 run 回一個莫名其妙的 404）。run.yaml／history/vN.yaml／用量帳本不動（歷史留舊名）。
     // 先全部讀進記憶體（壞檔在這裡就擋、什麼都沒搬），再搬目錄、再改檔；中途丟錯＝把已搬的目錄搬回、已改的檔寫回原文。
     renameCategory(oldName, nextName) {
@@ -253,7 +253,7 @@ export function createStore(dataDir, { root: backupRoot = dataDir } = {}) {
       };
       try {
         for (const [a, b] of dirs) { fs.renameSync(a, b); movedDirs.push([a, b]); }
-        written.push(...retagUploads(from, to)); // 第十處（L13b）：未送出的本次上傳代碼；不計入 counts
+        written.push(...retagUploads(from, to)); // 第十處：未送出的本次上傳代碼；不計入 counts
         const counts = { workflows, schedules: 0, proposals: 0, cards: 0, identities: 0, notices: 0, trash: 0 };
         if (groupText !== null) {
           const g = yaml.load(groupText);
@@ -374,7 +374,7 @@ export function createStore(dataDir, { root: backupRoot = dataDir } = {}) {
       const versions = this.listVersions(category, id);
       const last = versions.at(-1);
       // 只跟「手動編輯」那種版本合併：改名、共用檔已刪除這類有固定註記的版本不准被後續編輯併掉
-      // （否則 note 說改名、內容卻是之後的畫布編輯——B0 覆核該修）
+      //（否則 note 說改名、內容卻是之後的畫布編輯）
       const recent = last && last.source === 'manual' && last.at && last.diff_note === '手動編輯（畫布／欄位）'
         && Date.now() - new Date(last.at).getTime() < 10 * 60_000;
       if (recent) {
@@ -386,7 +386,7 @@ export function createStore(dataDir, { root: backupRoot = dataDir } = {}) {
       return this.bumpVersion(category, id, def, '手動編輯（畫布／欄位）', 'manual');
     },
 
-    // 流程改名（拆法輪 B0）：一定另記一版、註記固定句，不走十分鐘合併；run.yaml 與履歷快照留舊名
+    // 流程改名：一定另記一版、註記固定句，不走十分鐘合併；run.yaml 與履歷快照留舊名
     saveRename(category, id, def, oldName) {
       return this.bumpVersion(category, id, def, `改名：「${oldName}」→「${def.name}」`, 'manual');
     },
@@ -408,7 +408,7 @@ export function createStore(dataDir, { root: backupRoot = dataDir } = {}) {
       atomicWrite(path.join(dataDir, 'proposals', 'queue.yaml'), yaml.dump(list, { lineWidth: -1 }));
     },
 
-    // 垃圾桶（US-016）：整資料夾搬走，30 天內可復原
+    // 垃圾桶：整資料夾搬走，30 天內可復原
     trashWorkflow(category, id) {
       const from = wfDir(category, id);
       if (!fs.existsSync(path.join(from, 'workflow.yaml'))) throw new StoreError(`找不到 Workflow「${id}」`, 'NOT_FOUND');
@@ -433,7 +433,7 @@ export function createStore(dataDir, { root: backupRoot = dataDir } = {}) {
     restoreTrash(key) {
       const src = path.join(dataDir, 'trash', safeSegment(key, '垃圾桶紀錄'));
       const meta = readYaml(path.join(src, 'meta.yaml'), '垃圾桶紀錄');
-      // 擋門（拆法輪 B0 地雷 17）：原分類已不在（被改名或刪掉）→ 不靜默新建舊分類
+      // 擋門（ 地雷 17）：原分類已不在（被改名或刪掉）→ 不靜默新建舊分類
       if (!this.listCategories().includes(meta.category)) {
         throw new StoreError(`這條 Workflow 原本的分類「${meta.category}」已經不在了，先在側欄建回那個分類，或改名回來再復原`, 'NO_CATEGORY');
       }
@@ -454,8 +454,8 @@ export function createStore(dataDir, { root: backupRoot = dataDir } = {}) {
       }
     },
 
-    // ---- 記憶垃圾桶（記憶輪）：獨立目錄 memory/trash/<key>/{card,meta}.yaml，跟流程垃圾桶不互通
-    // （restoreTrash 寫死還原成流程，卡走這四支）；30 天，清理跟流程垃圾桶一樣只在伺服器啟動時跑一次 ----
+    // ---- 記憶垃圾桶：獨立目錄 memory/trash/<key>/{card,meta}.yaml，跟流程垃圾桶不互通
+    //（restoreTrash 寫死還原成流程，卡走這四支）；30 天，清理跟流程垃圾桶一樣只在伺服器啟動時跑一次 ----
     trashCard(bucket, id) {
       const from = cardFile(bucket, id);
       if (!fs.existsSync(from)) throw new StoreError('找不到這張卡', 'NOT_FOUND');
@@ -507,7 +507,7 @@ export function createStore(dataDir, { root: backupRoot = dataDir } = {}) {
       return `r-${stamp}-${Math.random().toString(36).slice(2, 6)}`;
     },
 
-    // ---- 參考檔（D19：步驟掛附件／範本）----
+    // ---- 參考檔----
     writeRefFile(category, id, name, buf) {
       const p = path.join(refDir(category, id), safeFileName(name));
       fs.mkdirSync(path.dirname(p), { recursive: true });
@@ -524,8 +524,8 @@ export function createStore(dataDir, { root: backupRoot = dataDir } = {}) {
       const p = path.join(refDir(category, id), safeFileName(name));
       return fs.existsSync(p) ? p : null;
     },
-    // ---- 本次上傳（排版輪 L11，題 2 A）：先進暫存 data/uploads/<token>/<檔名>，開跑時搬進 runs/<rid>/in/；24 小時沒用掉清 ----
-    // 排版輪 L13 附帶：owner＝{category, id} 發放給哪條 Workflow，記在同夾 owner..json（檔名含 ..，safeFileName 擋掉，不會跟上傳檔撞名）；
+    // ---- 本次上傳：先進暫存 data/uploads/<token>/<檔名>，開跑時搬進 runs/<rid>/in/；24 小時沒用掉清 ----
+    // owner＝{category, id} 發放給哪條 Workflow，記在同夾 owner..json（檔名含 ..，safeFileName 擋掉，不會跟上傳檔撞名）；
     // 讀取帶 owner 時對象不符＝找不到（跨 Workflow 挪用擋下）。沒有綁定記號的舊暫存照舊可用（24 小時內自然清掉）
     writeUpload(name, buf, owner = null) {
       const n = safeFileName(String(name ?? '').normalize('NFC'));
@@ -594,7 +594,7 @@ export function createStore(dataDir, { root: backupRoot = dataDir } = {}) {
       return fs.readFileSync(p, 'utf8');
     },
 
-    // ---- 三層共用檔（移植合併輪 U1a）：data/shared/<scope>/{index.yaml,files/}，scope＝_company｜分類名；
+    // ---- 三層共用檔：data/shared/<scope>/{index.yaml,files/}，scope＝_company｜分類名；
     // index.yaml 每檔 {name, kind: rule|ref, chars, text_cache?, uploaded_at}（text_cache 只有規範有＝上傳時轉好的純文字，之後不重算）；
     // 沒有夾＝空索引（舊資料照樣讀）；刪不進垃圾桶（定案）；同名 DUP（換版＝先刪再傳）----
     sharedDir(scope) {
@@ -612,7 +612,7 @@ export function createStore(dataDir, { root: backupRoot = dataDir } = {}) {
       const rules = files.filter((f) => f.kind === 'rule').map(pub);
       return { rules, refs: files.filter((f) => f.kind === 'ref').map(pub), rule_chars: rules.reduce((s, f) => s + (f.chars ?? 0), 0) };
     },
-    // 字數語意（U1a 覆核）：規範類 chars＝轉純文字後的字元數；參考類 md／txt＝讀成 utf-8 的字元數、其他（docx 等二進位）chars=null；
+    // 字數語意：規範類 chars＝轉純文字後的字元數；參考類 md／txt＝讀成 utf-8 的字元數、其他（docx 等二進位）chars=null；
     // 兩類都另記 bytes＝檔案大小，UI 印「N 字」只看 chars、二進位印大小看 bytes
     addShared(scope, { name, kind, buf, text }) {
       const n = safeFileName(name);
@@ -646,7 +646,7 @@ export function createStore(dataDir, { root: backupRoot = dataDir } = {}) {
       return this.readSharedIndex(scope).files.filter((f) => f.kind === 'rule').map((f) => ({ name: f.name, chars: f.chars, text: f.text_cache ?? '' }));
     },
 
-    // ---- 產出物（D19：步驟輸出存成檔案）----
+    // ---- 產出物----
     writeArtifact(category, id, runId, name, text) {
       const p = path.join(outDir(category, id, runId), safeFileName(name));
       fs.mkdirSync(path.dirname(p), { recursive: true });
@@ -657,7 +657,7 @@ export function createStore(dataDir, { root: backupRoot = dataDir } = {}) {
       const dir = outDir(category, id, runId);
       return fs.existsSync(dir) ? fs.readdirSync(dir).sort() : [];
     },
-    // 產檔輪：工人在這趟的產出資料夾開工——確保存在並回絕對路徑；產完由 runner 確認檔案真的在
+    // 工人在這趟的產出資料夾開工——確保存在並回絕對路徑；產完由 runner 確認檔案真的在
     runOutDir(category, id, runId) {
       const dir = outDir(category, id, runId);
       fs.mkdirSync(dir, { recursive: true });
@@ -666,7 +666,7 @@ export function createStore(dataDir, { root: backupRoot = dataDir } = {}) {
     artifactExists(category, id, runId, name) {
       return fs.existsSync(path.join(outDir(category, id, runId), safeFileName(name)));
     },
-    // 查核輪：這一輪有沒有真的重寫成品檔——比對 {size, mtimeMs}；檔不在（或檔名不合法）回 null
+    // 這一輪有沒有真的重寫成品檔——比對 {size, mtimeMs}；檔不在（或檔名不合法）回 null
     artifactStat(category, id, runId, name) {
       try {
         const st = fs.statSync(path.join(outDir(category, id, runId), safeFileName(name)));
@@ -697,7 +697,7 @@ export function createStore(dataDir, { root: backupRoot = dataDir } = {}) {
       atomicWrite(presetsFile, JSON.stringify(all, null, 2));
     },
 
-    // ---- 排程／通知／Google 快照（D20，ADR-005）----
+    // ---- 排程／通知／Google 快照----
     readSchedules() {
       return readJsonOr(schedulesFile, []);
     },
@@ -717,7 +717,7 @@ export function createStore(dataDir, { root: backupRoot = dataDir } = {}) {
       atomicWrite(snapshotFile, JSON.stringify(snap, null, 2));
     },
 
-    // ---- 記憶兩本帳（記憶輪）：一卡一檔 memory/<habits|profile>/<id>.yaml，跟流程一樣原子寫 ----
+    // ---- 記憶兩本帳：一卡一檔 memory/<habits|profile>/<id>.yaml，跟流程一樣原子寫 ----
     readCard(bucket, id) {
       return readYaml(cardFile(bucket, id), '這張卡');
     },
@@ -743,7 +743,7 @@ export function createStore(dataDir, { root: backupRoot = dataDir } = {}) {
     },
 
     // ---- 詞典：缺檔＝出廠十條（不落地，寫入時才建檔）----
-    // 拆法輪（契約 F）：既有 dict.yaml 按名字補出廠缺的條（舊檔只有七條→讀出來十條），已有同名（含自訂）不動；同樣只補在讀出來的那份，寫入時才落地
+    // 既有 dict.yaml 按名字補出廠缺的條（舊檔只有七條→讀出來十條），已有同名（含自訂）不動；同樣只補在讀出來的那份，寫入時才落地
     readDict() {
       const now = new Date().toISOString();
       const stamp = (f) => ({ ...f, synonyms: [...f.synonyms], created_at: now });
@@ -841,14 +841,14 @@ export function createStore(dataDir, { root: backupRoot = dataDir } = {}) {
       return fs.readdirSync(dir).filter((f) => fs.existsSync(path.join(dir, f, 'run.yaml'))).sort();
     },
 
-    // 刪一次執行（2026-09-02 定案：跑到一半不想跑完的要能清）：連 run.yaml、產出檔、卷宗整夾刪除，不進垃圾桶
+    // 刪一次執行（已定案：跑到一半不想跑完的要能清）：連 run.yaml、產出檔、卷宗整夾刪除，不進垃圾桶
     deleteRun(category, id, runId) {
       const dir = runDir(category, id, runId);
       if (!fs.existsSync(path.join(dir, 'run.yaml'))) throw new StoreError(`找不到執行紀錄「${runId}」`, 'NOT_FOUND');
       fs.rmSync(dir, { recursive: true, force: true });
     },
 
-    // 跨流程最近執行（儀表板輪）：runId 以時間戳開頭，字典序＝時間序
+    // 跨流程最近執行：runId 以時間戳開頭，字典序＝時間序
     listRecentRuns(limit = 20) {
       const all = [];
       for (const w of this.listWorkflows()) {
@@ -858,7 +858,7 @@ export function createStore(dataDir, { root: backupRoot = dataDir } = {}) {
       return all.slice(0, limit);
     },
 
-    // ---- prompt 卷宗（儀表板輪）：每步送出宿主的指示全文，存進該次執行資料夾 ----
+    // ---- prompt 卷宗：每步送出宿主的指示全文，存進該次執行資料夾 ----
     writePromptRecord(category, id, runId, name, text) {
       const p = path.join(promptDir(category, id, runId), safeFileName(name));
       fs.mkdirSync(path.dirname(p), { recursive: true });
@@ -874,7 +874,7 @@ export function createStore(dataDir, { root: backupRoot = dataDir } = {}) {
       return fs.readFileSync(p, 'utf8');
     },
 
-    // ---- 工作單留存（監工輪）：不屬於任何一次執行的呼叫（建流程、匯入掃描、優化、行事曆快照）也要留全文 ----
+    // ---- 工作單留存：不屬於任何一次執行的呼叫（建流程、匯入掃描、優化、行事曆快照）也要留全文 ----
     // 卷宗存在 run 資料夾底下，這四種沒有 run，所以另開 dataDir/logs/<種類>/。寫不進不擋（跟卷宗同一條規矩）：
     // 少一份紀錄不該讓建流程或抓快照整個失敗。名字經 safeFileName，跳脫路徑的名字寫不出去（丟出去被這裡吃掉）。
     writeLog(kind, name, text) {
@@ -894,7 +894,7 @@ export function createStore(dataDir, { root: backupRoot = dataDir } = {}) {
       return fs.readFileSync(p, 'utf8');
     },
 
-    // ---- 用量帳本（儀表板輪）：append-only JSONL，一次宿主呼叫一行 ----
+    // ---- 用量帳本：append-only JSONL，一次宿主呼叫一行 ----
     appendUsage(entry) {
       fs.mkdirSync(dataDir, { recursive: true });
       fs.appendFileSync(usageFile, `${JSON.stringify(entry)}\n`, 'utf8');

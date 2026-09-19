@@ -17,10 +17,10 @@ function fakeAdapter() {
   let checkResponses = [];
   let editRulesResponses = [];
   let editRulesDelay = 0; // 真 AI 擬規則要 10–60 秒，這裡用毫秒模擬那段空窗
-  let routeResponses = []; // 記憶輪 M2：三問路由（kind='memory'）自己一條隊列；缺省 ''＝路由解析失敗＝「這句沒記成」，不擋任何流程
+  let routeResponses = []; // 三問路由（kind='memory'）自己一條隊列；缺省 ''＝路由解析失敗＝「這句沒記成」，不擋任何流程
   let available = true;
-  const completes = []; // 監工輪 K5：通用補全的 meta（連接器例外要看得到 mcp）
-  let usageSink = null; // 拆法輪 B4 ⑦：比照 host-adapter.settleParsed 記帳（at＋meta 展開）；只在測試明叫 enableUsage() 才記，別的測試帳本照舊空
+  const completes = []; // 通用補全的 meta（連接器例外要看得到 mcp）
+  let usageSink = null; // ⑦：比照 host-adapter.settleParsed 記帳（at＋meta 展開）；只在測試明叫 enableUsage() 才記，別的測試帳本照舊空
   let usageOn = false;
   return {
     calls,
@@ -28,7 +28,7 @@ function fakeAdapter() {
     setUsageSink(fn) { usageSink = fn; },
     enableUsage() { usageOn = true; },
     setCompleteResponses(rs) { completeResponses = rs; },
-    // 交貨查核輪：查核／擬規則各自一條隊列，跟一般 complete()（分岔、compose…）分開——kind 對不上就照舊
+    // 查核／擬規則各自一條隊列，跟一般 complete()（分岔、compose…）分開——kind 對不上就照舊
     setCheckResponses(rs) { checkResponses = rs; },
     setEditRulesResponses(rs) { editRulesResponses = rs; },
     setEditRulesDelay(ms) { editRulesDelay = ms; },
@@ -50,7 +50,7 @@ function fakeAdapter() {
     },
     async checkAvailable() { return available; },
     async executeNode({ nodeId, instruction, upstream, editRules, meta, attachments }) {
-      calls.push({ nodeId, instruction, upstream, editRules, meta, attachments }); // 排版輪 L11：多記 attachments（本次上傳掛在哪一步）
+      calls.push({ nodeId, instruction, upstream, editRules, meta, attachments }); // 多記 attachments（本次上傳掛在哪一步）
       return `產出:${nodeId}`;
     },
   };
@@ -88,7 +88,7 @@ async function pollRun(base, runPath, until, tries = 100) {
 test('server：播種範例→清單→詳情→開跑→兩停點→人步→收尾（API 全鏈）', async () => {
   const { app, base, adapter } = await startApp();
   try {
-    // 播種：啟動時逐檔補種內建範例（US-011：2–3 個）
+    // 播種：啟動時逐檔補種內建範例
     const list = (await api(base, 'GET', '/api/workflows')).json;
     assert.equal(list.length, 2);
     assert.ok(list.every((w) => w.category === '範例'));
@@ -185,7 +185,7 @@ test('server：compose 端點回覆＋草稿；連兩次壞 → 400 人話', asy
   try {
     const def = { format: 1, name: '訂餐廳', params: [], nodes: [{ id: 'a', title: '找店', executor: 'ai', stop_point: 'always', instruction: '列三家', next: [] }] };
     adapter.setCompleteResponses([`拆好了\n\`\`\`yaml\n${JSON.stringify(def)}\n\`\`\``]);
-    // 拆法輪 B4 ⑧：沒帶 phase＝第一趟（出格子），舊測改成明帶 phase:'draft' 續綠
+    // ⑧：沒帶 phase＝第一趟（出格子），舊測改成明帶 phase:'draft' 續綠
     const res = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '訂餐廳' }], phase: 'draft' });
     assert.equal(res.status, 200);
     assert.equal(res.json.draft.name, '訂餐廳');
@@ -199,7 +199,7 @@ test('server：compose 端點回覆＋草稿；連兩次壞 → 400 人話', asy
   }
 });
 
-// —— 拆法輪 B4：/api/compose 兩趟（契約 A 伺服器側）——
+// —— /api/compose 兩趟——
 const B4_DEF = { format: 1, name: '週報', params: [], nodes: [{ id: 'a', title: '查新聞', executor: 'ai', stop_point: 'always', instruction: '查近 7 天', next: [] }] };
 const B4_SHAPE_REPLY = '先猜是週報\n```json\n{"shape":{"deliverable":{"value":"週報","basis":"你說的"},"type":{"value":"文章","basis":"預設"}},"sources":[{"name":"本週新聞","from":"web","note":"近 7 天"}],"category":"旅遊"}\n```';
 const B4_DRAFT_REPLY = `落地了\n\`\`\`yaml\n${JSON.stringify(B4_DEF)}\n\`\`\``;
@@ -260,7 +260,7 @@ test('B4 ②：第二趟 {phase:draft, shape, sources, category:旅遊}→draft.
     assert.ok(calls[0].prompt.includes('# 資料來源\n- 本週新聞：AI 上網查（近 7 天）'));
     assert.ok(calls[0].prompt.includes('- 分類：旅遊'));
     assert.ok(adapter.completes.some((c) => c.meta?.kind === 'memory'), 'memory.onChat 第二趟才叫');
-    // 覆核該修：拆解器自己在 yaml 寫了 category（亂寫）——body 分類不合法→鍵刪掉（不漏 AI 髒值、也不寫 null，validateWorkflow 對 null 會報「要是文字」）；合法→蓋成 body 的
+    // 拆解器自己在 yaml 寫了 category（亂寫）——body 分類不合法→鍵刪掉（不漏 AI 髒值、也不寫 null，validateWorkflow 對 null 會報「要是文字」）；合法→蓋成 body 的
     const DIRTY_REPLY = `落地了\n\`\`\`yaml\n${JSON.stringify({ ...B4_DEF, category: '亂寫' })}\n\`\`\``;
     adapter.setCompleteResponses([DIRTY_REPLY]);
     const bad = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '每週整理新聞' }], phase: 'draft', shape, sources, category: '不存在' });
@@ -705,7 +705,7 @@ test('健檢 P2-01/P2-02（HTTP 層）：分類跳脫 400 不落地；排程建�
   } finally { await app.stop(); }
 });
 
-// ===== 儀表板輪：/api/dashboard＋卷宗端點 =====
+// ===== /api/dashboard＋卷宗端點 =====
 
 test('儀表板：最近執行卡（終點成品／步數／用量歸戶）＋帳本窗口＋卷宗可列可讀', async () => {
   const { app, base, dataDir } = await startApp();
@@ -776,7 +776,7 @@ test('DELETE /runs/:rid：沒跑完的執行整筆刪、清單消失；再刪回
   }
 });
 
-// ---- 資料通道輪：健檢端點、開跑擋門、人做交出內容、補資料、儀表板成品回退 ----
+// ---- 健檢端點、開跑擋門、人做交出內容、補資料、儀表板成品回退 ----
 const MAIL_DEF = () => ({
   format: 1,
   name: '來信處理',
@@ -870,7 +870,7 @@ test('資料通道輪：POST /runs/:rid/data-supply 補資料重跑（空內容 
   }
 });
 
-// ---- 產檔輪：預覽端點、排版端點、權限預設 ----
+// ---- 預覽端點、排版端點、權限預設 ----
 import { Document, Packer, Paragraph, TextRun } from 'docx';
 import ExcelJS from 'exceljs';
 
@@ -958,7 +958,7 @@ test('交貨查核輪：新建流程不帶 check → 預設開；帶 check 原�
     const def2 = { ...def, name: '帶check關', check: { enabled: false } };
     const made2 = (await api(base, 'POST', '/api/workflows', { category: '測試', def: def2 })).json;
     const saved2 = (await api(base, 'GET', `/api/workflows/${encodeURIComponent('測試')}/${made2.id}`)).json;
-    // 監工輪遷移：新建一律補齊子開關「數字對原始資料」（這份沒有必填欄位→關）；enabled 照送來的原樣
+    // 遷移：新建一律補齊子開關「數字對原始資料」（這份沒有必填欄位→關）；enabled 照送來的原樣
     assert.deepEqual(saved2.check, { enabled: false, facts: false });
   } finally {
     await app.stop();
@@ -991,7 +991,7 @@ test('排程與健檢輪：欄位還是佔位文字／必填空白 → POST /run
   }
 });
 
-// ===== 交貨查核輪：三條路由、edit 先擬規則、待辦、用量彙總 =====
+// ===== 三條路由、edit 先擬規則、待辦、用量彙總 =====
 
 test('交貨查核輪：check-retry／check-accept／edit-rules——狀態不符 400 人話，成功寫回 run', async () => {
   const { app, base, dataDir } = await startApp();
@@ -1081,7 +1081,7 @@ test('交貨查核輪：edit 路由在回應前已含 deriveEditRules 擬出的�
   }
 });
 
-// 裁定 28：擬規則要 10–60 秒，這段時間 run 不准是 running——否則 UI 每秒的 GET 就會把下游放出去，
+//：擬規則要 10–60 秒，這段時間 run 不准是 running——否則 UI 每秒的 GET 就會把下游放出去，
 // 下游在規則寫進檔案之前開跑＝停點改的東西沒帶到，而且沒有任何錯誤訊息。
 test('交貨查核輪：擬規則那段時間 GET run 不會先把下游放出去，規則擬完才續跑', async () => {
   const { app, base, adapter } = await startApp();
@@ -1351,7 +1351,7 @@ test('監工輪：GET /api/dashboard 的 recent[].usage.supervisor 正確彙總'
   }
 });
 
-// ===== 監工輪 K5：工作單留存、連接器例外、監工建議接受 =====
+// ===== 工作單留存、連接器例外、監工建議接受 =====
 
 function logFiles(dataDir, kind) {
   try { return fs.readdirSync(path.join(dataDir, 'logs', kind)).sort(); } catch { return []; }
@@ -1454,7 +1454,7 @@ test('K5：接受監工建議＝只開抽屜，不改定義也不升版', async 
   }
 });
 
-// ===== 記憶輪 M1b：定義層與存檔接線——詞典自己長、群組圈、記憶卡、設定、備份 =====
+// ===== 定義層與存檔接線——詞典自己長、群組圈、記憶卡、設定、備份 =====
 
 const M1B_DEF = (extra = {}) => ({
   format: 1, name: '一步流程', params: [],
@@ -1992,7 +1992,7 @@ test('M1c：compose 帶分類→指示含分類清單、欄位詞典、該分類
   }
 });
 
-// ---- 拆法輪 B2（契約 D）：compose 帶「# 關於你」（表達層認識卡）與「# 你能派工人做什麼」（設定組字） ----
+// ---- compose 帶「# 關於你」（表達層認識卡）與「# 你能派工人做什麼」（設定組字） ----
 
 test('B2 ④：表達層認識卡→compose 指示含「# 關於你」與卡文；memory.paused 後不含；exec.web:false 後能耐表寫「不可以」；舊資料（沒 memory/）照拆', async () => {
   const { app, base, adapter, dataDir } = await startApp();
@@ -2033,7 +2033,7 @@ test('B2 ④：表達層認識卡→compose 指示含「# 關於你」與卡文�
   }
 });
 
-// ---- 記憶輪 M2：四條記路接線（開跑同值／停點／回饋／聊天）、路由卷宗、通知隨回應、通知可撤 ----
+// ---- 四條記路接線（開跑同值／停點／回饋／聊天）、路由卷宗、通知隨回應、通知可撤 ----
 
 const ROUTE_HABIT = '{"cards":[{"bucket":"habit","field":"住宿","kind":"method","text":"市區優先，走路到得了夜市","reason":"換個場合會填別的"}]}';
 const ROUTE_PROFILE_EXP = '{"cards":[{"bucket":"profile","layer":"expression","text":"不要客套","reason":"換個場合也一樣"}]}';
@@ -2346,7 +2346,7 @@ test('M2 開跑：POST /runs 的 memory_picks／memory_changed／memory_identity
   }
 });
 
-// ---- 記憶輪 M3b：開跑表單的習慣選項（for-workflow.options）、點了即核可（計數）、範圍靠證據擴大（widen 通知）、身分限縮 ----
+// ---- 開跑表單的習慣選項（for-workflow.options）、點了即核可（計數）、範圍靠證據擴大（widen 通知）、身分限縮 ----
 
 test('M3b for-workflow.options：同分類另一條流程的 workflow 尺度卡進 probes（帶來源流程名）、本流程的進 covers；沒卡的欄位沒有鍵', async () => {
   const { app, base, dataDir } = await startApp();
@@ -2460,7 +2460,7 @@ test('M4：GET /api/dashboard 多 memory.exceptions＝到期＋休眠＋被取�
   }
 });
 
-// ---- 記憶輪 M5a：設定頁的資料源——身分預設綁分類（for-workflow 的 core 只含該身分的卡）、身分改了讀回一致、詞典「用在哪些流程」算出來 ----
+// ---- 設定頁的資料源——身分預設綁分類（for-workflow 的 core 只含該身分的卡）、身分改了讀回一致、詞典「用在哪些流程」算出來 ----
 
 test('M5a for-workflow：綁了這個分類的身分＝預設只帶它列的認識卡並回 identity；?identity= 指定別的或空＝照指定／不限縮；找不到的身分＝不限縮；PUT 身分後讀回一致', async () => {
   const { app, base, dataDir } = await startApp();
@@ -2543,7 +2543,7 @@ test('M5a 詞典：GET /api/memory/dict?usage=1 多 usage＝每個欄位用在�
   }
 });
 
-// ---- 移植合併輪 U1a：共用檔 API（/api/shared/:scope/files）、公司名稱設定、分類名禁 _company ----
+// ---- 共用檔 API（/api/shared/:scope/files）、公司名稱設定、分類名禁 _company ----
 const b64 = (s) => Buffer.from(s, 'utf8').toString('base64');
 const sharedPath = (scope, name) => `/api/shared/${enc(scope)}/files${name ? `/${enc(name)}` : ''}`;
 
@@ -2607,7 +2607,7 @@ test('U1a ③：共用檔 API——空夾不是 404；規範三份 2000／3000�
     assert.deepEqual((await api(base, 'GET', sharedPath('行銷'))).json.rules.map((f) => f.name).sort(), ['剛好.md', '手冊.md']);
     assert.equal((await api(base, 'GET', sharedPath('_company'))).json.rules.find((f) => f.name === '手冊.md').chars, 2000, '公司那份沒被分類覆蓋');
 
-    // index.yaml 落地形狀（U1a 分身看的那份）
+    // index.yaml 落地形狀
     const idx = yaml.load(fs.readFileSync(path.join(dataDir, 'shared', '_company', 'index.yaml'), 'utf8'));
     assert.equal(idx.version, 1);
     const rule = idx.files.find((f) => f.name === '手冊.md');
@@ -2749,7 +2749,7 @@ test('U1a 修正：中文 txt 參考 chars＝字元；docx 參考 chars=null、b
   }
 });
 
-// ---- 移植合併輪 U1b：拆解器（/api/compose）帶公司／部門規範——composeContext 讀 data/shared 的規範全文 ----
+// ---- 拆解器（/api/compose）帶公司／部門規範——composeContext 讀 data/shared 的規範全文 ----
 
 test('U1b ⑦ server：compose 帶分類 → 指示含「# 公司規範」「# 部門規範」全文；沒分類 → 部門（無）；沒有共用夾 → 兩段（無）、照樣拆', async () => {
   const { app, base, adapter, dataDir } = await startApp();
@@ -2780,7 +2780,7 @@ test('U1b ⑦ server：compose 帶分類 → 指示含「# 公司規範」「# �
   }
 });
 
-// ===== 移植合併輪 U4a：GET /runs?detail=1 歷次執行摘要（finals 與儀表板共用） =====
+// ===== GET /runs?detail=1 歷次執行摘要（finals 與儀表板共用） =====
 
 test('U4a ①：GET /runs 不帶 detail 回應形狀不變——每筆恰好 run_id／status／started_at 三欄', async () => {
   const { app, base, dataDir } = await startApp();
@@ -2906,7 +2906,7 @@ test('U4a ⑤：一個 run.yaml 壞掉→detail=1 那筆標讀不到（不炸整
   }
 });
 
-// —— 拆法輪 B0：PUT /api/categories/:name 改名（八處同步、歷史留舊名）＋復原擋門＋流程改名版本註記 ——
+// —— PUT /api/categories/:name 改名（八處同步、歷史留舊名）＋復原擋門＋流程改名版本註記 ——
 const B0_DEF = { format: 1, name: '訂機票', params: [], nodes: [{ id: 'a', title: '查航班', executor: 'ai', stop_point: 'never', instruction: '查', next: [] }] };
 
 test('B0 ⑥：PUT /api/categories/:name → 200 含 moved；新路徑讀得到、舊路徑 404；儀表板與行事曆的 category 來自路徑（run.yaml 留舊名）；排程跟著改；未分類 400、沒有的 404、撞名 409、空名／同名／_company 400', async () => {
@@ -2924,7 +2924,7 @@ test('B0 ⑥：PUT /api/categories/:name → 200 含 moved；新路徑讀得到�
     });
     const sched = await api(base, 'POST', '/api/schedules', { workflow_id: '旅遊/a', freq: 'daily', time: '08:00' });
     assert.equal(sched.status, 200, JSON.stringify(sched.json));
-    // 第九處（覆核該修）：未讀通知的 run.category 要跟著改，否則「重試」拿舊分類找 run 回莫名的 404
+    // 第九處：未讀通知的 run.category 要跟著改，否則「重試」拿舊分類找 run 回莫名的 404
     store.writeNotices([
       { id: 'n1', type: 'step_failed', status: 'unread', title: '這步失敗了', actions: ['retry'], run: { category: '旅遊', id: 'a', run_id: rid, node: 'a' } },
       { id: 'n2', type: 'step_failed', status: 'done', title: '處理過了', actions: [], run: { category: '旅遊', id: 'a', run_id: rid, node: 'a' } },
@@ -3057,7 +3057,7 @@ test('B0 ⑨ server：改名後垃圾桶列顯示新分類、復原落在新分�
   }
 });
 
-// ===== 拆法輪 B1 修正輪：終點是 next:[] 的 join（並行點產出改空字串後）成品要含匯進它的每一支 task =====
+// ===== 終點是 next:[] 的 join（並行點產出改空字串後）成品要含匯進它的每一支 task =====
 
 test('B1 修正：a→fork→{scan,mail}→join(next:[]) 跑完 → GET /api/dashboard recent 該趟 finals 含 scan 與 mail 兩支、無 join；GET /runs?detail=1 同一份；終點人做回退走拓樸序', async () => {
   const { app, base, dataDir } = await startApp();
@@ -3133,7 +3133,7 @@ test('排版輪 L5 ⑥：GET /api/workflows 每筆帶 steps／human_steps（照�
   }
 });
 
-// ---- 排版輪 L7（上桌題 3b）：共用檔唯讀查看 GET /api/shared/:scope/files/:name/view ----
+// ---- （上桌b）：共用檔唯讀查看 GET /api/shared/:scope/files/:name/view ----
 test('L7 ⑤：共用檔查看——md／txt 回原文、docx 回排版 HTML、pdf 等 415；不存在 404；路徑穿越／反斜線／壞編碼 400；只准讀清單裡的檔（夾裡野檔、結尾點 404）；檔名 NFC 正規化；舊資料沒有共用夾＝404 且不建夾；既有下載不變', async () => {
   const { app, base, dataDir } = await startApp();
   const view = (scope, rawName) => fetch(`${base}/api/shared/${encodeURIComponent(scope)}/files/${rawName}/view`).then(async (r) => ({ status: r.status, json: await r.json() }));
@@ -3184,7 +3184,7 @@ test('L7 ⑤：共用檔查看——md／txt 回原文、docx 回排版 HTML、p
   }
 });
 
-// ---- 排版輪 L11（題 2 A／3f）：本次上傳暫存端點、開跑收 uploads 與 note ----
+// ---- ／3f）：本次上傳暫存端點、開跑收 uploads 與 note ----
 test('排版輪 L11 ②③④⑤：run-uploads 檔名／副檔名／大小護欄；開跑缺必填檔 409；uploads 搬進 runs/<rid>/in/、run.params＝檔名、token 用過即失效；note 進 run.note 與每步 upstream、超過 2,000 字 400', async () => {
   const { app, base, dataDir, adapter } = await startApp();
   try {
@@ -3350,7 +3350,7 @@ test('排版輪 L11 ⑥⑦：舊定義不帶 uploads／note 開跑照舊（run �
   }
 });
 
-// ---- 大跑輪：本次附件（保留鍵 __run__）＝檔案版的「本次補充」，不綁欄位、每個 AI 步驟都看得到 ----
+// ---- 本次附件（保留鍵 __run__）＝檔案版的「本次補充」，不綁欄位、每個 AI 步驟都看得到 ----
 test('大跑輪 ①：本次附件走同一條 run-uploads 通道——檔搬進 runs/<rid>/in/、記在 run.run_files、不進 run.params；每個 AI 步驟的輸入都有「【你這次的附件】」＋檔名，跟「【你這次的補充】」成對；逐欄上傳照舊只餵給引用那個欄位的步驟', async () => {
   const { app, base, dataDir, adapter } = await startApp();
   try {
@@ -3733,7 +3733,7 @@ test('多組織⑩：重開還認得——orgs.json 記住目前組織與清單�
   } finally { await again.stop(); }
 });
 
-// ── 2026-09-18 審查修正輪 ──────────────────────────────────────────────
+// ── 2026-09-18  ──────────────────────────────────────────────
 
 test('來源檢查：別的網站打過來一律擋，自己的畫面與 CLI 照常', async () => {
   const { app, base } = await startApp();
@@ -3808,7 +3808,7 @@ test('xlsx 預覽：中間的空白格不會讓後面的數字往左位移', asy
   assert.ok(rows[1].includes('<td>1200</td></tr>'), '金額要留在第三欄，不能被擠到「黑」的位置');
 });
 
-// ---------- 安全兩條（09-19 裁定：技術帳直接修；列管 L010／L033）----------
+// ---------- 安全兩條（09-19 裁定：技術帳直接修）----------
 // 這支是公開庫，別人會 clone 回自己的機器上跑，最低防線要有。
 
 test('安全 ①（L010）：請求內容超過上限就擋下，不是一直吃記憶體', async () => {
@@ -3857,5 +3857,55 @@ test('安全 ③：上限是照「本次附件」的 10MB 回推的——正常�
     const content = Buffer.alloc(9 * 1024 * 1024, 0x41).toString('base64'); // 9MB 的檔，base64 後約 12MB
     const res = await api(base, 'POST', `/api/workflows/${encodeURIComponent(wf.category)}/${encodeURIComponent(wf.id)}/run-uploads`, { name: '大檔.txt', content_b64: content });
     assert.equal(res.status, 200, `9MB 的附件要進得來（base64 後約 12MB，上限 16MB）：${JSON.stringify(res.json).slice(0, 120)}`);
+  } finally { await app.stop(); }
+});
+
+// 檔案種類跟分類一樣不能全憑模型自律——模型漏寫或寫到中間步驟，
+// 使用者在卡上選的東西就無聲消失。伺服器要把它蓋回「最後交付那一步」。
+const F_DEF = {
+  format: 1,
+  name: '月報',
+  params: [],
+  nodes: [
+    { id: 'a', title: '查數字', executor: 'ai', stop_point: 'never', instruction: '查', next: ['b'] },
+    { id: 'b', title: '寫月報', executor: 'ai', stop_point: 'always', instruction: '寫', next: [] },
+  ],
+};
+const F_REPLY = (def) => `落地了\n\`\`\`yaml\n${JSON.stringify(def)}\n\`\`\``;
+
+test('成品格式輪：使用者選的檔案種類無條件蓋到最後交付那一步——模型漏寫也補得回來；沒選就一個字都不動', async () => {
+  const { app, base, adapter } = await startApp();
+  try {
+    adapter.setCompleteResponses([F_REPLY(F_DEF)]);
+    const res = await api(base, 'POST', '/api/compose', {
+      messages: [{ role: 'user', text: '做月報' }], phase: 'draft', shape: {}, sources: [], output_file: 'pptx',
+    });
+    assert.equal(res.status, 200, JSON.stringify(res.json));
+    const nodes = res.json.draft.nodes;
+    assert.equal(nodes.find((n) => n.id === 'b').output_file, 'pptx', '模型沒寫，伺服器補上');
+    assert.equal(nodes.find((n) => n.id === 'a').output_file, undefined, '中間步驟不動——那可能是流程自己要的中繼檔');
+    assert.ok(adapter.completes.some((c) => c.prompt?.includes('# 使用者已經選好的交付方式')), '同一趟的 prompt 也要講');
+
+    // 模型寫錯格式 → 照樣蓋回去
+    adapter.setCompleteResponses([F_REPLY({ ...F_DEF, nodes: F_DEF.nodes.map((n) => (n.id === 'b' ? { ...n, output_file: 'md' } : n)) })]);
+    const r2 = await api(base, 'POST', '/api/compose', {
+      messages: [{ role: 'user', text: '做月報' }], phase: 'draft', shape: {}, sources: [], output_file: 'docx',
+    });
+    assert.equal(r2.json.draft.nodes.find((n) => n.id === 'b').output_file, 'docx', '模型寫別的也蓋回使用者選的');
+
+    // 沒選 → 模型寫什麼就是什麼
+    adapter.setCompleteResponses([F_REPLY({ ...F_DEF, nodes: F_DEF.nodes.map((n) => (n.id === 'b' ? { ...n, output_file: 'xlsx' } : n)) })]);
+    const r3 = await api(base, 'POST', '/api/compose', {
+      messages: [{ role: 'user', text: '做月報' }], phase: 'draft', shape: {}, sources: [],
+    });
+    assert.equal(r3.json.draft.nodes.find((n) => n.id === 'b').output_file, 'xlsx', '沒選＝不插手（連跑那條路沒有卡）');
+
+    // 人做的末步不掛檔案屬性
+    const humanEnd = { ...F_DEF, nodes: [F_DEF.nodes[0], { ...F_DEF.nodes[1], executor: 'human', handoff: '寄出後回報' }] };
+    adapter.setCompleteResponses([F_REPLY(humanEnd)]);
+    const r4 = await api(base, 'POST', '/api/compose', {
+      messages: [{ role: 'user', text: '做月報' }], phase: 'draft', shape: {}, sources: [], output_file: 'pptx',
+    });
+    assert.equal(r4.json.draft.nodes.find((n) => n.id === 'b').output_file, undefined, '人做步驟不是產檔步驟');
   } finally { await app.stop(); }
 });

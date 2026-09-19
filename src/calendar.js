@@ -1,4 +1,4 @@
-// calendar — 行事曆聚合（D20）：三源＝排程觸發展開＋等時刻步驟＋Google 快照底圖（唯讀）。
+// calendar — 行事曆聚合：三源＝排程觸發展開＋等時刻步驟＋Google 快照底圖（唯讀）。
 // 抓取本身走 host-adapter（ADR-005）；快照解析任何失敗一律降級不丟錯（照 porter 模式）。
 import yaml from 'js-yaml';
 import { parseWhen } from './runner.js';
@@ -145,7 +145,7 @@ export function monthView({ store, month, now = Date.now() }) {
   };
 }
 
-// 綁定事件異動比對（US-039）：流程建的 Google 事件在 Google 側被改 → 出「跟著移」卡；keep 過的同時刻不再吵
+// 綁定事件異動比對：流程建的 Google 事件在 Google 側被改 → 出「跟著移」卡；keep 過的同時刻不再吵
 export function linkedShifts(store) {
   const snap = store.readSnapshot();
   if (!snap?.events) return [];

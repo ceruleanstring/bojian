@@ -1,4 +1,4 @@
-// canvas v6 — 排版輪 L14（契約 I，畫布款 A）：由上往下大卡、上緣入口／下緣出口接點、出口膠囊「同時做／擇一」、入口膠囊「等全部／任一條到」、
+// canvas v6 — （畫布款 A）：由上往下大卡、上緣入口／下緣出口接點、出口膠囊「同時做／擇一」、入口膠囊「等全部／任一條到」、
 // 擇一虛線＋線中條件格（空＝琥珀「點此寫條件」，點了原地改）；整張自由拖拉、放開不吸附不跳位；雙擊空白加步驟、拉到空白長出下一步。
 // 效能：拖卡／拉線／平移以 requestAnimationFrame 合批（一幀最多處理一次）、拖卡用 transform、放開才寫 left/top；
 // 卡片 id → 相連線索引，拖曳只改相關的線；結構改動走 update() 逐項比對、只換有變的元素（不整頁重繪）。
@@ -17,7 +17,7 @@
     return { cards: def.nodes, edges, exits: {}, entries: {}, legacy: def.nodes.filter((n) => kindOf(n) !== 'task').map((n) => n.id) };
   }
 
-  // 排版輪 L13（契約 H）：卡 210×105、舊寫法小圓點 34；由上往下——層＝列（最長路徑）、列距 155、同列水平置中、欄距 250
+  // 卡 210×105、舊寫法小圓點 34；由上往下——層＝列（最長路徑）、列距 155、同列水平置中、欄距 250
   const NW = 210; const NH = 105; const JS = 34; const ROW = 155; const COL = 250; const PAD = 40;
   const PILL_OUT = 27; const PILL_IN = 28; // 有出口／入口膠囊時線從膠囊外緣出入（款 A）
   // 拖曳中的東西（相連的線、幽靈線、拖著的卡的替身）都畫在上層小 SVG，SVG 裡常駐一塊固定大小、幾乎透明的底：
@@ -29,7 +29,7 @@
 
   // 自動排版打底（依 cvModel 的卡與線），canvas.layout==='tb' 時存的座標蓋過去（新卡沒座標也有地方站）；
   // 舊流程（沒有 tb 記號）的由左往右座標不沿用。
-  // 排版輪 L14b：①跨好幾列的線在中間每列佔一個空格（替它讓出通道）；②同層順序照上下層位置來回做重心排序、留交叉最少的那次；
+  // ①跨好幾列的線在中間每列佔一個空格（替它讓出通道）；②同層順序照上下層位置來回做重心排序、留交叉最少的那次；
   // ③列距依這兩列之間有沒有出口膠囊（＋27）、入口膠囊（＋28）、擇一條件格（＋60）加大，都沒有維持 155
   const COND_ROOM = 60;
   function layout(model, canvas) {
@@ -137,13 +137,13 @@
     return lane ? Object.assign(g, lane) : g;
   }
   const bezAt = (g, t) => { const m = 1 - t; return { x: m * m * m * g.x1 + 3 * m * m * t * g.x1 + 3 * m * t * t * g.x2 + t * t * t * g.x2, y: m * m * m * g.y1 + 3 * m * m * t * (g.y1 + g.dy) + 3 * m * t * t * (g.y2 - g.dy) + t * t * t * g.y2 }; };
-  // 排版輪 L14b：條件格的位置——兩列之間夠高（≥90，自動排版有條件格時列距加大）釘在線的七成處（幾條擇一線在這裡分得比中點開，格子可到 180 寬、又不碰下一張卡）；不夠高照舊釘中點、最寬 116
+  // 條件格的位置——兩列之間夠高（≥90，自動排版有條件格時列距加大）釘在線的七成處（幾條擇一線在這裡分得比中點開，格子可到 180 寬、又不碰下一張卡）；不夠高照舊釘中點、最寬 116
   const roomy = (g) => g.lx !== undefined || g.y2 - g.y1 >= 90;
   const geoCond = (g) => (g.lx !== undefined ? { x: g.lx, y: (g.ya + g.yb) / 2 } : bezAt(g, roomy(g) ? 0.7 : 0.5));
   // 條件格寬度照字數估（中文 12px、其他 7px，左右留白 20），64〜116（夠高時 180）：用 left/top 置中，不掛 transform（每格掛 transform 會變成獨立繪製層，拖卡時整頁要重新分層）
   const condWidth = (t, max = 116) => { let px = 20; for (const ch of t) px += ch.charCodeAt(0) > 255 ? 12 : 7; return Math.max(64, Math.min(max, Math.ceil(px))); };
   const condW = (g, e) => condWidth(String(e.cond ?? '').trim() || '點此寫條件', roomy(g) ? 180 : 116);
-  // 排版輪 L14b：線會從別張卡下面穿過（或條件格壓到卡）時改走通道——找一條上下都沒有卡的直線（擇一線要容得下條件格），
+  // 線會從別張卡下面穿過（或條件格壓到卡）時改走通道——找一條上下都沒有卡的直線（擇一線要容得下條件格），
   // 出口→通道上端、直下、通道下端→入口。只看跟這條線上下範圍重疊的卡；沒擋到就照原本一條貝茲
   function laneOf(L, e, g) {
     if (g.y2 - g.y1 < 60) return null;
@@ -183,7 +183,7 @@
     const kind = kindOf(n);
     const sel = (o.sel === n.id ? ' sel' : '') + (o.issues?.has(n.id) ? ' issue' : '');
     const at = `style="left:${p.x}px;top:${p.y}px"`;
-    // 排版輪 L13（題 4 A）：畫面上還看得到的分岔／並行點／會合點＝新畫法表達不了的舊寫法，照樣能跑能改
+    // 畫面上還看得到的分岔／並行點／會合點＝新畫法表達不了的舊寫法，照樣能跑能改
     const old = '<span class="legacytag">舊寫法</span>';
     const pin = '<span class="port in"></span>';
     const pout = `<span class="port out" data-out="${esc(n.id)}" title="從這裡拉線接下一步"></span>`;
@@ -355,7 +355,7 @@
     apply(wrap);
   }
 
-  // 第一次打開（契約 I）：100%、第一列水平置中、上緣留 24px——不 fit
+  // 第一次打開：100%、第一列水平置中、上緣留 24px——不 fit
   function home(wrap) {
     const bw = wrap.clientWidth;
     if (!bw || !last) { apply(wrap); return false; }

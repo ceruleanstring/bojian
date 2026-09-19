@@ -12,7 +12,7 @@ test('L7 ⑤：查看形態——md／txt 原文、docx／xlsx／csv 走排版�
   assert.equal(normName(undefined), '');
 });
 
-// ---- 移植合併輪 U1a：共用檔純函式（規範轉文字、上限、跨層鍵）----
+// ---- 共用檔純函式（規範轉文字、上限、跨層鍵）----
 
 test('U1a ①：規範轉文字——md／txt 原文、docx 取得文字、xlsx／pdf／其他副檔名各回一句人話', async () => {
   assert.deepEqual(RULE_EXTS, ['md', 'txt', 'docx']);

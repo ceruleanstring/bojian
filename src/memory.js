@@ -1,8 +1,8 @@
-// memory — 記憶模組（記憶輪）。上半＝純函式：卡的結構、詞典、群組拆條、用在哪、範圍擴大、選項計數、
+// memory — 記憶模組。上半＝純函式：卡的結構、詞典、群組拆條、用在哪、範圍擴大、選項計數、
 // 兩條程式判的記路（paramSignal／stopEditSignal）、三問路由的 prompt 與解析、選卡與外圈蓋內圈（selectCore／resolveOverrides）、開跑選項（habitOptions）（不碰檔案）。
 // 下半＝createMemory 門面：拿 store 讀寫卡與設定的組合動作（摘要、這條流程會帶什麼、介紹三題、通知撤回、
-// 四條記路的落地）。三問路由 route() 是本輪唯一的新 AI 呼叫（meta.kind='memory'），失敗不擋任何流程。
-// 資料模型契約：規劃/2026-09-09-記憶輪-實作計畫.md「契約 (a)(c)」。
+// 四條記路的落地）。三問路由 route() 是唯一的新 AI 呼叫（meta.kind='memory'），失敗不擋任何流程。
+// 資料模型契約：規劃/2026-09-09--實作計畫.md「契約 (a)(c)」。
 import { extractJson, CheckParseError } from './checker.js';
 
 // 欄位性質六類（封閉）：拆解器給的 params[].kind、詞典 fields[].kind 只准這六個
@@ -13,7 +13,7 @@ export const SCOPE_LEVELS = Object.freeze(['all', 'category', 'workflow']);
 // 出處八種＋取代；認識卡只准前五種（步驟產出永遠不是認識卡的來源）
 export const SOURCE_KINDS = Object.freeze(['intro', 'chat', 'stop-note', 'run-params', 'stop-edit', 'feedback', 'group-box', 'manual', 'replace']);
 // 認識卡只准這幾種出處＝「他自己打的字」（步驟產出永遠不是來源）。feedback 也是他自己打的字——
-// 跑完丟的那一句；沒有家的欄位改記成認識卡（2026-09-19 裁定）之後這條路變常態，標成 chat 等於天天誤導
+// 跑完丟的那一句；沒有家的欄位改記成認識卡（已定案）之後這條路變常態，標成 chat 等於天天誤導
 export const PROFILE_SOURCE_KINDS = Object.freeze(['intro', 'chat', 'stop-note', 'feedback', 'manual', 'replace']);
 // 認識卡層級：表達層（每步帶）｜內容層（按場合帶）
 export const PROFILE_LAYERS = Object.freeze(['expression', 'content']);
@@ -39,7 +39,7 @@ export const FACTORY_DICT = deepFreeze({
     factory('語言', 'appearance', ['中英文']),
     factory('截止日', 'time', ['交期', '什麼時候要']),
     factory('產出檔類型', 'appearance', ['檔案格式']),
-    factory('型態', 'appearance', ['成品類型', '做成什麼']), // 拆法輪（契約 F）：成品卡七格對詞典正式名——型態／分段歸「產出的樣子」、範圍歸「範圍」，六類不加
+    factory('型態', 'appearance', ['成品類型', '做成什麼']), // 成品卡七格對詞典正式名——型態／分段歸「產出的樣子」、範圍歸「範圍」，六類不加
     factory('分段', 'appearance', ['段落', '章節']),
     factory('範圍', 'range', ['期間', '涵蓋']),
   ],
@@ -292,7 +292,7 @@ export function stopEditSignal({ prevRun, run, nodeId } = {}) {
   return prevEdited && thisEdited;
 }
 
-// ---- 三問路由（M2；本輪唯一的新 AI 呼叫）----
+// ---- 三問路由（M2；唯一的新 AI 呼叫）----
 // 業務 prompt 只在 buildRoutePrompt 組；解析走 checker 的候選政策（全文一個池、含糊即失敗）；route() 失敗回 fail_note 不 throw。
 
 export const MEMORY_ROUTE_RULES = [
@@ -411,7 +411,7 @@ const byCreated = (a, b) => String(a.created_at ?? '').localeCompare(String(b.cr
 
 // ---- 拿（M3a）：選卡與外圈蓋內圈（純函式，零 AI）----
 
-// 內容層按場合帶幾張（確認書 §十四 第 2 項：本輪只用「場合對上＋最近用過」）
+// 內容層按場合帶幾張（確認書 §十四 第 2 項：只用「場合對上＋最近用過」）
 export const CONTENT_TOP = 3;
 
 // 這一步要帶的認識卡（扁平清單，表達層在前）：整層暫停→空；否則 active、未過期、有身分時只留身分裡列的；
@@ -636,7 +636,7 @@ export function createMemory({ store, adapter = null, now = () => Date.now() } =
   }
 
   // 點了即核可、範圍靠證據擴大（M3b）：picks 逐張＝被選（被選次數、最近用、連續未選歸零）；同一張同時在 picks 與 changed＝選了優先
-  // （不算改掉）；changed 的卡＝出現過＋改掉一次（shown_count、changed_count 各＋1），連續未選不動——有互動就不是「被無視」，
+  //（不算改掉）；changed 的卡＝出現過＋改掉一次（shown_count、changed_count 各＋1），連續未選不動——有互動就不是「被無視」，
   // 休眠只給出現了、沒點、也沒改的（連續未選滿五次）。被選的卡範圍不涵蓋這條流程＝證據，往外擴：
   // 同分類別條流程的→分類；其餘（含一開始就跨分類）一步到全部；每擴一次寫一行 widen 通知。點的卡已經不在＝跳過
   function accountPicks({ category, id, run }) {
@@ -759,7 +759,7 @@ export function createMemory({ store, adapter = null, now = () => Date.now() } =
           category, id, runId, node: '_memory', def: run.def, text, hint: 'feedback',
           scopeFor: (b) => (b === 'habit' ? { level: 'workflow', category, workflow: id } : { level: 'category', category }),
           // 兩種 bucket 的出處都是 feedback：記憶頁把 chat 顯示成「聊天裡說的」，但這句話是跑完丟的一句結果。
-          // 沒有家的欄位改記成認識卡（2026-09-19 裁定）之後，這條路變成常態，標錯就是天天在誤導人
+          // 沒有家的欄位改記成認識卡（已定案）之後，這條路變成常態，標錯就是天天在誤導人
           sourceFor: () => 'feedback',
           why: '你回報的',
         });
@@ -809,7 +809,7 @@ export function createMemory({ store, adapter = null, now = () => Date.now() } =
           expired: cards.filter((c) => c.status === 'active' && c.expires != null && String(c.expires) < today),
           dormant: cards.filter((c) => c.status === 'dormant'),
           replaced: cards.filter((c) => c.status === 'replaced'),
-          changed: cards.filter((c) => c.status === 'active' && (c.changed_count ?? 0) >= 2), // 選了又改掉兩次以上：本輪只列不提議
+          changed: cards.filter((c) => c.status === 'active' && (c.changed_count ?? 0) >= 2), // 選了又改掉兩次以上：只列不提議
         },
         updated_at: stamps.at(-1) ?? null,
       };

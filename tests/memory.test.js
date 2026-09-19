@@ -1,4 +1,4 @@
-// memory — 記憶模組（記憶輪 M1a）：卡的結構、詞典、群組拆條、範圍擴大、選項計數（純函式，零 AI、零檔案）
+// memory — 記憶模組：卡的結構、詞典、群組拆條、範圍擴大、選項計數（純函式，零 AI、零檔案）
 // M3b 起多一段門面 onRunStart 的檔案測試（臨時資料夾，跑完不留）
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -41,7 +41,7 @@ test('詞典常數：六類封閉、出廠十條（拆法輪加型態／分段�
   assert.deepEqual(FACTORY_DICT.fields.map((f) => f.name), ['語氣', '長度', '格式', '讀者', '語言', '截止日', '產出檔類型', '型態', '分段', '範圍']);
   assert.ok(FACTORY_DICT.fields.every((f) => f.origin === 'factory' && Object.keys(FIELD_KINDS).includes(f.kind)));
   assert.ok(FACTORY_DICT.fields[0].synonyms.includes('口吻'));
-  // 拆法輪 B4 ⑥／契約 F：三條的 kind 與同義詞（型態／分段歸「產出的樣子」、範圍歸「範圍」，六類不加新類）
+  // ⑥／：三條的 kind 與同義詞（型態／分段歸「產出的樣子」、範圍歸「範圍」，六類不加新類）
   const byName = Object.fromEntries(FACTORY_DICT.fields.map((f) => [f.name, f]));
   assert.deepEqual([byName['型態'].kind, byName['型態'].synonyms], ['appearance', ['成品類型', '做成什麼']]);
   assert.deepEqual([byName['分段'].kind, byName['分段'].synonyms], ['appearance', ['段落', '章節']]);

@@ -112,7 +112,7 @@ export function createOptimizer({ store, adapter }) {
             push(base(key, 'node_instruction', 'edits',
               `你連續 2 次都改了「${node.title}」的產出${step.edit_note ? `（${step.edit_note}）` : ''}`,
               { node_id: node.id, node_title: node.title, new_instruction: String(out.new_instruction), summary: String(out.summary) }));
-          } // AI 摘要失敗：本輪略過，訊號還在下次補算（Error Map）
+          } // AI 摘要失敗：略過，訊號還在下次補算（Error Map）
         }
 
         // E) 連 2 趟監工都對同一步交代類似的話 → 那已經是這一步的規矩，該寫進指示。

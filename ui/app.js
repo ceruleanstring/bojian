@@ -3,9 +3,11 @@
 /* global document, fetch, window, BJCanvas */
 const app = document.getElementById('app');
 
-// 聊天窗的空狀態（拆法輪 P4）：shape＝拆解器第一趟回的七格 {value,basis}（契約 A；有值才印成品卡）、sources＝來源表、
-// category＝卡上分類下拉的值、shapeBase＝七格拆解器原樣快照（排版輪 L9：常駐輸入框改回原樣＝依據回原樣；出新卡清掉）。放在 state 之前：uiFn 逐條載入不跨句提升
-function emptyChat() { return { messages: [], draft: null, busy: false, shape: null, sources: [], category: null, shapeBase: null, autoShape: null, refs: null }; }
+// 聊天窗的空狀態：shape＝拆解器第一趟回的七格 {value,basis}、sources＝來源表、
+// category＝卡上分類下拉的值、shapeBase＝七格拆解器原樣快照（常駐輸入框改回原樣＝依據回原樣；出新卡清掉）。放在 state 之前：uiFn 逐條載入不跨句提升
+// fileKind＝卡上「交出什麼檔」選的（預設 md），sample＝「照著像的舊作品」（草稿還沒入庫，
+// 檔案先擱在前端，存進 Workflow 庫那一刻才真的上傳成流程參考檔）
+function emptyChat() { return { messages: [], draft: null, busy: false, shape: null, sources: [], category: null, shapeBase: null, autoShape: null, refs: null, fileKind: null, sample: null }; }
 
 const state = {
   workflows: [],
@@ -15,28 +17,28 @@ const state = {
   mode: 'chat',      // 工作區分頁：chat｜list｜canvas｜history
   editingNode: null, // 停點卡原地編輯中的節點 id
   expanded: new Set(), // 清單模式展開指示的節點
-  chat: emptyChat(), // 拆法輪 P4：多 shape／sources／category（成品卡）；排版輪 L9：shapeBase
+  chat: emptyChat(), // 多 shape／sources／category（成品卡）；shapeBase
   paramNow: {},      // 這次開跑要用的欄位值（僅本次，開別的流程即清）
-  runUploads: {},    // 排版輪 L11（題 2 A）：本次上傳 欄位 key→{token,name,size}｜{busy,name}｜{err}；開跑成功才清
-  runNote: '',       // 排版輪 L11（題 3f）：本次補充
-  health: null,      // 排版輪 L11：常駐開跑健檢 {key:定義＋這次的值, result, err}
+  runUploads: {},    // 本次上傳 欄位 key→{token,name,size}｜{busy,name}｜{err}；開跑成功才清
+  runNote: '',       // 本次補充
+  health: null,      // 常駐開跑健檢 {key:定義＋這次的值, result, err}
   editingParam: null, // 指示句內正在點改的欄位 key
   canvasSel: null,
-  presets: {},       // 常用預設庫（D19，複製式）
+  presets: {},       // 常用預設庫
   wfFiles: [],       // 當前流程的參考檔清單
   drawerOpen: false, // 畫布右側抽屜（雙擊節點打開，D17）
-  drawerTabFor: null,   // 步驟彈窗目前畫的是哪顆節點——換節點清暫存字、「更多設定」收摺回自動（排版輪 L10：子頁退場）
+  drawerTabFor: null,   // 步驟彈窗目前畫的是哪顆節點——換節點清暫存字、「更多設定」收摺回自動（子頁退場）
   cvMore: null,         // 抽屜「背景、限制與參考資料」收摺（移植第一批 T11）：null＝照有沒有值決定、true/false＝使用者點過
-  stepSnap: null,       // 排版輪 L12：步驟彈窗開窗時的欄位值（stepFormValues）；比對它判「有改動還沒套用」
+  stepSnap: null,       // 步驟彈窗開窗時的欄位值（stepFormValues）；比對它判「有改動還沒套用」
   stepSnapFor: null,    // stepSnap 記的是哪顆節點
   stepAsk: false,       // 「有改動還沒套用：套用／丟掉／繼續編輯」詢問列開著
   cvShowIssues: false, // 存檔查出接線問題後，紅標未接上／線不足的步驟
   cvWork: null,      // 畫布工作本（v0.18）：已存流程的未存檔改動
   cvDirty: false,    // 畫布有未存檔改動
-  cvHelp: false,     // 排版輪 L14：畫布「？」操作說明浮層開著
-  cvCondEdit: null,  // 排版輪 L14：畫布上正在原地寫條件的那條擇一線 {from,to,arm}
-  cvEdgeSel: null,   // 排版輪 L14：畫布上點選中的線 {from,to,arm}（按 Delete 剪）
-  cvCondIssues: null, // 排版輪 L13：存檔攔下的空條件線
+  cvHelp: false,     // 畫布「？」操作說明浮層開著
+  cvCondEdit: null,  // 畫布上正在原地寫條件的那條擇一線 {from,to,arm}
+  cvEdgeSel: null,   // 畫布上點選中的線 {from,to,arm}（按 Delete 剪）
+  cvCondIssues: null, // 存檔攔下的空條件線
   proposals: { pending: [], more: 0 },
   versions: [],
   feedbackSent: false,
@@ -50,7 +52,7 @@ const state = {
   savingDraft: false,
   claude: null,
   pollTimer: null,
-  // ---- 行事曆（D20）----
+  // ---- 行事曆----
   calendar: null,      // 開啟時 {month:'YYYY-MM', data, snapErr}
   calDrawer: null,     // 單次抽屜：{kind:'sched', sid, occ, time}｜{kind:'goog', title, time}
   calDrawerDef: null,  // 抽屜內排程對應流程的定義（步驟清單用）
@@ -62,85 +64,85 @@ const state = {
   notices: { unread: [], done: [] },
   noticesOpen: false,  // 已處理摺疊展開
   calPollTimer: null,
-  // ---- 儀表板（儀表板輪）----
+  // ---- 儀表板----
   dash: null,          // 開啟時 {data, usageView:'flow'|'day', open:{run鍵→細節}, promptView}
   dashPollTimer: null,
-  // ---- 資料通道輪（T5）----
+  // ---- ----
   startCheck: null,    // 開跑前健檢卡 {key:定義JSON, level:'block'|'warn', issues}；定義一變就作廢
   dataSupplyOpen: null, // 資料不全卡「補資料」展開中的節點 id
-  editRulesOpen: null,  // 「後面每步會守」清單改寫中的節點 id（交貨查核輪）
-  supOpen: {},          // 停點卡／查核卡「監工交代」展開中的節點（監工輪）——狀態在這，輪詢重繪不會收合
+  editRulesOpen: null,  // 「後面每步會守」清單改寫中的節點 id
+  supOpen: {},          // 停點卡／查核卡「監工交代」展開中的節點——狀態在這，輪詢重繪不會收合
   keep: {},            // 打字中的多行內容（run_id:元素id → 文字）——整頁重繪後放回，不被輪詢吃掉
   runJson: null,       // 上次抓到的 run 原文——輪詢只在真的變了才重繪
-  // ---- 產檔輪（T5）----
+  // ---- ----
   preview: null,       // 成品預覽浮窗 {cat,id,rid,name,data,err,sheet}——狀態在這，輪詢重繪不會關掉它
   rendered: {},        // 文字成品排版快取：內容雜湊 → html（false＝這段排不出來，顯示原文）
   rawView: new Set(),  // 停點卡／成品區按了「看原文」的鍵
   permErr: null,       // 產檔權限開關沒存成的一句話
   permFlashUntil: 0,   // 健檢「修這裡」把權限列亮到幾點（毫秒）——狀態驅動，中途整頁重繪也不會掉 class
-  // ---- 記憶輪（M1c）----
+  // ---- （M1c）----
   categoryPage: null,  // 群組圈分類頁（側欄分類標題點開）：{category, data:群組圈|null, cards:分類層習慣卡, err, saving, saveErr}
   // ---- 移植第一批 T9：側欄四全域項＋流程庫頁 ----
   library: null,       // 流程庫頁 {q, cat}；null＝沒開
   catClosed: new Set(), // 側欄收合中的分類（只在這個 session，不存）
   // ---- 移植第一批 T10：流程頁兩分頁＋兩浮窗 ----
   flowTab: 'design',   // 流程頁上層分頁：design＝設計流程（聊天／清單／畫布／履歷）、data＝本次資料（開跑表單）
-  dataCard: 'data',    // 調整輪：本次資料哪一張任務卡展開著（resume｜data｜auto｜execution；null＝全收起）
+  dataCard: 'data',    // 本次資料哪一張任務卡展開著（resume｜data｜auto｜execution；null＝全收起）
   flowSettingsOpen: false, // 「流程設定」浮窗（產出檔案／交貨查核／監工三開關）
   flowMemOpen: false,  // 記憶一行「查看」浮窗（兩格）
-  // ---- 記憶輪（M2）----
+  // ---- （M2）----
   intro: null,         // 首次三題介紹（開站蓋在儀表板前）：{saving, err}；null＝答過或跳過了
   memUndoing: {},      // 通知「不要記」按下去到回來之間（卡 id→true），輪詢重繪不會把按鈕復活
-  // ---- 記憶輪（M3b）：開跑表單的習慣選項、點了即核可、身分 ----
+  // ---- （M3b）：開跑表單的習慣選項、點了即核可、身分 ----
   wfMemory: null,      // GET /api/memory/for-workflow 的回應（options＝每個欄位旁的習慣選項）；讀不到＝null：沒有 chip，流程照開
   memPicks: {},        // 這次開跑點了哪些習慣卡（欄位 key→卡 id）——點了即核可，隨「開始」送出
   memChanged: [],      // 點了又改掉的卡 id（後端只記數）
   memMore: {},         // 欄位 key→true：那格的「更多」展開中
   memIdentity: '',     // 這次以哪個身分跑（身分 id；空＝不限縮）
   identities: [],      // 身分清單（有才顯示下拉）
-  // ---- 記憶輪（M4）：就地看 ----
+  // ---- （M4）：就地看 ----
   memOpen: {},         // 停點卡／查核卡「這步用了 N 條記憶」展開中的節點（不共用 supOpen）——狀態在這，輪詢重繪不會收合
   memModal: null,      // 卡片浮窗 {id, bucket, card, err, busy, replacing}：card＝GET /api/memory/cards/:id 讀回的整張卡（群組條沒有 API，直接帶 text）；replacing＝「改」展開新內容框
-  // ---- 記憶輪（M5a）：設定頁（整頁模式，同儀表板／行事曆）----
-  settings: null,      // 開啟時 {group, tab:{組→子分頁}, data, err, idEdit, merge}（素材編輯排版輪 L6 搬到 state.assets.edit）：data＝summary／cards／groups／dict／cfg／identities；idEdit／presetEdit＝編輯中的表單（單一真相，重繪從它還原）
+  // ---- （M5a）：設定頁（整頁模式，同儀表板／行事曆）----
+  settings: null,      // 開啟時 {group, tab:{組→子分頁}, data, err, idEdit, merge}（素材編輯 搬到 state.assets.edit）：data＝summary／cards／groups／dict／cfg／identities；idEdit／presetEdit＝編輯中的表單（單一真相，重繪從它還原）
   memIdentitySet: false, // 開跑表單的身分下拉被人動過：沒動＝用 for-workflow 回的預設（綁這個分類的身分）
-  // ---- 移植合併輪 U2a：三層樹的根＝公司 ----
+  // ---- 三層樹的根＝公司 ----
   companyName: '',     // 設定的公司名稱（GET /api/settings 的 company_name；空＝側欄印「公司」）
-  // ---- 多組織（調整輪）：GET /api/orgs 的一份；orgs 少於 2 筆＝側欄不印切換器（單組織的畫面跟以前一模一樣）----
+  // ---- 多組織：GET /api/orgs 的一份；orgs 少於 2 筆＝側欄不印切換器（單組織的畫面跟以前一模一樣）----
   orgs: [],            // [{id, name, created_at, workflows}]
   orgId: '',           // 目前組織 id（＝GET /api/orgs 的 current）
   orgMenu: false,      // 側欄組織切換浮層開著（輪詢重繪讀回）
   orgKill: null,       // 設定頁正在確認「移出」的組織 id（要打對名字才解鎖那顆鈕）
-  sharedUpload: null,  // 移植合併輪 U2b：公司頁／部門頁按「上傳」後記 {scope, kind}，#shared-file 的 change 事件讀它決定傳到哪一層哪一區
-  // ---- 移植合併輪 U4b：流程頁右側「流程資料夾」＋共用檔浮窗＋本次資料收摺（狀態都在這，重繪讀回，不靠 DOM 的 open） ----
+  sharedUpload: null,  // 公司頁／部門頁按「上傳」後記 {scope, kind}，#shared-file 的 change 事件讀它決定傳到哪一層哪一區
+  // ---- 流程頁右側「流程資料夾」＋共用檔浮窗＋本次資料收摺（狀態都在這，重繪讀回，不靠 DOM 的 open） ----
   wfRuns: [],          // GET …/runs?detail=1 的歷次執行摘要（started_at 倒序）；null＝讀不到。state.wf.runs 仍是原三欄形狀給 resumeHtml
   shared: { company: null, dept: null, err: null }, // 兩層共用檔清單（GET /api/shared/:scope/files）；null＝還沒讀到；err＝哪一支讀不到的一句
   sharedOpen: false,   // 「公司 N 份・部門 M 份共用檔 → 查看」浮窗
   folderOpen: { refs: true, runs: true, optional: null, refsAll: false, runsAll: false }, // 側欄兩塊 details、本次資料「其他資料（選填）」（null＝照有沒有值決定）、兩個「查看全部」
-  // ---- 移植合併輪 U6a：執行頁三欄（狀態都在這，輪詢重繪讀回，不靠 DOM 的 open）----
+  // ---- 執行頁三欄（狀態都在這，輪詢重繪讀回，不靠 DOM 的 open）----
   sideOpen: { sup: true, data: true, focus: false, attempts: false }, // 右欄四格開合：監工交代／這步會用到的資料／驗收重點／每次交卷
   runInspect: null,    // 左軌點了哪一步＝歷史視圖（U6c；null＝看目前這步）。開跑／打開別的 run／節點消失重設，輪詢不碰，不進 keep
-  runInspectLive: null, // 排版輪 L12／L12b：左軌點進來看的等你支線是哪一步（還看著它、它處理完就回目前這步）
+  runInspectLive: null, // ／L12b：左軌點進來看的等你支線是哪一步（還看著它、它處理完就回目前這步）
   promptView: null,    // 執行頁「當時指示」卷宗浮窗 {title, text}（U6b 接；與儀表板的 promptModalHtml 共用）
-  // ---- 拆法輪 P2：三層改名浮窗（公司／部門／流程）——狀態在這，輪詢重繪讀回；null＝沒開 ----
+  // ---- 三層改名浮窗（公司／部門／流程）——狀態在這，輪詢重繪讀回；null＝沒開 ----
   rename: null,        // {type:'company'|'category'|'flow', cat, id, value, err, busy}
-  inspectorTab: 'step', // 排版輪 L8：右欄檢視器分頁 step｜data（Workflow 資料）
-  historyTab: 'runs',   // 排版輪 L8：履歷分頁 runs（執行紀錄）｜versions（Workflow 版本）
-  rowMenu: null,       // 排版輪 L4：Workflow 列「⋯」選單 {cat, id, name, x, y, sub}（sub＝「移至部門」子清單展開）
-  calMore: false,      // 排版輪 L6：行事曆右上「⋯」（重新整理 Google 快照）開著沒
-  assets: null,        // 排版輪 L6：共用素材整頁 {tab:'全部'|'角色情境'|'常用片段', edit:{field, orig, name, text, err}|null, err}
-  trashFromLib: false, // 排版輪 L6：垃圾桶是從 Workflow 庫進來的（「回 Workflow 庫」回庫頁）
-  importFromLib: false, // 排版輪 L7：匯入是從 Workflow 庫發起的（預覽頁「不匯入」回庫頁）
+  inspectorTab: 'step', // 右欄檢視器分頁 step｜data（Workflow 資料）
+  historyTab: 'runs',   // 履歷分頁 runs（執行紀錄）｜versions（Workflow 版本）
+  rowMenu: null,       // Workflow 列「⋯」選單 {cat, id, name, x, y, sub}（sub＝「移至部門」子清單展開）
+  calMore: false,      // 行事曆右上「⋯」（重新整理 Google 快照）開著沒
+  assets: null,        // 共用素材整頁 {tab:'全部'|'角色情境'|'常用片段', edit:{field, orig, name, text, err}|null, err}
+  trashFromLib: false, // 垃圾桶是從 Workflow 庫進來的（「回 Workflow 庫」回庫頁）
+  importFromLib: false, // 匯入是從 Workflow 庫發起的（預覽頁「不匯入」回庫頁）
 };
 const seenNotices = new Set(); // 桌面通知去重（本次開頁期間）
 
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-// 說明文案輪（09-19 裁示方案 C）：說明收進問號——說明文字不印在畫面上，收進標題旁這顆鈕，
+// （09-19 裁示方案 C）：說明收進問號——說明文字不印在畫面上，收進標題旁這顆鈕，
 // 滑過就出現、點一下釘住。空字串回空字串，所以「這裡本來就沒說明」跟「說明還沒寫」長得一樣（都不出現）。
 // r=true 讓氣泡靠右對齊，給貼在右邊緣的那幾顆用。
 const hint = (t, r = false) => (t ? `<button type="button" class="hint${r ? ' r' : ''}" aria-expanded="false" aria-label="說明" data-hint="${esc(t)}">?</button>` : '');
 const wfPath = (w) => `/api/workflows/${encodeURIComponent(w.category)}/${encodeURIComponent(w.id)}`;
-// 輪詢重繪前的守衛（列管 L029／L020）：原本四處各抄一次、而且只認 INPUT／TEXTAREA——
+// 輪詢重繪前的守衛：原本四處各抄一次、而且只認 INPUT／TEXTAREA——
 // 下拉展開中被重繪會把選單關掉，可編輯區塊打到一半也會被洗掉。改成一顆共用的。
 const isTyping = () => {
   const el = document.activeElement;
@@ -149,16 +151,16 @@ const isTyping = () => {
   if (el.tagName === 'SELECT') return true;          // 展開中沒有「有沒有值」可判，聚焦就算
   return ['INPUT', 'TEXTAREA'].includes(el.tagName) && !!el.value;
 };
-// 輪詢失敗不該整段靜音（列管 L034）：不打擾使用者，但 F12 看得到是哪一路在掉。
+// 輪詢失敗不該整段靜音：不打擾使用者，但 F12 看得到是哪一路在掉。
 const pollFailed = (where, e) => console.error(`[剝繭] ${where} 這一輪沒拿到，下一輪再試`, e);
 // 成品檔位址：不帶 sub＝下載；'/preview'＝頁內預覽形態；'/inline'＝內嵌回檔（pdf iframe）
 const runFileUrl = (cat, id, rid, name, sub = '') => `/api/workflows/${encodeURIComponent(cat)}/${encodeURIComponent(id)}/runs/${encodeURIComponent(rid)}/files/${encodeURIComponent(name)}${sub}`;
 
-// 成品卡七格：鍵順序＝契約 A、中文照設計 §五-1
+// 成品卡七格：鍵順序＝、中文照設計 §五-1
 const SHAPE_LABELS = [['deliverable', '成品'], ['type', '型態'], ['audience', '對象'], ['style', '段子或風格'], ['length', '長度'], ['sections', '分段'], ['range', '範圍']];
-// 成品卡來源表的膠囊：六種 from → [人話, chip class]（契約 I；不認識的當 paste）
-// 排版輪 L2（契約 C）：成品卡依據 basis 是拆解器回的資料值，顯示時換字。
-// 排版輪 F2（09-18 選項 B）：中間層改回「分類」，拆解器回的 '分類守則' 與資料值 '未分類' 都跟畫面同字，
+// 成品卡來源表的膠囊：六種 from → [人話, chip class]
+// 成品卡依據 basis 是拆解器回的資料值，顯示時換字。
+// （09-18 選項 B）：中間層改回「分類」，拆解器回的 '分類守則' 與資料值 '未分類' 都跟畫面同字，
 // 兩張顯示層表因此只剩「公司規範→組織規範」一條；catLabel 留著當唯一出口（之後要換分類名只動這裡）。
 const BASIS_TXT = { '公司規範': '組織規範' };
 function catLabel(c) { return c; }
@@ -167,20 +169,20 @@ const SOURCE_CHIP = { web: ['AI 上網查', 'chip'], paste: ['你貼・必填', 
 // 目前工作區的主體：草稿優先，其次已存流程
 const subjectDef = () => state.chat.draft ?? state.wf?.def ?? null;
 const subjectIsDraft = () => !!state.chat.draft;
-// 排版輪 F2：「有沒存的東西」＝還沒進庫的草稿（含只有成品卡、只有對話、第一趟還在等）。
+// 「有沒存的東西」＝還沒進庫的草稿（含只有成品卡、只有對話、第一趟還在等）。
 // stashWorkspace／dsSnapshot（存進瀏覽器）與側欄草稿列共用這一式，三邊不會再各判各的。
 const draftLive = () => !state.wf && !!(state.chat.draft || state.chat.shape || state.chat.busy || state.chat.messages.length);
 // 畫布工作本（v0.18）：已存流程在畫布的改動先進本地緩衝，按「存檔」才落地；離開畫布即清
 const cvDef = () => (!subjectIsDraft() && state.cvWork ? state.cvWork : subjectDef());
 
-// 拆法輪 P3（契約 H；DEMO commitActiveFlow／openFlow）：每條流程各自的工作區狀態，離開時打包、回來時讀回（僅存於本次開啟期間；重開頁面歸零）。
+// （DEMO commitActiveFlow／openFlow）：每條流程各自的工作區狀態，離開時打包、回來時讀回（僅存於本次開啟期間；重開頁面歸零）。
 // 鍵＝「分類/流程 id」；新流程草稿＝'__draft__'。run／versions／wfRuns／wfFiles／shared 不暫存（每次重抓，資料才對）。
 const wsByFlow = new Map();
 const flowKey = (w) => `${w.category}/${w.id}`;
 const WS_KEYS = ['chat', 'mode', 'flowTab', 'canvasSel', 'drawerOpen', 'paramNow', 'runUploads', 'runNote', 'memPicks', 'memChanged', 'memIdentity', 'memIdentitySet', 'folderOpen', 'expanded', 'cvWork', 'cvDirty'];
 // 離開工作區前呼叫：已存流程存在自己的鍵下；新流程草稿存 __draft__；wf 開著但主體是草稿（或 wf null 沒草稿）不存（同舊聊天暫存規則）
 function stashWorkspace() {
-  const key = state.wf && !subjectIsDraft() ? flowKey(state.wf) : draftLive() ? '__draft__' : null; // 拆法輪 P4：成品卡（還沒有草稿）也算一份沒存的東西，跟著 __draft__ 走；排版輪 L1：第一趟還在等（busy）或只有對話也算
+  const key = state.wf && !subjectIsDraft() ? flowKey(state.wf) : draftLive() ? '__draft__' : null; // 成品卡（還沒有草稿）也算一份沒存的東西，跟著 __draft__ 走；第一趟還在等（busy）或只有對話也算
   if (!key || wsByFlow.has(key)) return; // 已經打包過（去了儀表板等頁還沒回來）就不再蓋——那些頁會順手把 drawerOpen 之類關掉，蓋了會洗掉包裡的值
   wsByFlow.set(key, Object.fromEntries(WS_KEYS.map((k) => [k, state[k]])));
 }
@@ -195,7 +197,7 @@ function restoreWorkspace(key) {
   return !!p;
 }
 
-// ---------- 排版輪 F3（09-18「草稿被 F5 弄掉不能接受」）：沒存的東西隨打隨存進瀏覽器，重新整理還原 ----------
+// ---------- （09-18「草稿被 F5 弄掉不能接受」）：沒存的東西隨打隨存進瀏覽器，重新整理還原 ----------
 // 存什麼：wsByFlow 的暫存包＋正在看的那一份（鍵規則同 stashWorkspace）＋打到一半還沒送出的字（state.keep）。
 // 不存畫布工作本（cvWork／cvDirty，量太大）——它照舊「離開前警告、存檔才寫回」。
 // 鍵綁目前的資料夾（GET /api/settings 的 data_dir 雜湊）：換資料夾＝另一個鍵，不同資料庫不互串；
@@ -213,7 +215,7 @@ const dsHash = (s) => { let h = 2166136261; for (let i = 0; i < s.length; i++) {
 function dsStore() { try { return window.localStorage; } catch { return null; } } // 隱私模式連讀 localStorage 都會炸
 let dsDir = '';       // 目前資料夾的原字串（推算別的組織那把鍵用）
 function dsBind(dir) { dsDir = String(dir ?? ''); dsKey = DS_PREFIX + dsHash(dsDir); }
-// 大跑輪（覆核退回①）：哪些鍵還是活的＝目前這把＋現存每個組織那把。切組織是整頁重載換資料夾，別的組織的鍵是人家沒存的草稿，不是殘骸。
+// 哪些鍵還是活的＝目前這把＋現存每個組織那把。切組織是整頁重載換資料夾，別的組織的鍵是人家沒存的草稿，不是殘骸。
 // 別的組織的資料夾＝把 data_dir 結尾的組織 id 換成它的 id（直接換字串，不猜路徑分隔符號）；認不出組織（單組織、清單讀不到）就只認得目前這把，照舊清。
 function dsLiveKeys() {
   const live = new Set(dsKey ? [dsKey] : []);
@@ -225,7 +227,10 @@ function dsLiveKeys() {
   return live;
 }
 // 一份工作區包 與 存得進 JSON 的形狀 互轉（expanded 是 Set）
-const dsPack = (src) => Object.fromEntries(DS_KEYS.map((k) => [k, k === 'expanded' ? [...(src[k] ?? [])] : src[k]]));
+// 舊作品的 base64 不能進 localStorage——一份 3MB 的簡報就會吃掉整個 1MB 額度，
+// 把別的草稿擠掉、甚至讓整包存不進去（ 承諾的「F5 不掉草稿」會無聲失效）。只留檔名。
+const dsChat = (c) => (c?.sample?.b64 ? { ...c, sample: { name: c.sample.name } } : c);
+const dsPack = (src) => Object.fromEntries(DS_KEYS.map((k) => [k, k === 'expanded' ? [...(src[k] ?? [])] : (k === 'chat' ? dsChat(src[k]) : src[k])]));
 const dsUnpack = (o) => Object.fromEntries(DS_KEYS.filter((k) => k in o).map((k) => [k, k === 'expanded' ? new Set(o[k] ?? []) : o[k]]));
 // 這一份包裡有沒有「沒存的東西」：空包（只是逛過去、剛存進庫）不占位，localStorage 才不留殘骸
 const dsWorth = (p) => !!(p.chat?.draft || p.chat?.shape || p.chat?.busy || p.chat?.messages?.length
@@ -314,7 +319,7 @@ async function api(method, path, body) {
   return json;
 }
 
-// ---- 開跑前健檢（T5）：結果按定義 JSON 字串快取，抽屜／清單每次 render 不重打 ----
+// ---- 開跑前健檢：結果按定義 JSON 字串快取，抽屜／清單每次 render 不重打 ----
 const preflightCache = { key: null, result: null, failed: false, pending: null };
 // values＝這次的欄位值（只有按「開始」才帶）：帶值的結果隨值而變，不進快取
 async function preflightNow(def, values) {
@@ -324,7 +329,7 @@ async function preflightNow(def, values) {
   if (!values) Object.assign(preflightCache, { key, result: r, failed: false, pending: null });
   return r;
 }
-// 健檢回應的輸入來源（排版輪 L14b，src/preflight packInputs）展開成某一步的清單 [{kind,id,label}]——與 inputSources(def)[id] 逐項相同
+// 健檢回應的輸入來源（src/preflight packInputs）展開成某一步的清單 [{kind,id,label}]——與 inputSources(def)[id] 逐項相同
 function pfInputs(pf, id) {
   const x = pf?.inputs;
   const me = x?.at?.[id];
@@ -345,7 +350,7 @@ function pfInputs(pf, id) {
   return [...list, ...(me.own ?? [])];
 }
 // render 途中用：有快取就回，沒有就背景打一次、回來只補 DOM（不整頁 render，免得洗掉抽屜裡的字）
-// 排版輪 L14：畫布連續編排中（上次改動 2 秒內）先不送、停手 2 秒補一次。
+// 畫布連續編排中（上次改動 2 秒內）先不送、停手 2 秒補一次。
 // L14b：健檢回應改不重複的寫法（200 步 1,191,259→16,307 字元）後試過縮成 0.4 秒——回應變小了，但回來後右欄輸入來源（深的步驟上百行）重畫會落進拉線放開後，
 // x4 同時段交錯各量三次、放開後中位數 25％ 98→114、100％ 37→98、200％ 78→89 ms，所以維持 2 秒
 let cvEditAt = 0;
@@ -378,7 +383,7 @@ function patchPreflightDom() {
     const n = def?.nodes.find((x) => x.id === state.canvasSel);
     if (n) box.outerHTML = drawerInputsHtml(n, def);
   }
-  const ins = document.querySelector('[data-insp-inputs]'); // 排版輪 L8：右欄檢視器的輸入來源同樣只補這一塊
+  const ins = document.querySelector('[data-insp-inputs]'); // 右欄檢視器的輸入來源同樣只補這一塊
   if (ins && !state.run) {
     const def = cvDef();
     const n = def?.nodes.find((x) => x.id === state.canvasSel);
@@ -386,11 +391,11 @@ function patchPreflightDom() {
   }
   const unused = preflightCache.result?.unused_params ?? [];
   for (const c of document.querySelectorAll('[data-unused]')) c.hidden = !unused.includes(c.dataset.unused);
-  const src = document.querySelector('[data-srcline]'); // 執行頁右欄「來源：」（U6b）：健檢回來只補這一行，不整頁重繪
+  const src = document.querySelector('[data-srcline]'); // 執行頁右欄「來源：」：健檢回來只補這一行，不整頁重繪
   if (src && state.run) src.outerHTML = sideSourceHtml(state.run, sideNodeOf(state.run));
 }
 
-// ---- 排版輪 L11：本次資料的常駐開跑健檢——打開分頁就跑、欄位停 600ms 自己重算，只補畫這張卡（不整頁重繪，打到一半的字不受影響）----
+// ---- 本次資料的常駐開跑健檢——打開分頁就跑、欄位停 600ms 自己重算，只補畫這張卡（不整頁重繪，打到一半的字不受影響）----
 // 這次的值：文字欄位＝輸入中或預設（同按開始那一刻）；上傳欄位＝上傳好的檔名，沒上傳／還在傳／傳失敗＝空
 function healthValues(def) {
   return Object.fromEntries((def.params ?? []).map((p) => [p.key, p.input === 'file'
@@ -428,7 +433,7 @@ function scheduleHealth() {
 function patchHealthCard() {
   const box = document.querySelector('[data-healthcard]');
   if (box) box.outerHTML = healthCardHtml();
-  const card = document.querySelector('[data-startcard]'); // 調整輪：右欄摘要卡（必填 x/y、健檢、進度條）跟著補畫，一樣不整頁重繪
+  const card = document.querySelector('[data-startcard]'); // 右欄摘要卡（必填 x/y、健檢、進度條）跟著補畫，一樣不整頁重繪
   if (card) card.outerHTML = startCardHtml();
 }
 function healthCardHtml() {
@@ -453,7 +458,7 @@ function healthCardHtml() {
   return card('ok', `<p class="hsum">資料已備齊・${steps} 個步驟已準備</p><p class="note">開始時用目前已儲存的 Workflow 版本。</p>`);
 }
 
-// ---- 打字中的多行框（T5）：input 事件存進 state.keep，重繪後放回 ----
+// ---- 打字中的多行框：input 事件存進 state.keep，重繪後放回 ----
 const keepKey = (id) => `${state.run?.run_id ?? '-'}:${id}`;
 const kept = (id) => state.keep[keepKey(id)];
 const FIELD_SIZING = typeof CSS !== 'undefined' && CSS.supports?.('field-sizing', 'content');
@@ -487,7 +492,7 @@ function topoNodes(def) {
     return d;
   };
   for (const n of def.nodes) visit(n.id);
-  const at = new Map(def.nodes.map((n, i) => [n, i])); // 排版輪 L14：原本比較函式裡 indexOf（200 步排序要掃上萬次），順序不變
+  const at = new Map(def.nodes.map((n, i) => [n, i])); // 原本比較函式裡 indexOf（200 步排序要掃上萬次），順序不變
   return [...def.nodes].sort((a, b) => depth.get(a.id) - depth.get(b.id) || at.get(a) - at.get(b));
 }
 const newNodeId = () => `n${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
@@ -540,7 +545,7 @@ function commitParamEdit(el) {
   if (ta && ta.value !== val) { ta.value = val; autoGrow(ta); }
 }
 
-// ---- 記憶輪（M3b）：開跑表單的習慣選項 ----
+// ---- （M3b）：開跑表單的習慣選項 ----
 // 這格的選項清單：實線＝涵蓋這條流程的卡（covers）、虛線＝同分類別條流程的（probes，標來源流程）；沒卡的欄位回空
 function memOptionsOf(key) {
   const o = state.wfMemory?.options?.[key];
@@ -574,7 +579,7 @@ function identityRowHtml() {
       ${list.map((i) => `<option value="${esc(i.id)}" ${state.memIdentity === i.id ? 'selected' : ''}>${esc(i.name)}</option>`).join('')}
     </select></div>`;
 }
-// 說明文案輪：原本整段印在開跑表單裡，改成併進「填寫這次的值」的標題說明（同一個區塊不講兩次）
+// 原本整段印在開跑表單裡，改成併進「填寫這次的值」的標題說明（同一個區塊不講兩次）
 const habitsNoteText = () => (Object.keys(state.wfMemory?.options ?? {}).length
   ? '習慣選項只是選項：沒點就不套用；點了就是核可，不另外問。虛線的來自別條 Workflow，點了範圍才擴大。' : '');
 const habitsNoteHtml = () => '';
@@ -608,7 +613,7 @@ async function refreshWfMemory() {
   if (!state.memIdentitySet) state.memIdentity = mem?.identity ?? '';
 }
 
-// ---- 記憶輪（M4）：就地看——流程頁兩格、停點卡「這步用了 N 條」、抽屜一列、卡片浮窗、儀表板一行 ----
+// ---- （M4）：就地看——流程頁兩格、停點卡「這步用了 N 條」、抽屜一列、卡片浮窗、儀表板一行 ----
 // 卡上的小標籤：認識卡照層、群組條照來源、習慣卡照欄位（都用既有 .chip 淺底墨字，不另配色）
 function memTagHtml(c) {
   if (c.bucket === 'group') return '<span class="chip">分類守則</span>';
@@ -662,7 +667,7 @@ function memoryUsedHtml(node, step) {
   const cards = mem.cards ?? [];
   const open = !!state.memOpen[node.id];
   const cat = state.run?.workflow?.category ?? '';
-  // U6b：沒記憶卡但這步帶了規範／共用檔（U1b 覆核 ⑩：沒接記憶門面時 cards 是空殼）——別說「沒帶任何記憶」，指去右欄
+  // 沒記憶卡但這步帶了規範／共用檔（沒接記憶門面時 cards 是空殼）——別說「沒帶任何記憶」，指去右欄
   const sh = mem.shared;
   const hasShared = !!sh && ['company', 'dept', 'refs'].some((k) => Array.isArray(sh[k]) && sh[k].length);
   const head = cards.length
@@ -680,7 +685,7 @@ const MEM_REF_FIELDS = ['instruction', 'role_context', 'background', 'constraint
 const MEM_PARAM_REF = /\{\{\s*([\w-]+)\s*\}\}/g;
 function drawerMemoryHtml(n) {
   const m = state.wfMemory;
-  // 移植合併輪 U4c：公司／部門規範每步自動帶（讀 state.shared 的 rules 數）；記憶讀不到但有規範仍印規範那兩段
+  // 公司／部門規範每步自動帶（讀 state.shared 的 rules 數）；記憶讀不到但有規範仍印規範那兩段
   const cRules = state.shared?.company?.rules?.length ?? 0;
   const dRules = state.shared?.dept?.rules?.length ?? 0;
   if ((!m && !cRules && !dRules) || subjectIsDraft() || kindOf(n) !== 'task' || n.executor !== 'ai') return '';
@@ -688,7 +693,7 @@ function drawerMemoryHtml(n) {
   const rules = m?.group?.rules?.length ?? 0;
   const keys = new Set([...MEM_REF_FIELDS.map((f) => String(n[f] ?? '')).join('\n').matchAll(MEM_PARAM_REF)].map((x) => x[1]));
   const opts = [...keys].reduce((a, k) => a + (m?.options?.[k]?.covers?.length ?? 0), 0);
-  // 移植第一批 T11（契約 E-2）：一行分開數，不加「條」；U4c（契約 F-2）：四段 關於你・分類守則・公司規範・部門規範，0 的段省略、全 0 印「沒有記憶與規範」
+  // 移植第一批 T11（-2）：一行分開數，不加「條」；U4c（-2）：四段 關於你・分類守則・公司規範・部門規範，0 的段省略、全 0 印「沒有記憶與規範」
   const parts = [m?.paused ? '關於你 暫停中' : `關於你 ${core}`, `分類守則 ${rules}`, `組織規範 ${cRules}`, `分類規範 ${dRules}`, ...(opts ? [`習慣選項 ${opts}`] : [])].filter((p) => !/ 0$/.test(p));
   return `<div class="dmem" data-dmem><i class="ph ph-cards"></i><span class="lb">這一步會帶：</span><span>${parts.join('・') || '沒有記憶與規範'}</span></div>`;
 }
@@ -818,10 +823,10 @@ async function refreshHealth() {
   } catch {
     state.claude = false;
   }
-  // 排版輪 L3：頂欄退場，狀態只寫 state.claude，由側欄底部（sideHtml 的 .sidefoot）讀；呼叫端自己 render
+  // 頂欄退場，狀態只寫 state.claude，由側欄底部（sideHtml 的 .sidefoot）讀；呼叫端自己 render
 }
 
-// 排版輪 L4（驗收第 3 條）：鍵盤操作——側欄那些 div／i 做的可點元素帶 tabindex，Enter／空白鍵轉成 click；原生按鈕與輸入框不經這裡
+// （驗收第 3 條）：鍵盤操作——側欄那些 div／i 做的可點元素帶 tabindex，Enter／空白鍵轉成 click；原生按鈕與輸入框不經這裡
 function keyActivate(e) {
   if ((e.key !== 'Enter' && e.key !== ' ') || !e.target.matches?.('[data-act][tabindex]')) return false;
   e.preventDefault(); // 擋 summary 原生收合、空白鍵捲頁
@@ -834,22 +839,22 @@ function keyActivate(e) {
   return true;
 }
 
-// 排版輪 L3：頁標題元件（樣稿 uxHead）——大標＋一行灰字說明＋右側動作鈕；標題與說明 escape，動作是呼叫端組好的 HTML
+// 頁標題元件（樣稿 uxHead）——大標＋一行灰字說明＋右側動作鈕；標題與說明 escape，動作是呼叫端組好的 HTML
 function pageHeadHtml(title, sub, actions) {
   return `<div class="page-head"><div><h1>${esc(title)}</h1>${sub ? `<p>${esc(sub)}</p>` : ''}</div>${actions ? `<div class="actions">${actions}</div>` : ''}</div>`;
 }
 
-// 移植合併輪 U2a：公司名稱——側欄根節點、麵包屑、公司頁標題共用；空白退回「公司」（契約 C-8）
+// 公司名稱——側欄根節點、麵包屑、公司頁標題共用；空白退回「公司」（-8）
 const companyName = () => (state.companyName ?? '').trim() || '組織';
 async function refreshCompanyName() {
   try {
     const s = await api('GET', '/api/settings');
     state.companyName = s.company_name ?? '';
-    dsBind(s.data_dir); // 排版輪 F3：瀏覽器暫存綁這個資料夾（換資料夾＝另一個鍵）
+    dsBind(s.data_dir); // 瀏覽器暫存綁這個資料夾（換資料夾＝另一個鍵）
   } catch {
     state.companyName = ''; // 讀不到＝未設（也認不得資料夾：這一輪不存，關頁前改用警告兜底）
   }
-  // 多組織（調整輪）：組織清單＋目前是哪個，側欄切換器與設定頁組織管理共用這一份。
+  // 多組織：組織清單＋目前是哪個，側欄切換器與設定頁組織管理共用這一份。
   // 刻意跟著這支一起抓（不另外加 init 步驟）：兩支都是「我現在在哪個組織」的同一件事，錯開抓會出現名字與清單對不上的空窗
   try {
     const o = await api('GET', '/api/orgs');
@@ -861,11 +866,11 @@ async function refreshCompanyName() {
   }
 }
 
-// ---------- 拆法輪 P2：三層改名浮窗（DEMO uxRename／uxRenameSave）——掛 .layout 外的 .pvback.memmodal；狀態全在 state.rename，輪詢重繪讀回 ----------
+// ---------- 三層改名浮窗（DEMO uxRename／uxRenameSave）——掛 .layout 外的 .pvback.memmodal；狀態全在 state.rename，輪詢重繪讀回 ----------
 function renameModalHtml() {
   const r = state.rename;
   if (!r) return '';
-  const label = r.type === 'company' ? '組織' : r.type === 'category' ? '分類' : ' Workflow '; // 中文與 Workflow 之間半形空白（契約 C）
+  const label = r.type === 'company' ? '組織' : r.type === 'category' ? '分類' : ' Workflow '; // 中文與 Workflow 之間半形空白
   const note = r.type === 'flow' ? '名稱會同步顯示於工作空間；既有執行與版本快照保留原名。' : '名稱會同步到工作空間及相關 Workflow。';
   const dis = r.busy ? ' disabled' : '';
   return `<div class="pvback memmodal renamemodal" data-act="rename-close"><div class="modal" role="dialog" aria-label="修改${label}名稱">
@@ -878,8 +883,8 @@ function renameModalHtml() {
     <div class="btns"><button class="btn btn-ghost" data-act="rename-close"${dis}>取消</button><button class="btn btn-primary" data-act="rename-save"${dis}><i class="ph ph-check"></i>儲存</button></div>
   </div></div>`;
 }
-// 存：公司→既有 PUT /api/settings（company_name）；部門→PUT /api/categories/:name（B0）；流程→既有存新版本（PUT def，後端註記「改名：舊→新」）。
-// 存成後照契約 B「同步」列改 state，再 refreshLibrary()＋render()；失敗（400／404／409）一句留在浮窗紅字，不關窗
+// 存：公司→既有 PUT /api/settings（company_name）；部門→PUT /api/categories/:name；流程→既有存新版本（PUT def，後端註記「改名：舊→新」）。
+// 存成後照「同步」列改 state，再 refreshLibrary()＋render()；失敗（400／404／409）一句留在浮窗紅字，不關窗
 async function renameSave() {
   const r = state.rename;
   if (!r || r.busy) return;
@@ -902,7 +907,7 @@ async function renameSave() {
       if (state.categoryPage?.category === r.cat) state.categoryPage.category = name;
       if (state.library?.cat === r.cat) state.library.cat = name;
       if (state.catClosed.has(r.cat)) { state.catClosed.delete(r.cat); state.catClosed.add(name); }
-      for (const [k, v] of [...wsByFlow]) if (k.startsWith(`${r.cat}/`)) { wsByFlow.delete(k); wsByFlow.set(`${name}/${k.slice(r.cat.length + 1)}`, v); } // 拆法輪 P3：暫存包跟著換鍵
+      for (const [k, v] of [...wsByFlow]) if (k.startsWith(`${r.cat}/`)) { wsByFlow.delete(k); wsByFlow.set(`${name}/${k.slice(r.cat.length + 1)}`, v); } // 暫存包跟著換鍵
       await refreshLibrary();
     } else {
       const w = { category: r.cat, id: r.id };
@@ -916,7 +921,7 @@ async function renameSave() {
         state.versions = await api('GET', `${wfPath(state.wf)}/versions`);
       }
       const stashed = wsByFlow.get(flowKey(w));
-      if (stashed?.cvWork) stashed.cvWork.name = name; // 拆法輪 P3：暫存包裡的畫布工作本也跟著改名
+      if (stashed?.cvWork) stashed.cvWork.name = name; // 暫存包裡的畫布工作本也跟著改名
       await refreshLibrary();
     }
     state.rename = null;
@@ -931,13 +936,13 @@ async function renameSave() {
 
 
 // ---------- 流程庫邊欄 ----------
-// 移植合併輪 U2a：三層樹的根節點（公司）——不是第五個全域項（不用 .calentry，T9① 只認四個）；點了開公司頁（分類頁特例 _company）
-// 拆法輪 P2：DEMO 版型 .company-row（小字「公司」＋粗體名＋鉛筆）；點名字仍走 open-company（語意不變）
+// 三層樹的根節點（公司）——不是第五個全域項（不用 .calentry，T9① 只認四個）；點了開公司頁（分類頁特例 _company）
+// DEMO 版型 .company-row（小字「公司」＋粗體名＋鉛筆）；點名字仍走 open-company（語意不變）
 function companyNodeHtml() {
   const now = state.categoryPage?.category === '_company';
   return `<div class="company-row${now ? ' active' : ''}"><div class="wf companynode${now ? ' now' : ''}"${now ? ' aria-current="page"' : ''} data-act="open-company" tabindex="0" role="button" title="組織層共用檔"><span class="company-icon"><i class="ph ph-buildings"></i></span><span class="tree-name"><small>組織</small><strong>${esc(companyName())}</strong></span></div>${renameBtnHtml('company', '', '', companyName())}</div>`;
 }
-// 多組織（調整輪）：側欄組織切換器——只有兩個以上組織才印出來（一個組織時側欄完全不變，畫面不多一列）。
+// 多組織：側欄組織切換器——只有兩個以上組織才印出來（一個組織時側欄完全不變，畫面不多一列）。
 // 名字已經在上面的 .company-row 印過了，這一列只講「換一個」；點開沿用「⋯」選單的 .rowmenu 浮層樣式，目前那個打勾。
 function orgSwitchHtml() {
   const list = state.orgs ?? [];
@@ -948,7 +953,7 @@ function orgSwitchHtml() {
     <button type="button" role="menuitem" data-act="org-manage"><i class="ph ph-gear"></i>管理組織</button></div>`;
   return `<div class="org-switch"><button type="button" class="org-switch-btn" data-act="org-menu" aria-haspopup="menu" aria-expanded="${!!state.orgMenu}" title="切換組織（共 ${list.length} 個）"><i class="ph ph-arrows-left-right"></i><span class="tree-name">切換組織</span><span class="org-count">${list.length}</span><i class="ph ph-caret-down"></i></button>${menu}</div>`;
 }
-// 拆法輪 P2：三層鉛筆（DEMO uxRenameButton）——滑過該列才顯示（同 .wfdel 手勢）；點了開改名浮窗（rename-open）
+// 三層鉛筆（DEMO uxRenameButton）——滑過該列才顯示（同 .wfdel 手勢）；點了開改名浮窗（rename-open）
 function renameBtnHtml(type, cat, id, name) {
   const label = type === 'company' ? '組織' : type === 'category' ? '分類' : ' Workflow';
   return `<button type="button" class="tree-rename" data-act="rename-open" data-type="${type}"${cat ? ` data-cat="${esc(cat)}"` : ''}${id ? ` data-id="${esc(id)}"` : ''} title="修改名稱" aria-label="修改${label}「${esc(name)}」名稱"><i class="ph ph-pencil-simple"></i></button>`;
@@ -959,17 +964,17 @@ function sideHtml() {
   for (const w of state.workflows) (byCat[w.category] ??= []).push(w);
   // 移植第一批 T9：分類樹＝<details>；點文字開分類頁（click 處理器 preventDefault 不讓 summary 原生切換）、點箭頭收合；
   // 收合狀態在 state.catClosed（重繪照它還原）；正在看的分類強制展開
-  // 拆法輪 P2：summary 內是 DEMO 的 .dept-row（方塊＋名＋流程數＋鉛筆），流程列包 .flow-branches／.flow-row（圓點＋名＋垃圾桶＋鉛筆）；
+  // summary 內是 DEMO 的 .dept-row（方塊＋名＋流程數＋鉛筆），流程列包 .flow-branches／.flow-row（圓點＋名＋垃圾桶＋鉛筆）；
   // details.cat 本身就是 DEMO 的 .dept-group（T9① 釘住 <details class="cat"> 字面，不另加 class）；「未分類」不能改名，沒有鉛筆
-  // 拆法輪 P3：新流程草稿（暫存在 wsByFlow 的 __draft__，或正在看的）在「未分類」群組多一列；沒有「未分類」就放樹底
-  const onPage = state.calendar || state.categoryPage || state.settings || state.library || state.dash || state.assets; // 同下方 nowFlow 的整頁條件（排版輪 L6 加共用素材）（拆法輪 P5 補儀表板：開著儀表板時 state.wf 還在，流程列不該仍標選中）
-  const draftNow = !onPage && draftLive(); // 排版輪 F2：只有成品卡、只有對話也算正在看的草稿（跟還原行為一致）
-  // 排版輪 F3（09-18）：草稿列挪到「＋ 建立新 Workflow」下方（本來沒有「未分類」部門時會掉到整棵樹最底端當灰字斜體，看不到）；
+  // 新流程草稿（暫存在 wsByFlow 的 __draft__，或正在看的）在「未分類」群組多一列；沒有「未分類」就放樹底
+  const onPage = state.calendar || state.categoryPage || state.settings || state.library || state.dash || state.assets; // 同下方 nowFlow 的整頁條件（ 加共用素材）（ 補儀表板：開著儀表板時 state.wf 還在，流程列不該仍標選中）
+  const draftNow = !onPage && draftLive(); // 只有成品卡、只有對話也算正在看的草稿（跟還原行為一致）
+  // （09-18）：草稿列挪到「＋ 建立新 Workflow」下方（本來沒有「未分類」部門時會掉到整棵樹最底端當灰字斜體，看不到）；
   // 印最後編輯時間（存進瀏覽器那一刻記的），旁邊一顆「丟掉」要二次確認
   const draftAgo = dsAt['__draft__'];
   const draftRow = wsByFlow.has('__draft__') || draftNow
     ? `<div class="flow-row draftrow${draftNow ? ' active' : ''}"><div class="wf${draftNow ? ' now' : ''}" data-act="open-draft" tabindex="0" role="button" title="還沒存進 Workflow 庫的草稿"><span class="flow-dot" aria-hidden="true"></span><span class="tree-name">草稿・還沒存</span>${draftAgo ? `<span class="draftago">${esc(agoText(draftAgo))}</span>` : ''}</div><button type="button" class="draftdrop" data-act="drop-draft" title="丟掉這份還沒存的草稿" aria-label="丟掉這份還沒存的草稿"><i class="ph ph-x"></i></button></div>` : '';
-  // 排版輪 L4（契約 B、驗收第 3 條）：收合箭頭常駐在部門列最前；Workflow 列滑過／聚焦才出鉛筆與「⋯」，刪除收進「⋯」（rowMenuHtml）；
+  // （驗收第 3 條）：收合箭頭常駐在部門列最前；Workflow 列滑過／聚焦才出鉛筆與「⋯」，刪除收進「⋯」（rowMenuHtml）；
   // div／i 做的可點元素帶 tabindex＋role，Enter／空白鍵由 keyActivate 轉 click
   const catHtml = Object.entries(byCat).map(([cat, wfs]) => {
     const now = state.categoryPage?.category === cat;
@@ -985,7 +990,7 @@ function sideHtml() {
   }).join('');
   const entry = (on, act, icon, label, title = '') => `<div class="wf calentry ${on ? 'now' : ''}" data-act="${act}" tabindex="0" role="button"${on ? ' aria-current="page"' : ''}${title ? ` title="${title}"` : ''}>
       <i class="${on ? 'ph-fill' : 'ph'} ${icon}"></i><span class="wfname">${label}</span>`;
-  // 「新增部門」「匯入」「垃圾桶」三列退場（驗收第 2 條：新增部門→組織頁 L7；匯入與垃圾桶→Workflow 庫 L5）；組織切換位 .org-switch 只在組織 >1 時輸出，本輪恆 1 不印
+  // 「新增部門」「匯入」「垃圾桶」三列退場（驗收第 2 條：新增部門→組織頁 L7；匯入與垃圾桶→Workflow 庫 L5）；組織切換位 .org-switch 只在組織 >1 時輸出，恆 1 不印
   return `<aside class="side">
     <div class="brand">剝繭<span>MAKE WORK CLEAR</span></div>
     <nav class="nav" aria-label="主要導覽">
@@ -1005,7 +1010,7 @@ function sideHtml() {
   </aside>`;
 }
 
-// ---------- 排版輪 L4：Workflow 列「⋯」選單（契約 B；共用元件，L5 Workflow 庫卡片、L8 標題旁同用）——掛 render 浮窗串尾；
+// ---------- Workflow 列「⋯」選單（共用元件，L5 Workflow 庫卡片、L8 標題旁同用）——掛 render 浮窗串尾；
 // 狀態全在 state.rowMenu {cat, id, name, x, y, sub}，輪詢重繪讀回；Esc、點選單外面關 ----------
 function rowMenuHtml() {
   const m = state.rowMenu;
@@ -1019,13 +1024,13 @@ function rowMenuHtml() {
     <button type="button" role="menuitem" class="danger" data-act="del-wf-row" data-cat="${esc(m.cat)}" data-id="${esc(m.id)}" data-name="${esc(m.name)}"><i class="ph ph-trash"></i>移到垃圾桶</button>
   </div>`;
 }
-// 選單位置：預設開在「⋯」右邊 6px；右邊放不下（Workflow 庫靠右的卡片）改開在左邊；靠底往上收（排版輪 L5）
+// 選單位置：預設開在「⋯」右邊 6px；右邊放不下（Workflow 庫靠右的卡片）改開在左邊；靠底往上收
 function rowMenuPos(r, vw, vh) {
   const w = 190; // 選單約寬（min-width 176＋框與子清單縮排）
   const x = r.right + 6 + w <= vw ? r.right + 6 : Math.max(8, r.left - 6 - w);
   return { x: Math.round(x), y: Math.round(Math.max(8, Math.min(r.top, vh - 190))) };
 }
-// 複製（上桌題 3a）：讀定義另存一份，名字加「（副本）」，同部門；不帶執行紀錄與版本（新 id 由後端配）
+// 複製（上桌a）：讀定義另存一份，名字加「（副本）」，同部門；不帶執行紀錄與版本（新 id 由後端配）
 async function copyWorkflow(cat, id) {
   const def = await api('GET', wfPath({ category: cat, id })); // 剛讀回的新物件，直接改名送出
   def.name = `${def.name}（副本）`;
@@ -1054,7 +1059,7 @@ function openLibrary() {
   closeCategory();
   closeSettings();
   closeAssets();
-  stashWorkspace(); // 拆法輪 P3：離開工作區先打包（畫布未存改動也帶著，不再問「丟掉？」）
+  stashWorkspace(); // 離開工作區先打包（畫布未存改動也帶著，不再問「丟掉？」）
   state.run = null;
   state.showTrash = false;
   state.corrupt = null;
@@ -1070,7 +1075,7 @@ function libraryCardsHtml() {
   if (!list.length) return `<div class="none library-empty" data-lib-empty>${q || l.cat ? '沒有符合的 Workflow' : '還沒有 Workflow：按右上「＋ 建立新 Workflow」或「匯入」'}</div>`;
   return flowCardsHtml(list);
 }
-// 流程卡（移植合併輪 U2b 抽出；排版輪 L5 照樣稿 uxFlowCards）：Workflow 庫與部門頁共用；「打開」走既有 open，「⋯」共用 rowMenuHtml
+// 流程卡（ 抽出； 照樣稿 uxFlowCards）：Workflow 庫與部門頁共用；「打開」走既有 open，「⋯」共用 rowMenuHtml
 // 步數＝GET /api/workflows 的 steps／human_steps（壞檔 null、舊回應沒有欄位＝讀不到；W7：定義檔沒有描述，這行取代描述）
 function flowCardsHtml(list) {
   return list.map((w) => `<article class="flowcard" data-lib-card="${esc(w.id)}"><span class="caption">${esc(catLabel(w.category))}</span><h2>${esc(w.name)}</h2>
@@ -1087,7 +1092,7 @@ function libraryHtml() {
     <div class="libgrid" id="lib-grid">${libraryCardsHtml()}</div></div>`;
 }
 
-// ---------- 移植合併輪 U2a：麵包屑（公司 › 分類 › 流程名［› extra］）——流程頁與執行頁標題上方；頂欄品牌塊不動（契約 §三） ----------
+// ---------- 麵包屑（公司 › 分類 › 流程名［› extra］）——流程頁與執行頁標題上方；頂欄品牌塊不動（契約 §三） ----------
 // 草稿（含還沒拆出草稿的「開始一件事」）只印「公司 › 草稿」。末節 aria-current 不可點，前面每節都是 data-act 可點
 function crumbsHtml(extra) {
   const items = [{ label: companyName(), act: 'open-company' }];
@@ -1101,7 +1106,7 @@ function crumbsHtml(extra) {
     : `<span data-act="${x.act}"${x.cat ? ` data-cat="${esc(x.cat)}"` : ''}>${esc(x.label)}</span>`}`).join('')}</nav>`;
 }
 
-// ---------- 工作區標題區（排版輪 L8，樣稿 uxFlowHead／uxDesignTabs）：麵包屑 → 標題列 → 步數一行 → 底線分頁 → 工具列 ----------
+// ---------- 工作區標題區（樣稿 uxFlowHead／uxDesignTabs）：麵包屑 → 標題列 → 步數一行 → 底線分頁 → 工具列 ----------
 function modeSeg() {
   const m = state.mode;
   const b = (k, t) => `<span class="${m === k ? 'on' : ''}" data-act="mode-${k}" tabindex="0" role="button">${t}</span>`;
@@ -1110,16 +1115,16 @@ function modeSeg() {
 
 function workHeadHtml() {
   const def = subjectDef();
-  // 排版輪 L9（契約 D-聊天，樣稿 uxChatPage newFlow）：還沒拆出草稿＝建立新 Workflow 頁——麵包屑回 Workflow 庫＋頁標題；沒東西可看，不印四模式
+  // （樣稿 uxChatPage newFlow）：還沒拆出草稿＝建立新 Workflow 頁——麵包屑回 Workflow 庫＋頁標題；沒東西可看，不印四模式
   if (!def) return `<nav class="crumbs" aria-label="資料夾路徑"><span data-act="open-library" tabindex="0" role="button">Workflow 庫</span><i class="ph ph-caret-right"></i><span aria-current="page">建立新 Workflow</span></nav>${pageHeadHtml('把工作說清楚', '先確認成品長相，再拆成可以逐步驗收的 Workflow。', '<button class="btn" data-act="open-library">回 Workflow 庫</button>')}`;
   const title = def.name;
   const saved = !subjectIsDraft() && !!state.wf;
-  // 版本標籤（驗收第 4 條）：標題旁、點了開履歷；有未存改動時「未儲存」取代版本號（拆法輪 P3 的暫存包會帶著它跨 Workflow）
+  // 版本標籤（驗收第 4 條）：標題旁、點了開履歷；有未存改動時「未儲存」取代版本號（ 的暫存包會帶著它跨 Workflow）
   const verTag = subjectIsDraft() ? '<span class="chip wait"><i class="ph ph-pencil-simple-line"></i>草稿・還沒存</span>'
     : !saved ? ''
       : state.cvDirty ? '<span class="chip wait vertag" data-act="mode-history" tabindex="0" role="button" title="有改動還沒存檔；點了看版本履歷"><i class="ph ph-pencil-simple-line"></i>未儲存</span>'
         : state.versions.length ? `<span class="chip vertag" data-act="mode-history" tabindex="0" role="button" title="點了看版本履歷"><i class="ph-fill ph-seal-check"></i>v${state.versions.at(-1).version}・現行</span>` : '';
-  // 拆法輪 P2：已存流程標題旁「修改名稱」（改名走存新版本，履歷多一版）；草稿沒有（名字在草稿裡改）
+  // 已存流程標題旁「修改名稱」（改名走存新版本，履歷多一版）；草稿沒有（名字在草稿裡改）
   const renameBtn = saved ? `<span class="btn sm2 btn-ghost" data-act="rename-open" data-type="flow" data-cat="${esc(state.wf.category)}" data-id="${esc(state.wf.id)}" tabindex="0" role="button" title="修改名稱"><i class="ph ph-pencil-simple"></i>修改名稱</span>` : '';
   // 驗收第 5 條：保留「Workflow 設定」，旁邊「⋯」（移至部門／複製／匯出／移到垃圾桶，共用 rowMenuHtml）；部門歸屬由麵包屑交代
   const actions = saved ? `<div class="actions"><button class="btn flowsetbtn" data-act="flow-settings" title="Workflow 設定：產出檔案、交貨查核、監工"><i class="ph ph-sliders-horizontal"></i>Workflow 設定</button><button class="btn iconb more" data-act="row-menu" data-cat="${esc(state.wf.category)}" data-id="${esc(state.wf.id)}" data-name="${esc(def.name)}" aria-haspopup="menu" aria-label="「${esc(def.name)}」更多動作"><i class="ph ph-dots-three"></i></button></div>` : '';
@@ -1133,7 +1138,7 @@ function workHeadHtml() {
     ${flowTabs}${onData ? '' : `<div class="flowtool">${modeSeg()}${tools}</div>`}`;
 }
 
-// 產檔權限列（產檔輪）：已存流程才有，草稿不顯示；開關即 PUT 定義（permissions.files）。健檢「修這裡」會捲到這列並亮 1.5 秒
+// 產檔權限列：已存流程才有，草稿不顯示；開關即 PUT 定義（permissions.files）。健檢「修這裡」會捲到這列並亮 1.5 秒
 function permRowHtml() {
   if (subjectIsDraft() || !state.wf) return '';
   const on = state.wf.def.permissions?.files === true;
@@ -1146,8 +1151,8 @@ function permRowHtml() {
   </div>`;
 }
 
-// 交貨查核開關（交貨查核輪）：已存流程才有，草稿不顯示；缺省＝開。切換即 PUT 定義（def.check.enabled）
-// 監工輪加兩個：查核列右邊的子開關「數字對原始資料」（def.check.facts）、下一列的監工總開關（def.supervisor.enabled）
+// 交貨查核開關：已存流程才有，草稿不顯示；缺省＝開。切換即 PUT 定義（def.check.enabled）
+// 加兩個：查核列右邊的子開關「數字對原始資料」（def.check.facts）、下一列的監工總開關（def.supervisor.enabled）
 function checkRowHtml() {
   if (subjectIsDraft() || !state.wf) return '';
   const on = state.wf.def.check?.enabled !== false;
@@ -1180,9 +1185,9 @@ function flowSettingsModalHtml() {
     ${permRowHtml()}${checkRowHtml()}
   </div></div>`;
 }
-// ---------- 「本次資料」分頁（調整輪：核可的任務卡版，原型 PROTO/設定與本次資料-任務卡-demo.html）----------
+// ---------- 「本次資料」分頁（核可的任務卡版，原型 PROTO/設定與本次資料-任務卡-demo.html）----------
 // 主欄＝四張準備工作卡（繼續上次執行／填寫這次的值／查看這次會帶入／確認執行選項），點一張在主欄內嵌展開（.focus-editor）；
-// 右欄＝「開始這次執行」摘要卡（必填 x/y、開跑健檢、交貨查核、進度條、開始）。常駐開跑健檢卡（L11）留在主欄最後，「修這裡」照舊。
+// 右欄＝「開始這次執行」摘要卡（必填 x/y、開跑健檢、交貨查核、進度條、開始）。常駐開跑健檢卡留在主欄最後，「修這裡」照舊。
 const openRunsNow = () => (state.wf?.runs ?? []).filter((r) => r.status === 'paused' || r.status === 'running');
 // 必填進度：上傳欄位算「上傳好的檔名」——跟健檢看的是同一份值（healthValues）；
 // 「填好了沒」也照健檢 R7 param-unfilled 的判法（必填欄位還停在預設值＝還沒填），卡上的數字才不會跟健檢卡打架
@@ -1227,7 +1232,7 @@ function dataCardsHtml(def, open) {
 }
 // 展開區：一次只開一張（state.dataCard，沒動過＝填值那張）
 function dataDetailHtml(def, open) {
-  const box = (title, sub, body, chip = '') => `<section class="focus-editor" data-focus="${open}"><header><div><h3>${title}${hint(sub)}</h3></div>${chip}</header>${body}</section>`;  // 說明文案輪：四個分頁的說明收進標題旁
+  const box = (title, sub, body, chip = '') => `<section class="focus-editor" data-focus="${open}"><header><div><h3>${title}${hint(sub)}</h3></div>${chip}</header>${body}</section>`;  // 四個分頁的說明收進標題旁
   if (open === 'resume') return box('繼續上次執行', '接回去就從停的地方繼續；這一趟不用跑完的整筆刪掉。', resumeHtml() || '<p class="note">目前沒有跑到一半的執行。</p>');
   if (open === 'data') {
     const { total, done } = requiredNow(def);
@@ -1309,7 +1314,7 @@ async function uploadRunFile(key, file) {
   recheckHealth();
 }
 const RUN_UPLOAD_ACCEPT = '.docx,.xlsx,.pdf,.md,.txt,.csv,.json,.html'; // 同參考檔選檔框（index.html #ref-file）；後端 RUN_UPLOAD_EXTS 再擋一次
-// 大跑輪：本次附件＝檔案版的本次補充，不綁欄位（保留鍵同伺服器 RUN_ATTACH_KEY）；走同一個上傳框與同一條 run-uploads 通道
+// 本次附件＝檔案版的本次補充，不綁欄位（保留鍵同伺服器 RUN_ATTACH_KEY）；走同一個上傳框與同一條 run-uploads 通道
 const RUN_ATTACH_KEY = '__run__';
 const runAttachBoxHtml = () => uploadBoxHtml({ key: RUN_ATTACH_KEY, label: '本次附件' }, '這一趟每個 AI 步驟都看得到這個檔；只給這一趟用，下次不留。');
 // 開始時多帶的兩欄：上傳好的 token、本次補充；都沒有＝不帶（body 與現況逐字相同）
@@ -1338,7 +1343,7 @@ function flowMemModalHtml() {
   </div></div>`;
 }
 
-// ---------- 移植合併輪 U4b：流程頁右側「流程資料夾」（demo workflowFolderAside）——父層兩鈕→目前流程→流程參考檔→每次執行→上層共用檔一行 ----------
+// ---------- 流程頁右側「流程資料夾」（demo workflowFolderAside）——父層兩鈕→目前流程→流程參考檔→每次執行→上層共用檔一行 ----------
 // 兩個 details 的開合在 state.folderOpen（輪詢重繪讀回，不靠 DOM）；「打開」走 todo-go 原鍵、成品檔走 fileChipHtml 既有預覽；草稿與執行頁不印
 const FOLDER_MAX = 3;
 async function refreshFolder() {
@@ -1367,7 +1372,7 @@ function runStatusChip(r) {
         : r.steps.failed > 0 ? '<span class="chip bad"><i class="ph ph-warning-circle"></i>有步驟失敗</span>'
           : '<span class="chip wait"><i class="ph ph-hand-palm"></i>等你</span>';
 }
-// 一趟執行一列（右欄「Workflow 資料」與履歷「執行紀錄」共用，排版輪 L8 從 flowAsideHtml 抽出）
+// 一趟執行一列（右欄「Workflow 資料」與履歷「執行紀錄」共用， 從 flowAsideHtml 抽出）
 function folderRunHtml(wf, r) {
   const finalFiles = [...new Set(r.finals.map((f) => f.file).filter(Boolean))];
   const others = r.files.filter((n) => !finalFiles.includes(n)).length;
@@ -1410,7 +1415,7 @@ function flowAsideHtml() {
     <p class="sharedline">${sharedLine}</p>
   </aside>`;
 }
-// ---------- 排版輪 L8：右欄步驟檢視器（五題第 1 題 A；樣稿 inspector）——步驟｜Workflow 資料兩分頁 ----------
+// ---------- 右欄步驟檢視器（五題第 1 題 A；樣稿 inspector）——步驟｜Workflow 資料兩分頁 ----------
 // 步驟＝state.canvasSel 那一步（清單「查看」、畫布點卡都寫它）；Workflow 資料＝原資料夾（flowAsideHtml）＋每步會帶入一行。草稿只有步驟頁
 function inspectorHtml() {
   const def = cvDef();
@@ -1422,7 +1427,7 @@ function inspectorHtml() {
   return `<aside class="right"><div class="panel inspector" data-inspector>${seg}${tab === 'data' ? flowAsideHtml() + flowMemLineHtml() : inspectorStepHtml(def)}</div></aside>`;
 }
 // 步驟序號（畫布、清單卡、檢視器、執行頁同一套：拓樸序、task 與畫面上看得到的分岔各佔一號）
-// 排版輪 L14b：藏在卡片出口的擇一分岔（cvAbsorbable）畫面上沒有卡，不佔號——否則畫布 STEP 01 之後直接跳 03
+// 藏在卡片出口的擇一分岔（cvAbsorbable）畫面上沒有卡，不佔號——否則畫布 STEP 01 之後直接跳 03
 function stepSeqMap(def) {
   const seq = new Map();
   const preds = cvPreds(def);
@@ -1497,13 +1502,13 @@ function sharedModalHtml() {
 }
 
 // ---------- 聊天模式 ----------
-// 排版輪 L9（契約 D-聊天，樣稿 uxChatPage）：表單卡在上（caption＋h3＋多行框＋右下送出）→對話紀錄一則一張 .msg 卡→成品卡在最後；右欄 chatAsideHtml
+// （樣稿 uxChatPage）：表單卡在上（caption＋h3＋多行框＋右下送出）→對話紀錄一則一張 .msg 卡→成品卡在最後；右欄 chatAsideHtml
 function chatModeHtml() {
   const c = state.chat;
   const saved = !!state.wf && !subjectIsDraft();
   const fresh = !subjectDef(); // 還沒拆出草稿＝建立新 Workflow
   const msgs = c.messages.map((m, i) => {
-    if (m.role === 'memnotice') return memNoticeLine(m.notice, { where: 'chat', idx: i }); // 記憶輪（M2）：訊息下的一行「記下來了…不要記」
+    if (m.role === 'memnotice') return memNoticeLine(m.notice, { where: 'chat', idx: i }); // （M2）：訊息下的一行「記下來了…不要記」
     const [cls, who] = m.role === 'user' ? ['me', '<span class="chip">你</span>'] : m.role === 'error' ? ['err', '<span class="chip bad">剝繭</span>'] : ['ai', '<span class="chip quiet">剝繭</span>'];
     return `<div class="msg ${cls}">${who}<p>${esc(m.text)}</p></div>`;
   }).join('');
@@ -1514,7 +1519,7 @@ function chatModeHtml() {
   const disabled = state.claude === false || c.busy ? ' disabled' : '';
   // 驗收第 1 條：連不上且影響操作時講明白——拆解與修改都要 Claude，紅卡放送出鈕旁
   const down = state.claude === false ? '<div class="claudecard" data-claude-card><i class="ph-fill ph-warning-circle"></i><span>Claude 連不上：拆解與修改都要用到它。</span><button type="button" class="btn sm2" data-act="reconnect">重新連線</button></div>' : '';
-  const savedDraftRow = subjectIsDraft() && !c.shape // 拆法輪 P4：成品卡在時還沒有草稿可存
+  const savedDraftRow = subjectIsDraft() && !c.shape // 成品卡在時還沒有草稿可存
     ? `<div class="btns draftrow">
         <button class="btn btn-primary" data-act="save-draft"><i class="ph ph-tray-arrow-down"></i>存進 Workflow 庫</button>
         <button class="btn btn-ghost" data-act="clear-draft">清空</button>
@@ -1531,22 +1536,24 @@ function chatModeHtml() {
     ${sample}${savedDraftRow}</div>
     <div class="chatlog" id="chatlog">${msgs}${busy}${shapeCardHtml()}</div></div>`;
 }
-// 聊天右欄（契約 D-聊天）：「這次拆解會參考」逐項（真數字，原成品卡底一行搬來）＋「你保有最後決定」（樣稿原句）
+// 聊天右欄：「這次拆解會參考」逐項（真數字，原成品卡底一行搬來）＋「你保有最後決定」（樣稿原句）
 function chatAsideHtml() {
   const rows = shapeRefsItems(state.chat.refs).map((t) => `<div class="refrow">${esc(t)}</div>`).join('');
   return `<aside class="right chatside"><div class="panel"><h3>這次拆解會參考</h3>${rows}</div>
     <div class="panel"><h3>你保有最後決定${hint('先填好的答案都有依據。改掉不符合的地方，再按「照這樣拆」。')}</h3></div></aside>`;
 }
 
-// 成品長相卡（拆法輪 P4，契約 I；樣稿 uxProductCard）：拆解器第一趟回的七格＋資料從哪來＋部門＋兩鈕。
-// 排版輪 L9（題 5-4）：七格一直是輸入框，打字即寫回 state.chat.shape（shapeInput），輪詢整頁重繪讀 state 不洗字。
+// 成品長相卡（樣稿 uxProductCard）：拆解器第一趟回的七格＋資料從哪來＋部門＋兩鈕。
+// 七格一直是輸入框，打字即寫回 state.chat.shape（shapeInput），輪詢整頁重繪讀 state 不洗字。
 function shapeCardHtml() {
   const c = state.chat;
   if (!c.shape) return '';
   const dis = c.busy ? ' disabled' : '';
   const cells = SHAPE_LABELS.map(([k, label]) => {
     const cell = c.shape[k] ?? { value: '', basis: '預設' };
-    return `<label><span class="label">${label}<span class="basis">${esc(BASIS_TXT[cell.basis] ?? cell.basis)}</span></span><input class="shapein" id="shape-in-${k}" data-keep data-shape-input="${k}" value="${esc(cell.value)}"${cell.value ? '' : ' placeholder="（空）"'} autocomplete="off"${dis}></label>`;
+    // 選了簡報，「長度」問的就不是頁數而是張數——只換提示字，不動你打的值
+    const unit = k === 'length' ? `<span class="unit" id="shape-len-unit">${lenUnit(c.fileKind)}</span>` : '';
+    return `<label><span class="label">${label}<span class="basis">${esc(BASIS_TXT[cell.basis] ?? cell.basis)}</span>${unit}</span><input class="shapein" id="shape-in-${k}" data-keep data-shape-input="${k}" value="${esc(cell.value)}"${cell.value ? '' : ' placeholder="（空）"'} autocomplete="off"${dis}></label>`;
   }).join('');
   const srcRows = (c.sources ?? []).map((s) => {
     const [txt, cls] = SOURCE_CHIP[s.from] ?? SOURCE_CHIP.paste;
@@ -1561,23 +1568,68 @@ function shapeCardHtml() {
     <h3>資料從哪來</h3>
     <div class="srclist">${srcRows}</div>
     <label class="label" for="shape-category">分類</label><select id="shape-category">${cats}</select>
+    ${shapeMakeHtml(c, dis)}
     <div class="shapeacts">
       <button class="btn" data-act="shape-redo"${dis}><i class="ph ph-arrow-counter-clockwise"></i>重擬</button>
       <button class="btn btn-primary" data-act="shape-confirm"${dis}><i class="ph ph-check"></i>照這樣拆</button></div></div>`;
 }
-// 拆法輪 W2：「這次拆解會參考」（純顯示；數字不進第二趟 body）。排版輪 L9：卡底一行改聊天右欄逐項。
+
+// （已定案三案草稿選 C）：卡從中間切開——上半「成品長相」是你要什麼，
+// 下半「怎麼做出來」是系統要交代給你的三件：交出什麼檔、會照哪些規範、有沒有舊作品照著像。
+// 三件都放在拆之前，因為拆完才發現格式不對＝整條流程要重拆。
+const FILE_KINDS = [['md', '文字檔'], ['docx', 'Word'], ['xlsx', 'Excel'], ['pptx', '簡報']];
+// 後端 store.safeFileName 的規矩，前端先講一次（同一套字面：控制字元、路徑符號、..、系統保留字）
+const WIN_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
+function badSampleName(name) {
+  const n = String(name ?? '').trim();
+  if (!n) return '這個檔沒有名字，換一份再選。';
+  if (/[\x00-\x1f\x7f]/.test(n)) return '檔名裡有看不見的控制字元，先把檔案改名再選。';
+  if (/[\\/:*?"<>|]/.test(n) || n.includes('..')) return `檔名「${n}」不能用（有路徑符號），先把檔案改名再選。`;
+  if (WIN_RESERVED.test(n)) return `檔名「${n}」是系統保留字，先把檔案改名再選。`;
+  return null;
+}
+// 簡報論張、其他論頁字分鐘——只是提示，值一律照你打的
+const lenUnit = (kind) => (kind === 'pptx' ? '幾張' : '字數／頁數');
+function shapeMakeHtml(c, dis) {
+  const kind = c.fileKind ?? 'md';
+  const chips = FILE_KINDS.map(([v, label]) =>
+    `<button class="fkind${v === kind ? ' on' : ''}" data-act="shape-kind" data-kind="${v}"${dis} aria-pressed="${v === kind}">${label}</button>`).join('')
+    // PDF 還沒接（要嵌中文字型，與離線化衝突；已定案延後）——出現但點不下去，比整個藏起來誠實
+    + '<span class="fkind off" title="還沒好：PDF 要把中文字型嵌進檔案裡，那件事跟「完全離線」衝突，還沒決定怎麼做">PDF・還沒好</span>';
+  const r = c.refs;
+  const n = (v, unit) => (v === null || v === undefined ? '讀不到' : `${v} ${unit}`);
+  const rules = !r ? '<p class="note">讀取中⋯</p>' : [
+    ['組織規範', n(r.company, '份')], ['分類守則', n(r.dept, '份')],
+    ['你的習慣（關於你）', r.paused ? '暫停中' : n(r.core, '條')],
+  ].map(([k, v]) => `<div class="rrow"><span class="rnm">${k}</span><span class="rsz">${esc(v)}</span></div>`).join('');
+  // class 名不能叫 .rules——聊天步驟卡的「後面每步會守」早就佔了這個名字，
+  // 而且它的規則寫在後面、權重相同＝它會贏，這框會被畫成左縮 20px 的靛藍直條。
+  const sample = c.sample
+    ? `<div class="smpfile"><span>${esc(c.sample.name)}</span><button class="btn btn-mini" data-act="shape-sample-del"${dis}>移除</button></div>`
+    : `<button class="btn btn-mini" data-act="shape-sample"${dis}><i class="ph ph-paperclip"></i>選一份舊作品</button>`;
+  return `<div class="shapemake">
+    <div class="shapehead"><h3>怎麼做出來</h3></div>
+    <label class="label">交出什麼檔</label>
+    <div class="fkinds">${chips}</div>
+    <label class="label">會照這些規範${hint('這三樣會原封不動放進每一步交給 AI 的工作單，交貨查核也拿它們逐條對。要改內容：組織規範在組織頁、分類守則在分類頁、關於你在設定→個人與記憶。')}</label>
+    <div class="shaperules">${rules}</div>
+    <label class="label">照著像的舊作品<span class="opt">選填</span>${hint('丟一份你以前做過、樣子對的東西上來。AI 會照它的結構、章節順序與語氣做這一份，但數字一律用這次的資料，不會抄舊的。')}</label>
+    ${sample}
+  </div>`;
+}
+// 「這次拆解會參考」（純顯示；數字不進第二趟 body）。卡底一行改聊天右欄逐項。
 // null＝還在讀；某段 null＝那段印「讀不到」。「工人能」照 composer 的能耐表：查網總開關關了就不印「上網查」；讀參考檔與產 Word、Excel 目前是固定能力
 function shapeRefsItems(r) {
   if (!r) return ['讀取中⋯'];
   const n = (v, unit) => (v === null ? '讀不到' : `${v} ${unit}`);
-  const can = [...(r.web ? ['上網查'] : []), '讀參考檔', '產 Word、Excel'].join('／');
+  const can = [...(r.web ? ['上網查'] : []), '讀參考檔', '產 Word、Excel、簡報'].join('／');
   return [r.paused ? '關於你 暫停中' : `關於你 ${n(r.core, '條')}`, `組織規範 ${n(r.company, '份')}`, `分類規範 ${n(r.dept, '份')}`, `工人能：${can}`];
 }
 // 拆解器第一趟會帶什麼（同 server /api/compose 組 ctx 的四樣：關於你 selectCore、公司規範、部門規範、能耐表）。
 // 已存流程（重拆）：關於你／公司／部門直接讀開流程時抓好的 state.wfMemory／state.shared；草稿沒有這兩包→自己打
 // GET /api/shared/_company/files（卡上分類不是「未分類」再多打那層）與 GET /api/memory/cards?bucket=profile 照 selectCore 算
-// （表達層全帶＋內容層場合對上的前 3）；查網開關兩邊都讀 GET /api/settings。換了流程就不寫回。
-// 排版輪 L9：聊天右欄常駐，沒卡也抓（草稿聊天由 render 補抓；refsFor＝正在抓的那份 chat，抓的中途不重複打）
+//（表達層全帶＋內容層場合對上的前 3）；查網開關兩邊都讀 GET /api/settings。換了流程就不寫回。
+// 聊天右欄常駐，沒卡也抓（草稿聊天由 render 補抓；refsFor＝正在抓的那份 chat，抓的中途不重複打）
 let refsFor = null;
 async function refreshShapeRefs() {
   const c = state.chat;
@@ -1612,7 +1664,7 @@ function countCore(cards, cat) {
   const content = live.filter((k) => k.layer === 'content' && (k.scope?.level === 'all' || (k.scope?.level === 'category' && k.scope.category === cat))).length;
   return live.filter((k) => k.layer === 'expression').length + Math.min(content, 3);
 }
-// 成品卡格子打字（排版輪 L9 題 5-4，取代點改收尾）：寫回 state.chat.shape；跟拆解器原樣不同＝依據改「你說的」，
+// 成品卡格子打字（取代點改收尾）：寫回 state.chat.shape；跟拆解器原樣不同＝依據改「你說的」，
 // 改回原樣＝依據回拆解器給的（自我介紹／分類守則…），不假冒成使用者說的。原樣快照第一次打字時取、出新卡時 sendChat 清掉
 function shapeInput(k, v) {
   const c = state.chat;
@@ -1634,7 +1686,7 @@ function stopMark(n) {
 function execChipHtml(n) {
   return `<span class="chip">${n.executor === 'human' ? '<i class="ph ph-user"></i>你來' : 'AI'}</span>`;
 }
-// 清單大卡（排版輪 L8，樣稿 list()）：序號＋名稱＋執行者／停點＋查看（只選取，右欄檢視器顯示）＋編輯；產出／來源、出口入口小 chip。
+// 清單大卡：序號＋名稱＋執行者／停點＋查看（只選取，右欄檢視器顯示）＋編輯；產出／來源、出口入口小 chip。
 // 09-18：卡上不再印任務指示（中間那行）——卡片變細，指示看右欄檢視器；分岔卡的一行說明保留（它沒有產出／來源）。
 // 出口入口先照定義檔現況判斷（多條 next／接並行點＝同時做、接分岔＝擇一、兩條以上進來＝等全部）；畫布資料模型 cvModel 是 L13
 function stepListHtml(def) {
@@ -1657,7 +1709,7 @@ function stepListHtml(def) {
     }
     const cls = n.executor === 'human' ? ' humanmarked' : n.stop_point === 'always' ? ' stopmarked' : '';
     const out = n.executor === 'human' ? (n.handoff || '你交出的內容') : ([n.output_type, n.output_file && `.${n.output_file} 檔`].filter(Boolean).join('・') || '文字產出');
-    // 排版輪 L13：出口入口 chip 讀畫布同一份模型（cvModel）——同時做／擇一 N 條、等全部／任一條到
+    // 出口入口 chip 讀畫布同一份模型（cvModel）——同時做／擇一 N 條、等全部／任一條到
     const lines = model.edges.filter((e) => e.from === n.id).length;
     const marks = [
       model.exits[n.id] === 'all' ? `同時做 ${lines} 條` : model.exits[n.id] === 'one' ? `擇一 ${lines} 條` : '',
@@ -1712,15 +1764,15 @@ function proposalsHtml() {
 
 // 移植第一批 T10：本次資料的值列（從 listModeHtml 搬出，內容原樣）——健檢的「沒有步驟用到」chip、習慣選項 chip 都在這
 function paramRowsHtml(def) {
-  // 欄位值改多行框（T5）：單行時跟原本一樣高，貼一封信也放得下；「沒有步驟用到」chip 由健檢結果決定顯隱
+  // 欄位值改多行框：單行時跟原本一樣高，貼一封信也放得下；「沒有步驟用到」chip 由健檢結果決定顯隱
   const unused = subjectIsDraft() ? [] : (preflightFor(def)?.unused_params ?? []);
-  // 值列：placeholder＝該欄位的 hint（要貼什麼）；required 的標「必填」chip；值框下方＝習慣選項 chip（記憶輪 M3b，沒卡的欄位什麼都不顯示）
+  // 值列：placeholder＝該欄位的 hint（要貼什麼）；required 的標「必填」chip；值框下方＝習慣選項 chip
   const row = (p) => `
     <div class="param"><span>${esc(p.label)}${p.required ? '<span class="chip wait req" title="開跑前健檢：這欄沒填不給跑">必填</span>' : ''}<span class="chip unusedchip" data-unused="${esc(p.key)}" ${unused.includes(p.key) ? '' : 'hidden'} title="這個欄位沒有任何步驟的指示引用到——填了也沒人看">沒有步驟用到</span></span>
       <div class="val"><textarea class="autogrow" rows="1" data-param="${esc(p.key)}" placeholder="${esc(p.hint ?? '')}">${esc(state.paramNow[p.key] ?? p.default)}</textarea>${habitChipsHtml(p)}</div></div>`;
-  // 移植合併輪 U4b：必填在前、選填收進「其他資料（選填）」；每列 markup 原樣（data-param／必填 chip／習慣 chip 一個不少，地雷 8）。
+  // 必填在前、選填收進「其他資料（選填）」；每列 markup 原樣（data-param／必填 chip／習慣 chip 一個不少，地雷 8）。
   // 收摺開合＝state.folderOpen.optional（使用者點過），沒點過＝這次有填到選填欄位就開
-  // 排版輪 L11（題 2 A）：上傳欄位不是文字框——必填文字欄位之後一排上傳框（必填與選填都在這，選填不收進 details）
+  // 上傳欄位不是文字框——必填文字欄位之後一排上傳框（必填與選填都在這，選填不收進 details）
   const text = def.params.filter((p) => p.input !== 'file');
   const uploads = def.params.filter((p) => p.input === 'file').map(uploadBoxHtml).join('');
   const required = text.filter((p) => p.required);
@@ -1751,7 +1803,7 @@ function listModeHtml() {
       </div>`
     : `<div class="param expander" style="justify-content:flex-start;color:var(--ink-400);font-size:12px" data-act="add-param"><i class="ph ph-plus"></i> 新增欄位</div>`;
   if (subjectIsDraft()) {
-    // 存檔下拉（記憶輪 M1c）：拆解器問過分類、草稿頂層有 category 就預選；「不分類」＝存進「未分類」（它是一般分類，先建目錄）
+    // 存檔下拉：拆解器問過分類、草稿頂層有 category 就預選；「不分類」＝存進「未分類」（它是一般分類，先建目錄）
     const opt = (v, label) => `<option value="${esc(v)}" ${v === def.category ? 'selected' : ''}>${esc(label)}</option>`;
     const catOptions = state.categories.filter((c) => c !== '未分類').map((c) => opt(c, c)).join('') + opt('未分類', '不分類');
     const saveRow = state.savingDraft
@@ -1765,7 +1817,7 @@ function listModeHtml() {
           <button class="btn btn-primary" data-act="save-draft"><i class="ph ph-tray-arrow-down"></i>存進 Workflow 庫</button>
           <button class="btn btn-ghost" data-act="clear-draft">清空</button>
         </div>`;
-    // 拆法輪 W1（契約 A「開關關掉」）：連跑拆出來的草稿沒讓你確認過成品卡→頂端一行灰字印拆解器自己定的長相（只印有值的格子，不可改）
+    // （「開關關掉」）：連跑拆出來的草稿沒讓你確認過成品卡→頂端一行灰字印拆解器自己定的長相（只印有值的格子，不可改）
     const a = state.chat.autoShape;
     const autoLine = a ? `<p class="note" data-autoshape>成品長相：${esc(SHAPE_LABELS.filter(([k]) => a[k]?.value).map(([k, l]) => `${l} ${a[k].value}`).join('・'))}（自動確認）</p>` : '';
     return `${autoLine}<div class="sub">草稿——想調哪裡切「聊天」用講的，或切「畫布」直接拉。</div>
@@ -1774,7 +1826,7 @@ function listModeHtml() {
       ${saveRow}`;
   }
   // 移植第一批 T10：開跑表單搬到「本次資料」分頁（dataTabHtml）；兩格記憶收成一行＋查看。
-  // 排版輪 L8：開跑提示句退場（工具列「準備執行」取代）；欄位定義收進清單底可收合卡「執行需要的資料」（開合 state.folderOpen.fields，新增中強制開）
+  // 開跑提示句退場（工具列「準備執行」取代）；欄位定義收進清單底可收合卡「執行需要的資料」（開合 state.folderOpen.fields，新增中強制開）
   const open = state.addingParam || state.folderOpen?.fields;
   return `<div class="steplist">
     ${resumeHtml()}
@@ -1811,7 +1863,7 @@ function startCheckHtml() {
 }
 
 // ---------- 畫布模式 ----------
-// 常用預設列（D19 複製式）：選了＝把內容複製進欄位；☆＝把目前欄位內容存成常用；－＝刪掉選中的常用
+// 常用預設列：選了＝把內容複製進欄位；☆＝把目前欄位內容存成常用；－＝刪掉選中的常用
 function presetRowHtml(field, targetId) {
   const list = state.presets[field] ?? [];
   return `<div class="presetrow">
@@ -1830,15 +1882,15 @@ function textFieldHtml(id, label, val, ph, presetField) {
     <textarea id="${id}" class="feedbackin advarea" data-keep placeholder="${esc(ph)}">${esc(kept(id) ?? val ?? '')}</textarea>`;
 }
 
-// 參考檔區（D19）：勾選＝這一步的附件；範本填空選一檔
-// 移植合併輪 U4c：三段「這條流程／部門／公司」各自勾（demo v8RefSections）。勾選鍵＝`scope:name`（同名兩層不撞，壓測 A3）；
+// 參考檔區：勾選＝這一步的附件；範本填空選一檔
+// 三段「這條流程／部門／公司」各自勾（demo v8RefSections）。勾選鍵＝`scope:name`（同名兩層不撞，壓測 A3）；
 // 流程段存字串（舊流程原樣）、上層存 {scope,name}（scope＝company｜category，同 U1b 後端）；規範類每步自動帶，不進勾選
 const attKey = (a) => (typeof a === 'string' ? `flow:${a}` : `${a?.scope}:${a?.name}`);
 function refFilesInner(n, checkedOverride) {
   const att = checkedOverride ?? new Set((n.attachments ?? []).map(attKey));
   const sh = state.shared ?? {};
   const box = (scope, name) => `<input type="checkbox" id="ref-${scope}-${esc(name)}" name="ref-${scope}-${esc(name)}" data-att="${esc(name)}" data-att-scope="${scope}" ${att.has(`${scope}:${name}`) ? 'checked' : ''}>`;
-  // .docx／.xlsx 參考檔＝產檔範本（產檔輪）：檔名旁標「範本」，產出規格頁「範本填空」選它就叫工人套用；刪除鈕只有流程層
+  // .docx／.xlsx 參考檔＝產檔範本：檔名旁標「範本」，產出規格頁「範本填空」選它就叫工人套用；刪除鈕只有流程層
   const flowRows = (state.wfFiles ?? []).map((f) => `<label class="refrow">${box('flow', f)}<span class="wfname">${esc(f)}${/\.(docx|xlsx)$/i.test(f) ? '<span class="tplchip" title="Word／Excel 範本：在「產出規格」頁選為範本，工人會照它產檔">範本</span>' : ''}</span>
     <i class="ph ph-trash wfdel2" data-act="ref-del" data-name="${esc(f)}" title="刪掉這個參考檔"></i></label>`).join('');
   const sharedRows = (scope, d) => (d ? (d.refs ?? []).map((f) => `<label class="refrow">${box(scope, f.name)}<span class="wfname" title="${esc(f.name)}">${esc(f.name)}</span></label>`).join('') || '<p class="note">尚無參考</p>'
@@ -1888,8 +1940,8 @@ async function refreshRefSection() {
 }
 
 // 抽屜內容（D16／D17：設定型與內容型同一個地方；雙擊節點打開）
-// 版面（排版輪 L10 起）：置中彈窗一頁到底（輸入來源→這一步會帶→名稱→你來處理／停點→任務｜驗收→交付→更多設定→刪除／取消／套用）
-// 監工三個勾（監工輪）：監工「可以」改這一步的什麼。缺省與後端 supervisor.supervisorFlags 同一組值
+// 版面（ 起）：置中彈窗一頁到底（輸入來源→這一步會帶→名稱→你來處理／停點→任務｜驗收→交付→更多設定→刪除／取消／套用）
+// 監工三個勾：監工「可以」改這一步的什麼。缺省與後端 supervisor.supervisorFlags 同一組值
 const supFlags = (n) => {
   const sv = n && typeof n.supervisor === 'object' && n.supervisor && !Array.isArray(n.supervisor) ? n.supervisor : {};
   const pick = (v, dflt) => (typeof v === 'boolean' ? v : dflt);
@@ -1904,7 +1956,7 @@ function supChecksHtml(n) {
 }
 
 function canvasEditorHtml(n, def) {
-  // 排版輪 L10（契約 E，樣稿 edit(i)）：置中彈窗一頁到底——子頁退場；文字欄 data-keep，輪詢重繪讀回打到一半的字（換節點／套用／關窗由 dropStepKeep 清）
+  // （樣稿 edit(i)）：置中彈窗一頁到底——子頁退場；文字欄 data-keep，輪詢重繪讀回打到一半的字（換節點／套用／關窗由 dropStepKeep 清）
   const kind = kindOf(n);
   const kv = (id, v) => esc(kept(id) ?? v ?? '');
   const lb = (id, s) => `<label class="label" for="${id}">${s}</label>`;
@@ -1921,7 +1973,7 @@ function canvasEditorHtml(n, def) {
         <div class="cvcol">${lb('cv-review', '驗收重點（選填）')}<textarea id="cv-review" class="feedbackin advarea" data-keep placeholder="你檢查時要看什麼；AI 交件前也會照它自檢">${kv('cv-review', n.review_focus)}</textarea></div>
       </div>`;
     const tfoot = foot('<button class="btn btn-ghost btn-danger" data-act="cv-delete">刪除這步</button><span class="note grow">這裡是後台原文，{{欄位}} 代碼在前台會自動變成欄位值。</span>');
-    // 排版輪 L13（契約 H）：出口擇一＝怎麼挑＋每條線的條件；兩條以上線進來＝等全部／任一條到（欄位 cv- 開頭、data-keep，換節點由 dropStepKeep 清）
+    // 出口擇一＝怎麼挑＋每條線的條件；兩條以上線進來＝等全部／任一條到（欄位 cv- 開頭、data-keep，換節點由 dropStepKeep 清）
     const model = cvModel({ nodes: def?.nodes ?? [] });
     const byId = new Map((def?.nodes ?? []).map((x) => [x.id, x]));
     const choose = model.exits[n.id] === 'one' ? `${lb('cv-choose', '擇一：怎麼挑')}<textarea id="cv-choose" class="feedbackin advarea" data-keep placeholder="例：看報帳金額決定走哪條">${kv('cv-choose', model.choose[n.id])}</textarea>
@@ -1950,9 +2002,9 @@ function canvasEditorHtml(n, def) {
         <optgroup label="產真檔（需開產檔權限）">
           <option value="docx" ${n.output_file === 'docx' ? 'selected' : ''}>Word .docx</option>
           <option value="xlsx" ${n.output_file === 'xlsx' ? 'selected' : ''}>Excel .xlsx</option>
-        </optgroup>
-        <optgroup label="第二批（先降級存 .md）">
           <option value="pptx" ${n.output_file === 'pptx' ? 'selected' : ''}>簡報 .pptx</option>
+        </optgroup>
+        <optgroup label="還沒接（先降級存 .md）">
           <option value="pdf" ${n.output_file === 'pdf' ? 'selected' : ''}>PDF .pdf</option>
         </optgroup>
       </select>
@@ -2037,8 +2089,8 @@ function canvasModeHtml() {
       <button class="btn btn-primary" data-act="cv-new-blank"><i class="ph ph-plus"></i>從一個空白步驟開始拉</button></div>`;
   }
   const issues = cvIssueSet(def);
-  // 排版輪 L8：「存檔」與「有改動未存檔」搬到頁面工具列（workHeadHtml），這裡不重複。
-  // 排版輪 L14（款 A）：頂上工具列列、整行長說明、調色盤退場——復原／重做／縮放／全覽／「？」在畫布右上，基本提示常駐左下（驗收第 6 條）
+  // 「存檔」與「有改動未存檔」搬到頁面工具列（workHeadHtml），這裡不重複。
+  // （款 A）：頂上工具列列、整行長說明、調色盤退場——復原／重做／縮放／全覽／「？」在畫布右上，基本提示常駐左下（驗收第 6 條）
   return `<div class="cvstage">${window.BJCanvas.html(def, state.canvasSel, issues, cvModel(def), cvCanvasOpts(def))}</div>`;
 }
 function cvIssueSet(def) {
@@ -2073,7 +2125,7 @@ function cvCanvasOpts(def) {
 }
 const cvEdgeKey = (e) => `${e.from}>${e.to}>${e.arm ?? ''}`;
 
-// 步驟編輯（D18；排版輪 L10 契約 E）：清單「編輯」、檢視器「完整編輯」、畫布雙擊都開這一個——畫面正中彈窗、背景霧化，掛 render 浮窗串尾（地雷 5）
+// 步驟編輯（D18；清單「編輯」、檢視器「完整編輯」、畫布雙擊都開這一個——畫面正中彈窗、背景霧化，掛 render 浮窗串尾（地雷 5）
 function drawerHtml() {
   if (!state.drawerOpen || state.run || !(state.mode === 'list' || state.mode === 'canvas') || !(state.flowTab === 'design')) return (state.drawerTabFor = null, ''); // T10：本次資料分頁不開；沒畫出來＝忘記節點（下次打開不放回舊暫存字）
   const def = cvDef();
@@ -2086,11 +2138,11 @@ function drawerHtml() {
     <div class="heading"><h2>${title}</h2><button class="btn btn-ghost iconb" data-act="cv-close-drawer" aria-label="關閉"><i class="ph ph-x"></i></button></div>${state.stepAsk ? stepAskHtml() : ''}
     ${canvasEditorHtml(n, def)}</div></div>`;
 }
-// 排版輪 L10：彈窗文字欄暫存字（state.keep 的 cv-* 鍵）——換節點、套用、關窗就清，別讓上一次沒套用的字跑進下一次
+// 彈窗文字欄暫存字（state.keep 的 cv-* 鍵）——換節點、套用、關窗就清，別讓上一次沒套用的字跑進下一次
 function dropStepKeep() { for (const k of Object.keys(state.keep)) if (k.startsWith(keepKey('cv-'))) delete state.keep[k]; }
 function closeStepModal() { state.drawerOpen = false; state.drawerTabFor = null; state.cvMore = null; state.stepAsk = false; dropStepKeep(); } // 未套用的改動丟掉（同原抽屜「關閉」）
 
-// ---------- 排版輪 L12 附帶（L10 覆核新風險）：有未套用改動時，背景點一下不關（閃框）、Esc／✕／取消先問 ----------
+// ---------- 有未套用改動時，背景點一下不關（閃框）、Esc／✕／取消先問 ----------
 // 彈窗欄位值：有 id 的輸入框／選單／勾選＋參考檔勾選（data-att，鍵 att:層:檔名）；「常用片段⋯」選單只是帶入器，不算
 function stepFormValues(dlg) {
   const out = {};
@@ -2140,7 +2192,7 @@ function nudgeStepModal() {
   setTimeout(() => dlg.classList.remove('nudge'), 500);
 }
 
-// 彈窗「輸入來源」（T5；排版輪 L10 改一行灰字，樣稿「輸入來源：…」）：只給 AI 步驟；清單來自 /api/preflight 的 inputs，空的標紅
+// 彈窗「輸入來源」（T5； 改一行灰字，樣稿「輸入來源：…」）：只給 AI 步驟；清單來自 /api/preflight 的 inputs，空的標紅
 // 健檢一條輸入來源→一句（抽屜「輸入來源」清單與執行頁右欄「來源：」共用，U6b）：後端的 label 已是整句（含《》／「設定欄位：」）就照用；只給名字才包句子
 const INPUT_WRAP = {
   upstream: (x) => `上一步《${x}》的產出`,
@@ -2169,7 +2221,7 @@ function historyModeHtml() {
     return `<div class="empty-c"><div class="ic"><i class="ph ph-clock-counter-clockwise"></i></div>
       <h3>草稿還沒有履歷</h3><p>存進 Workflow 庫之後，每次它學新招或你動手改都會留一版，隨時退回。</p></div>`;
   }
-  // 排版輪 L8（樣稿 uxHistoryPage）：執行紀錄｜Workflow 版本兩分頁（state.historyTab），各一張白卡；執行紀錄＝原資料夾「每次執行」列（全列不收）
+  // （樣稿 uxHistoryPage）：執行紀錄｜Workflow 版本兩分頁（state.historyTab），各一張白卡；執行紀錄＝原資料夾「每次執行」列（全列不收）
   const tab = state.historyTab === 'versions' ? 'versions' : 'runs';
   const t = (k, label) => `<span class="${tab === k ? 'on' : ''}" data-act="history-tab" data-tab="${k}" tabindex="0" role="button">${label}</span>`;
   const seg = `<div class="seg histtabs">${t('runs', '執行紀錄')}${t('versions', 'Workflow 版本')}</div>`;
@@ -2222,7 +2274,7 @@ function importPreviewHtml() {
     confirmBtn = `<button class="btn gray" data-act="confirm-import">仍要匯入</button>
       <button class="btn btn-primary" data-act="cancel-import">不匯入</button>`;
   }
-  // 排版輪 L5：頁標題元件＋白卡（按鈕與 data-act 不變）
+  // 頁標題元件＋白卡（按鈕與 data-act 不變）
   return `${pageHeadHtml(`匯入預覽：${def.name}`, `共 ${def.nodes.length} 步。匯入後放在「匯入」分類，資料來源要在你自己這邊重新接（別人的連線不會跟過來）。`)}
     ${banner}
     <div class="panel importpanel">${steps}
@@ -2259,14 +2311,14 @@ function stepPill(step) {
     case 'waiting_human': return '<span class="chip wait"><i class="ph-fill ph-user"></i>人工處理</span>';
     case 'waiting_branch': return '<span class="chip wait"><i class="ph ph-arrows-split"></i>待選擇路徑</span>';
     case 'waiting_data': return '<span class="chip wait"><i class="ph-fill ph-warning"></i>資料不全</span>';
-    case 'waiting_check': return '<span class="chip wait"><i class="ph-fill ph-hand-palm"></i>等你</span>'; // 移植合併輪 U6a：三欄化後左軌也用這顆，被攔的步不能灰成「等待」（地雷 3）；U6b：字用「等你」——「查核攔下」留給同列的 checkChip，不印兩顆同字
+    case 'waiting_check': return '<span class="chip wait"><i class="ph-fill ph-hand-palm"></i>等你</span>'; // 三欄化後左軌也用這顆，被攔的步不能灰成「等待」（地雷 3）；U6b：字用「等你」——「查核攔下」留給同列的 checkChip，不印兩顆同字
     case 'failed': return '<span class="chip bad"><i class="ph-fill ph-warning"></i>出錯</span>';
     case 'skipped': return '<span class="chip quiet" style="opacity:.6">跳過</span>';
     default: return '<span class="chip quiet">等待</span>';
   }
 }
 
-// 查核結果 chip（交貨查核輪）：missing 由資料不全卡呈現、off／skipped 不標；usage＝這一步的查核用量 {input,output}
+// 查核結果 chip：missing 由資料不全卡呈現、off／skipped 不標；usage＝這一步的查核用量 {input,output}
 const CHECK_CHIP = {
   pass: ['quiet', 'ph-fill ph-shield-check', '查過'],
   'redo-pass': ['quiet', 'ph-fill ph-arrows-clockwise', '重做過一次'],
@@ -2282,7 +2334,7 @@ function checkChip(step, usage) {
   return `<span class="chip ${tone}"><i class="${icon}"></i>${txt}${n ? ` · 查核 ${fmtInt(n)} token` : ''}</span>`;
 }
 
-// 標黃行（交貨查核輪）：查核沒攔下、但值得你看一眼的兩種情形
+// 標黃行：查核沒攔下、但值得你看一眼的兩種情形
 const FLAG_TXT = { 'conclusion-changed': '這一步把結論或排序改了', format: '格式跟要求不同' };
 function flagsHtml(step) {
   return (step?.check?.flags ?? [])
@@ -2291,7 +2343,7 @@ function flagsHtml(step) {
     .join('');
 }
 
-// ---------- 文字成品真排版（產檔輪）：POST /api/render 按內容雜湊快取；拿到前先顯示原文，回來只補該區塊不整頁重繪 ----------
+// ---------- 文字成品真排版：POST /api/render 按內容雜湊快取；拿到前先顯示原文，回來只補該區塊不整頁重繪 ----------
 const mdHash = (s) => { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0; return `${h.toString(36)}-${s.length}`; };
 const mdTextByKey = new Map(); // 「看原文／看排版」切換時要拿得到原文
 const mdPending = new Set();
@@ -2339,14 +2391,14 @@ function applyMdView(key) {
   if (btn) btn.outerHTML = mdToggleHtml(key);
 }
 
-// 成品檔 chip（產檔輪）：點開頁內預覽浮窗，下載在浮窗裡
+// 成品檔 chip：點開頁內預覽浮窗，下載在浮窗裡
 const FILE_ICON = { docx: 'ph-file-doc', xlsx: 'ph-file-xls', pdf: 'ph-file-pdf', csv: 'ph-file-csv', pptx: 'ph-file-ppt', txt: 'ph-file-txt', html: 'ph-file-html' };
 function fileChipHtml(cat, id, rid, name, note) {
   const ext = String(name).split('.').pop().toLowerCase();
   return `<span class="chip expander filechip" data-act="preview-file" data-cat="${esc(cat)}" data-id="${esc(id)}" data-rid="${esc(rid)}" data-fname="${esc(name)}" title="${esc(note ?? '點開看內容，浮窗裡可下載')}"><i class="ph ${FILE_ICON[ext] ?? 'ph-file-text'}"></i>${esc(name)}</span>`;
 }
 
-// ---------- 成品預覽浮窗（產檔輪）：GET …/files/:name/preview 依 kind 渲染；狀態在 state.preview，輪詢重繪不會關掉 ----------
+// ---------- 成品預覽浮窗：GET …/files/:name/preview 依 kind 渲染；狀態在 state.preview，輪詢重繪不會關掉 ----------
 async function openPreview(cat, id, rid, name) {
   const pv = { cat, id, rid, name, data: null, err: null, sheet: 0 };
   state.preview = pv;
@@ -2355,7 +2407,7 @@ async function openPreview(cat, id, rid, name) {
   catch (e) { pv.err = e.message; }
   if (state.preview === pv) render();
 }
-// 排版輪 L7（題 3b）：共用檔查看共用同一個浮窗——pv.shared＝層（_company｜部門名）；GET …/files/:name/view（md／txt 原文、docx 排版）
+// 共用檔查看共用同一個浮窗——pv.shared＝層（_company｜部門名）；GET …/files/:name/view（md／txt 原文、docx 排版）
 async function openSharedPreview(scope, name) {
   const pv = { shared: scope, name, data: null, err: null, sheet: 0 };
   state.preview = pv;
@@ -2399,7 +2451,7 @@ function previewHtml() {
   </div></div>`;
 }
 
-// 監工交代＋插話（監工輪）：停點卡與查核卡共用。
+// 監工交代＋插話：停點卡與查核卡共用。
 // 「監工交代 ▸」只有真的有話時才出現（只帶 route 的分岔交接不算）；插話框只要卡在停點就給——
 // 話會等到下一次交接時才交給監工消化，所以記下後這裡改標灰字「已交代：…」。
 function supervisorNoteHtml(node) {
@@ -2669,12 +2721,12 @@ function runHtml() {
   const doneCount = def.nodes.filter((n) => run.steps[n.id].status === 'done').length;
   const isDone = run.status === 'done';
   const started = new Date(run.started_at);
-  // 欄位值可多行了（T5）：摘要列只露第一行前 40 字，整份放 title
+  // 欄位值可多行了：摘要列只露第一行前 40 字，整份放 title
   const brief = (v) => { const s = String(v ?? '').split('\n')[0]; return s.length > 40 ? `${s.slice(0, 40)}⋯` : s; };
   const meta = `${started.toLocaleString('zh-TW', { hour12: false })} 開跑 · 這次設定：${def.params.map((p) => `<span title="${esc(run.params[p.key])}">${esc(brief(run.params[p.key]))}</span>`).join('・') || '（無）'}`;
 
-  // 排版輪 L12（契約 G；五題第 4 題 A）：中欄只放一步——看的那步＝state.runInspect ?? 目前這步。
-  // 左軌點到做完／還沒跑的步＝歷史視圖（U6c）；點到等你／出錯的步（並行支線不是目前這步的）＝同目前這步的畫法、可操作（報備 9）
+  // 中欄只放一步——看的那步＝state.runInspect ?? 目前這步。
+  // 左軌點到做完／還沒跑的步＝歷史視圖；點到等你／出錯的步（並行支線不是目前這步的）＝同目前這步的畫法、可操作（報備 9）
   let histNode = historyNodeOf(run);
   // 在支線上處理完（還看著同一步、那步不再等你）＝回到目前這步；改點別的步／看做完的步則一直留在歷史（L12b：記住看的是哪一步，不然看過支線後第一次點別步會被彈回）
   if (histNode && state.runInspectLive === histNode.id && !isLiveStep(run.steps[histNode.id])) { state.runInspect = null; histNode = null; }
@@ -2700,7 +2752,7 @@ function runHtml() {
 // time_pending＝「時間沒解析出來、等你定時刻」，跟 waiting_* 一樣是等你處理，只是名字沒有 waiting 前綴——
 // 漏掉它，執行頁就不把那步當活的，左軌不亮、中欄也不指過去（2026-09-18 審查）
 function isLiveStep(step) { const s = String(step?.status ?? ''); return s.startsWith('waiting') || s === 'time_pending' || s === 'failed'; }
-// 排版輪 L14b：與畫布同一套號碼（stepSeqMap）；藏在卡片出口的擇一分岔沒有自己的號碼，標它那張卡的號碼
+// 與畫布同一套號碼（stepSeqMap）；藏在卡片出口的擇一分岔沒有自己的號碼，標它那張卡的號碼
 function stepSeqOf(run, node) {
   const seq = stepSeqMap(run.def);
   return seq.get(node.id) ?? seq.get(cvPreds(run.def).get(node.id)?.[0]) ?? 0;
@@ -2728,7 +2780,7 @@ function runStepHtml(run, node, other) {
 // 跑完（樣稿 uxRunComplete）：一張白卡——成品列（旁邊看原文、可展開）→這趟的紀錄（整趟監工總結）→提議→回饋
 function runCompleteHtml(run) {
   const def = run.def;
-  // 人做步驟有交出內容的也列（T5），標「（你交出的）」
+  // 人做步驟有交出內容的也列，標「（你交出的）」
   const artifacts = topoNodes(def)
     .filter((n) => kindOf(n) === 'task' && run.steps[n.id].status === 'done' && (n.executor === 'ai' || run.steps[n.id].output))
     .map((n) => {
@@ -2740,7 +2792,7 @@ function runCompleteHtml(run) {
           ${mdBlock(s.edited_output ?? s.output, key)}</details>`;
     }).join('');
   const feedbackBox = state.feedbackSent
-    ? feedbackReplyHtml(state.feedbackSent) // 記憶輪（M2）：回覆照 memory_notice 講記成卡了／沒記成
+    ? feedbackReplyHtml(state.feedbackSent) // （M2）：回覆照 memory_notice 講記成卡了／沒記成
     : `<div class="card proposal">
           回來丟一句結果吧——「主管說哪裡好、哪裡不行」，它會學起來。
           <div class="chatin" style="margin-top:8px"><input id="run-feedback-input" placeholder="例：主管說數據太細了⋯">
@@ -2770,7 +2822,7 @@ function taskRowHtml(run, node, step, seq) {
   return h;
 }
 // 本機時區的「YYYY-MM-DDTHH:mm」（datetime-local 的值格式；後端 scheduler.fmtLocal 同一式）
-// 精簡: 本檔另有數處手寫的日期字串組法，之後一起收斂到這一支；本輪不順手改既有呼叫點
+// 精簡: 本檔另有數處手寫的日期字串組法，之後一起收斂到這一支；不順手改既有呼叫點
 const localStamp = (d) => { const p = (n) => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`; };
 const atHourFrom = (base, days, hour) => { const x = new Date(base); x.setDate(x.getDate() + days); x.setHours(hour, 0, 0, 0); return x; };
 const nextMondayAt = (hour) => { const x = new Date(); const dow = x.getDay() || 7; return atHourFrom(x, (8 - dow) % 7 || 7, hour); };
@@ -2787,7 +2839,7 @@ async function resumeTimeCall(node, at) {
 // 時間未定（time_pending）：wait_until 指的那一步沒交出看得懂的時刻，等你定。
 // 出口是後端的 resume-time：給時刻＝排到那時候自動往下；不給＝現在就往下走。
 // 沒有這張卡的話，run 會永久卡住，而且一直被算成「上一輪還沒跑完」在每次到點發重疊警示。
-// 列管 L011：時間定好之後狀態轉 waiting_time，但中欄本來什麼都不印——
+// 時間定好之後狀態轉 waiting_time，但中欄本來什麼都不印——
 // 使用者剛按完「就排這個時間」，畫面一空，不知道到底排到了沒、排到幾點。
 function waitingTimeCardHtml(node, step) {
   const at = step.wake_at ? new Date(step.wake_at) : null;
@@ -2826,7 +2878,7 @@ function timeCardHtml(node, step) {
   </div>`;
 }
 
-// 停著／出錯那步的卡：中欄那一步直接印（卡片函式與 data-act 一字不動；排版輪 L12 起支線也可操作）
+// 停著／出錯那步的卡：中欄那一步直接印（卡片函式與 data-act 一字不動； 起支線也可操作）
 function stepCardHtml(node, step) {
   if (kindOf(node) === 'branch') return step.status === 'waiting_branch' ? branchChoiceCardHtml(node) : step.status === 'failed' ? failCardHtml(node, step) : '';
   switch (step.status) {
@@ -2841,17 +2893,17 @@ function stepCardHtml(node, step) {
   }
 }
 
-// ---------- 移植合併輪 U6c：歷史視圖（demo runPage 的 inspect／historical）——左軌點了做過的一步，中欄只剩那一步 ----------
+// ---------- 歷史視圖（demo runPage 的 inspect／historical）——左軌點了做過的一步，中欄只剩那一步 ----------
 // 看的那步：state.runInspect 指到的節點；＝目前這步（currentNodeOf）不算歷史；指到不存在／fork／join（輪詢中被刪）退回 null
 function historyNodeOf(run) {
   const id = state.runInspect;
   if (id == null) return null;
   const node = run.def.nodes.find((n) => n.id === id);
   if (!node || ['fork', 'join'].includes(kindOf(node))) { state.runInspect = null; return null; }
-  return id === currentNodeOf(run) && run.status !== 'done' ? null : node; // 排版輪 L12：跑完的 run 中欄是成品，點最後一步也要看得到它的歷史
+  return id === currentNodeOf(run) && run.status !== 'done' ? null : node; // 跑完的 run 中欄是成品，點最後一步也要看得到它的歷史
 }
 // 橫幅「你在看…回到目前」＋一張白卡（STEP NN・歷史→步名→那一步的列→產出框（edited_output 優先並標「你改過的版本」）→後面每步會守）；
-// 等你／出錯的步不走這裡（排版輪 L12：runHtml 交給 runStepHtml 可操作，inert 唯讀退場）；recordHtml／成品／回饋框不印
+// 等你／出錯的步不走這裡（runHtml 交給 runStepHtml 可操作，inert 唯讀退場）；recordHtml／成品／回饋框不印
 function runHistoryHtml(run, node) {
   const step = run.steps[node.id] ?? { status: 'pending' };
   const isBranch = kindOf(node) === 'branch';
@@ -2867,8 +2919,8 @@ function runHistoryHtml(run, node) {
   return `${banner}<div class="panel runstep-now hist"><div class="stephead"><span class="caption">STEP ${String(seq).padStart(2, '0')}</span><span class="chip">歷史</span></div><h2>${esc(node.title)}</h2>${row}${body}${step.status === 'done' ? editRulesHtml(node, step) : ''}</div>`;
 }
 
-// ---------- 移植合併輪 U6a：執行頁三欄——左軌（這次的進度）、中欄（排版輪 L12：只放一步）、右欄（四格摺疊）；demo runPage() ----------
-// 「目前這步」：第一個停著等你的（waiting_*），否則出錯的（排版輪 L12：中欄只放一步，出錯卡要看得到），否則進行中的，否則最後一個做完的，否則第一步
+// ---------- 執行頁三欄——左軌（這次的進度）、中欄（只放一步）、右欄（四格摺疊）；demo runPage() ----------
+// 「目前這步」：第一個停著等你的（waiting_*），否則出錯的（中欄只放一步，出錯卡要看得到），否則進行中的，否則最後一個做完的，否則第一步
 function currentNodeOf(run) {
   const nodes = topoNodes(run.def).filter((n) => !['fork', 'join'].includes(kindOf(n)));
   const st = (n) => run.steps?.[n.id]?.status ?? '';
@@ -2876,17 +2928,17 @@ function currentNodeOf(run) {
   return (nodes.find(waits) ?? nodes.find((n) => st(n) === 'failed') ?? nodes.find((n) => st(n) === 'running') ?? [...nodes].reverse().find((n) => st(n) === 'done') ?? nodes[0])?.id ?? null;
 }
 
-// 左軌：每個非 fork／join 節點一顆鈕；點了＝切成那一步的歷史視圖（U6c）；active＝看的那步（沒點就是目前這步）
+// 左軌：每個非 fork／join 節點一顆鈕；點了＝切成那一步的歷史視圖；active＝看的那步（沒點就是目前這步）
 function progressRailHtml(run) {
   const currentId = currentNodeOf(run);
-  const activeId = state.runInspect ?? (run.status === 'done' ? null : currentId); // 排版輪 L12：跑完中欄是成品，沒有哪一步亮著
-  const seqMap = stepSeqMap(run.def); // 排版輪 L14b：與畫布同一套號碼
+  const activeId = state.runInspect ?? (run.status === 'done' ? null : currentId); // 跑完中欄是成品，沒有哪一步亮著
+  const seqMap = stepSeqMap(run.def); // 與畫布同一套號碼
   const items = topoNodes(run.def).filter((n) => !['fork', 'join'].includes(kindOf(n))).map((node) => {
     const step = run.steps?.[node.id] ?? { status: 'pending' };
     const n = step.status === 'done' ? '<i class="ph ph-check"></i>' : step.status === 'skipped' ? '—' : kindOf(node) === 'branch' ? '<i class="ph ph-arrows-split"></i>' : seqMap.get(node.id);
-    // 還沒跑到的步（pending／skipped 且不是目前這步）照 demo 灰掉不可點（U6c 覆核該修）；running／done／failed／waiting 都可點
+    // 還沒跑到的步（pending／skipped 且不是目前這步）照 demo 灰掉不可點；running／done／failed／waiting 都可點
     const future = ['pending', 'skipped'].includes(step.status) && node.id !== currentId;
-    // 列管 L025：並行兩支同時等你時，currentNodeOf 只挑得出第一支，左軌就只有那一顆亮。
+    // 並行兩支同時等你時，currentNodeOf 只挑得出第一支，左軌就只有那一顆亮。
     // 每一顆自己看自己的狀態，等你的全部標起來；active（＝現在看的那步）照舊只有一顆。
     const waiting = String(step.status).startsWith('waiting') || step.status === 'time_pending';
     return `<button class="runstep${node.id === activeId ? ' active' : ''}" data-act="run-inspect" data-node="${esc(node.id)}" title="${future ? '還沒跑到' : esc(node.title)}"${future ? ' disabled' : ''}${waiting ? ' data-waiting' : ''}><span class="n">${n}</span><span class="t">${esc(node.title)}</span>${stepPill(step)}</button>`;
@@ -2900,7 +2952,7 @@ function sideNodeOf(run) {
   return run.def.nodes.find((n) => n.id === curId) ?? run.def.nodes[0] ?? {};
 }
 
-// 右欄「這步會用到的資料」（U6b）：共用檔行讀 step.memory.shared（runner 送工作單前寫的快照＝開跑鎖的那版）＋「哪幾份」＋來源一行；
+// 右欄「這步會用到的資料」：共用檔行讀 step.memory.shared（runner 送工作單前寫的快照＝開跑鎖的那版）＋「哪幾份」＋來源一行；
 // 不重印 memoryUsedHtml（會共用 memOpen 雙開）——記憶卡看卡片上那行
 function sideDataHtml(run, node, step) {
   if (kindOf(node) !== 'task') return '<p class="note">分岔不帶資料，只照 Workflow 判路</p>';
@@ -2926,7 +2978,7 @@ function sideSourceHtml(run, node) {
   return `<p class="note" data-srcline>來源：${list.length ? esc(list.join('、')) : '沒有指定輸入'}</p>`;
 }
 
-// 右欄：「目前這步」＋四格 <details>（開合狀態在 state.sideOpen，summary 走 side-toggle；重繪讀回）＋底部「當時指示」（U6b）
+// 右欄：「目前這步」＋四格 <details>（開合狀態在 state.sideOpen，summary 走 side-toggle；重繪讀回）＋底部「當時指示」
 function sideInfoHtml(run) {
   const node = sideNodeOf(run);
   const step = run.steps?.[node.id] ?? {};
@@ -2951,7 +3003,7 @@ function sideInfoHtml(run) {
   const pname = kindOf(node) === 'branch' ? `${node.id}-判路.txt` : kindOf(node) === 'task' && node.executor === 'ai' ? `${node.id}.txt` : null;
   const promptBtn = pname && step.status && step.status !== 'pending'
     ? `<div class="sidefoot"><button class="btn sm2" data-act="run-prompt" data-pname="${esc(pname)}" data-ptitle="${esc(node.title ?? '')}"><i class="ph ph-scroll"></i>當時指示</button></div>` : '';
-  // 排版輪 L12（題 3f）：第二塊「本次補充」只在開跑時有寫才出
+  // 第二塊「本次補充」只在開跑時有寫才出
   const note = String(run.note ?? '').trim() ? `<div class="panel sidenote"><h3>本次補充</h3><p class="note">${esc(run.note)}</p></div>` : '';
   return `<aside class="sideinfo"><div class="panel"><h3>目前這步</h3><div class="curstep"><b>${esc(node.title ?? '')}</b>${stepPill(step)}</div>
     ${fold('sup', '監工交代', sup)}
@@ -2960,7 +3012,7 @@ function sideInfoHtml(run) {
     ${fold('attempts', '每次交卷', attempts)}${promptBtn}</div>${note}</aside>`;
 }
 
-// 「當時指示」卷宗浮窗（U6b）：儀表板每步列與執行頁右欄共用同一張；掛 .layout 外（地雷 5）；view＝{title, text}
+// 「當時指示」卷宗浮窗：儀表板每步列與執行頁右欄共用同一張；掛 .layout 外（地雷 5）；view＝{title, text}
 function promptModalHtml(view) {
   if (!view) return '';
   return `<div class="modalback" data-act="prompt-back"><div class="modal" style="max-width:680px">
@@ -2971,7 +3023,7 @@ function promptModalHtml(view) {
     </div></div>`;
 }
 
-// ---------- 儀表板（儀表板輪）：要你處理／系統通知／最近完成／用量監控 ----------
+// ---------- 儀表板：要你處理／系統通知／最近完成／用量監控 ----------
 // 離開儀表板的唯一出口（照 closeCalendar 的教訓）：任何切去別的畫面的動作都要走這裡
 function closeDash() {
   if (!state.dash) return;
@@ -3013,7 +3065,7 @@ async function reloadPageData() {
   else if (state.calendar) await loadCalendar();
 }
 
-// 待辦與通知的列（原行事曆側欄，儀表板輪搬家至此）；移植合併輪 U5：提議列拆去右欄「流程提議」（proposalRowsHtml），每列右側琥珀「等你」
+// 待辦與通知的列（原行事曆側欄，搬家至此）；提議列拆去右欄「流程提議」（proposalRowsHtml），每列右側琥珀「等你」
 const todoItems = () => state.todos.filter((t) => t.kind !== 'proposal');
 function todoRowsHtml() {
   return todoItems().map((t) => {
@@ -3033,7 +3085,7 @@ function proposalRowsHtml() {
       <div class="acts"><button class="btn sm2 btn-primary" data-act="todo-open-wf" data-cat="${esc(t.workflow.category)}" data-id="${esc(t.workflow.id)}">去看提議</button></div></div>`).join('')
     || '<div class="railempty">沒有新提議</div>';
 }
-// 接下來的安排（U5）：本月行事曆裡還沒到的剝繭排程與等時刻步驟，前兩筆；Google 快照、錯過、已跳過、暫停不算（工程報備 7）
+// 接下來的安排：本月行事曆裡還沒到的剝繭排程與等時刻步驟，前兩筆；Google 快照、錯過、已跳過、暫停不算（工程報備 7）
 function upcomingHtml(d) {
   if (!d.calendar) return '<div class="railempty">讀不到接下來的安排</div>';
   const p = (n) => String(n).padStart(2, '0');
@@ -3042,7 +3094,7 @@ function upcomingHtml(d) {
   const next = (d.calendar.events ?? []).filter((e) => ['auto', 'human', 'makeup'].includes(e.kind) && `${e.date}T${e.time}` >= nowKey).slice(0, 2);
   const rows = next.map((e) => `<div class="upcoming"><span class="uptime">${Number(e.date.slice(5, 7))}/${Number(e.date.slice(8, 10))} ${esc(e.time)}</span>
       <div class="upbody"><b>${esc(e.title)}</b><span class="meta">${e.kind === 'human' ? '你出面' : 'AI 自動'}</span></div></div>`).join('');
-  return rows || '<div class="railempty">這個月沒有安排</div>'; // 「查看」在卡片右上（排版輪 L5，dashHtml）
+  return rows || '<div class="railempty">這個月沒有安排</div>'; // 「查看」在卡片右上
 }
 
 function noticeSectionHtml() {
@@ -3059,7 +3111,7 @@ function noticeSectionHtml() {
   }).join('');
   const doneRows = `<div class="donelist">${state.notices.done.map((n) =>
     `<div class="item"><div class="ti">${esc(n.title)}</div><div class="de">${esc(n.result ?? '')}・${new Date(n.resolved_at ?? n.created_at).toLocaleString('zh-TW', { hour12: false })}</div></div>`).join('') || '<div class="railempty">還沒有已處理的通知</div>'}</div>`;
-  // 排版輪 L5（驗收第 9 條）：已處理收進 <details>「已處理（N）」；開關由 state.noticesOpen 控（summary 點擊擋原生切換），輪詢重繪讀回
+  // （驗收第 9 條）：已處理收進 <details>「已處理（N）」；開關由 state.noticesOpen 控（summary 點擊擋原生切換），輪詢重繪讀回
   return `${nRows || '<div class="railempty">沒有新通知</div>'}
     <details class="donefold"${state.noticesOpen ? ' open' : ''}><summary data-act="notices-toggle-done"><i class="ph ph-caret-right"></i>已處理（${state.notices.done.length}）</summary>${doneRows}</details>`;
 }
@@ -3117,7 +3169,7 @@ function dashStepRows(key) {
   return `<div style="margin-top:var(--s2)">${rows}</div>`;
 }
 
-// 用量（U5）：帳本一筆的輸入 tokens（含快取兩桶）；日期鍵＝本機日期（表格與小圖同一把尺，晚上跑的不會被 UTC 切到隔天）
+// 用量：帳本一筆的輸入 tokens（含快取兩桶）；日期鍵＝本機日期（表格與小圖同一把尺，晚上跑的不會被 UTC 切到隔天）
 const usageIn = (u) => (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0);
 const dayKey = (x) => { const d = new Date(x); const p = (n) => String(n).padStart(2, '0'); return Number.isNaN(d.getTime()) ? '' : `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`; };
 // 近 30 天逐日小長條（純 SVG，30 根＝每日 輸入＋輸出，最右今天 accent、其餘灰、無軸）；large＝浮窗大圖
@@ -3172,20 +3224,20 @@ function usageSectionHtml(d) {
     : '<div class="railempty">還沒有用量紀錄——這次改版之後跑的才會記帳，舊紀錄沒有數字</div>';
 }
 
-// 儀表板（移植合併輪 U5 照 demo home()）：左欄 要你處理＋最近完成（預設 3 張、查看全部）；右欄 接下來的安排／系統通知／流程提議／用量
+// 儀表板（ 照 demo home()）：左欄 要你處理＋最近完成（預設 3 張、查看全部）；右欄 接下來的安排／系統通知／流程提議／用量
 function dashHtml() {
   const d = state.dash;
   if (!d.data) return '<div class="empty-c"><div class="skel" style="height:200px"></div></div>';
-  const memRow = memExceptionRowHtml(); // 記憶輪（M4）：第一列＝記憶例外，算進「要你處理」的數
+  const memRow = memExceptionRowHtml(); // （M4）：第一列＝記憶例外，算進「要你處理」的數
   const todoRows = memRow + todoRowsHtml();
-  const todoCount = todoItems().length + (memRow ? 1 : 0); // 提議另成一塊（排版輪 L5 左欄第三塊），不算進「要你處理」
+  const todoCount = todoItems().length + (memRow ? 1 : 0); // 提議另成一塊（ 左欄第三塊），不算進「要你處理」
   const recent = d.data.recent;
   const cards = (d.showAll ? recent : recent.slice(0, 3)).map(dashRunCard).join('')
     || '<div class="railempty">還沒有任何執行紀錄——從左邊點開一條 Workflow 按「開始」</div>';
   const showAll = recent.length > 3 ? `<span class="pbtn" data-act="dash-show-all"><i class="ph ph-caret-${d.showAll ? 'up' : 'down'}"></i>${d.showAll ? '收起' : `查看全部（${recent.length}）`}</span>` : '';
   const entries = d.data.usage ?? [];
   const usageTot = entries.reduce((a, u) => a + usageIn(u) + (u.output_tokens ?? 0), 0);
-  // 排版輪 L5（樣稿 uxDashboardV2）：大標＋日期件數；左三塊 要你處理／最近完成／Workflow 提議，右三塊 接下來／系統通知／用量（用量與通知位置不改，驗收第 9 條）
+  // （樣稿 uxDashboardV2）：大標＋日期件數；左三塊 要你處理／最近完成／Workflow 提議，右三塊 接下來／系統通知／用量（用量與通知位置不改，驗收第 9 條）
   const now = new Date();
   const sub = `${now.getMonth() + 1} 月 ${now.getDate()} 日，星期${'日一二三四五六'[now.getDay()]}・${todoCount ? `有 ${todoCount} 件事情需要你處理。` : '目前沒有待處理事項。'}`;
   const head = (title, right = '') => `<div class="section-head"><h2>${title}</h2>${right}</div>`;
@@ -3224,7 +3276,7 @@ function dashHtml() {
   </div>`;
 }
 
-// ---------- 行事曆（D20）：月視圖＋待辦/通知＋單次抽屜＋浮窗 ----------
+// ---------- 行事曆：月視圖＋待辦/通知＋單次抽屜＋浮窗 ----------
 const CAL_KIND_TXT = { auto: 'AI 自動', human: '你出面', goog: 'Google', missed: '錯過', makeup: '補', skipped: '已跳過' };
 
 function calMonthShift(month, delta) {
@@ -3240,7 +3292,7 @@ async function loadCalendar() {
     api('GET', `/api/calendar?month=${c.month}`),
     api('GET', '/api/notices'), // 通知照抓：排程清單浮窗要標「設定有誤」＋側欄紅點
     api('GET', '/api/schedules'),
-    api('GET', '/api/settings').catch(() => null), // 記憶輪（M5b）：新增排程視窗的初值讀設定的 exec；讀不到就用程式缺省
+    api('GET', '/api/settings').catch(() => null), // （M5b）：新增排程視窗的初值讀設定的 exec；讀不到就用程式缺省
   ]);
   c.data = data;
   c.scheds = scheds;
@@ -3248,7 +3300,7 @@ async function loadCalendar() {
   applyNotices(notices);
 }
 
-// 桌面通知（US-036）：授權一次；新的未讀通知彈桌面
+// 桌面通知：授權一次；新的未讀通知彈桌面
 function applyNotices(n) {
   state.notices = n;
   if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
@@ -3331,7 +3383,7 @@ function calEvChip(e) {
     ${e.kind === 'human' ? '<i class="ph ph-user"></i> ' : ''}<span class="t">${esc(e.time)}${badge ? `・${badge}` : ''}</span> ${esc(e.title)}${del}</div>`;
 }
 
-// 排版輪 L6（樣稿 uxCalendar＋驗收第 10 條）：週日開頭、依月份 4／5／6 週的一整張月曆；Google 更新收「⋯」，快照時間／失敗句常駐在月份列；
+// （樣稿 uxCalendar＋驗收第 10 條）：週日開頭、依月份 4／5／6 週的一整張月曆；Google 更新收「⋯」，快照時間／失敗句常駐在月份列；
 // 圖例在月曆下方；排程清單白卡（名稱・頻率・下次）＋「管理」開既有浮窗；頁底「沒開著不會跑」提醒。整頁可捲（原固定高度退場）
 function calendarHtml() {
   const c = state.calendar;
@@ -3459,7 +3511,7 @@ function calModalsHtml() {
   if (state.stepModal) {
     const n = (state.calDrawerDef?.nodes ?? []).find((x) => x.id === state.stepModal.nodeId);
     if (n) {
-      // 表單暫存（T3）：第一次打開才從步驟初始化，之後每個欄位一改就寫進 form，calendarPoll 重繪照 form 還原
+      // 表單暫存：第一次打開才從步驟初始化，之後每個欄位一改就寫進 form，calendarPoll 重繪照 form 還原
       const f = (state.stepModal.form ??= { instruction: n.instruction ?? '', review: n.review_focus ?? '', tier: n.model_tier ?? '', retry: n.retry === undefined ? '' : String(n.retry) });
       html += `<div class="modalback" data-act="sm-back"><div class="modal">
         <div class="cvdhead"><span class="who ${n.executor === 'human' ? 'hu' : 'ai'}">${n.executor === 'human' ? '你' : 'AI'}</span>
@@ -3482,7 +3534,7 @@ function calModalsHtml() {
   if (state.schedModal) {
     const m = state.schedModal;
     const sched = m.sid ? (state.calendar?.scheds ?? []).find((s) => s.id === m.sid) : null;
-    // 表單暫存（T3）：form 是唯一真相——第一次打開才從排程既有值／預設值初始化，之後每個欄位 input/change 即寫入，
+    // 表單暫存：form 是唯一真相——第一次打開才從排程既有值／預設值初始化，之後每個欄位 input/change 即寫入，
     // calendarPoll 的重繪照 form 還原，慢慢填也不會被打回
     const f = (m.form ??= {
       wf: sched?.workflow_id ?? (state.workflows[0] ? `${state.workflows[0].category}/${state.workflows[0].id}` : ''),
@@ -3491,7 +3543,7 @@ function calModalsHtml() {
       day: String(sched?.day ?? 1),
       time: sched?.time ?? '08:00',
       at: sched?.at ?? '',
-      // 新增的初值讀設定→執行與排程的預設（記憶輪 M5b）；編輯讀那條排程自己的
+      // 新增的初值讀設定→執行與排程的預設；編輯讀那條排程自己的
       lead: sched ? (typeof (sched.remind_leads ?? [])[0] === 'string' ? sched.remind_leads[0] : '') : execLead0(),
       makeup: sched ? !!sched.auto_makeup : state.calendar?.exec?.auto_makeup === true,
       enabled: sched?.enabled !== false,
@@ -3535,14 +3587,14 @@ function calModalsHtml() {
   return html;
 }
 
-// ---------- 群組圈分類頁（記憶輪 M1c）：側欄分類標題點開——「分類守則」文字框＋拆好的條＋分類共用幾張習慣卡 ----------
+// ---------- 群組圈分類頁：側欄分類標題點開——「分類守則」文字框＋拆好的條＋分類共用幾張習慣卡 ----------
 // 離開分類頁的唯一出口（同 closeDash／closeCalendar）：任何切去別的畫面的動作都要走這裡
 function closeCategory() {
   if (!state.categoryPage) return;
   clearTimeout(state.categoryPage.msgTimer);
   state.categoryPage = null;
   state.sharedUpload = null;
-  state.addingCategory = false; // 排版輪 L7：離開組織頁收起「新增部門」表單
+  state.addingCategory = false; // 離開組織頁收起「新增部門」表單
   delete state.keep[keepKey('group-text')];
 }
 const sharedPath = (scope) => `/api/shared/${encodeURIComponent(scope)}/files`;
@@ -3550,7 +3602,7 @@ const sharedPath = (scope) => `/api/shared/${encodeURIComponent(scope)}/files`;
 async function loadCategoryPage() {
   const cp = state.categoryPage;
   if (!cp) return;
-  // 移植合併輪 U2b（覆核該修）：群組圈＋習慣卡（cp.data／cp.err）與共用檔（cp.shared／cp.sharedErr）各自容錯——一方讀不到不蓋另一方
+  // 群組圈＋習慣卡（cp.data／cp.err）與共用檔（cp.shared／cp.sharedErr）各自容錯——一方讀不到不蓋另一方
   const company = cp.category === '_company'; // U2a：公司頁＝分類頁特例，沒有群組圈也沒有分類層習慣卡，只抓公司層共用檔
   const settle = (p) => p.then((value) => ({ value }), (err) => ({ err }));
   const [shared, group] = await Promise.all([
@@ -3579,7 +3631,7 @@ async function loadCategoryPage() {
   cp.err = null;
 }
 
-// ---------- 記憶輪（M2）：首次三題介紹、一行通知 ----------
+// ---------- （M2）：首次三題介紹、一行通知 ----------
 // 三題（順序與層級跟後端 INTRO_QUESTIONS 一致）：前兩題按場合帶、第三題每步帶。答案原文就是卡的內容
 const INTRO_QUESTIONS = [
   { key: 'who', label: '你是誰、做什麼', ex: '例：小公司負責人，看不懂程式，要用比喻講', layer: 'content' },
@@ -3631,9 +3683,9 @@ function feedbackReplyHtml(n) {
   return `<div class="card proposal"><b>${lead}</b><span class="sub" style="margin:0"> 它也會想想怎麼學起來——之後打開這個 Workflow 就會看到提議。${n && n.kind === 'card' ? '不想記的話，頁面最上面那一行按「不要記」。' : ''}</span></div>`;
 }
 
-// ---------- 移植合併輪 U2b：公司頁／部門頁的共用檔兩區——規範（每步都帶）／參考（勾了才帶）；每檔一列 檔名・字數（二進位印 KB）・時間・刪除 ----------
+// ---------- 公司頁／部門頁的共用檔兩區——規範（每步都帶）／參考（勾了才帶）；每檔一列 檔名・字數（二進位印 KB）・時間・刪除 ----------
 // 字數：規範與 md／txt 參考有 chars；docx／xlsx 等二進位參考 chars 為 null → 只印大小
-// 排版輪 L7（樣稿 uxOrgFiles）：每區一張 .panel.org-files——section-head h2＋上傳、灰字「每一步都帶・已 N／8,000 字」｜「勾選才帶」、每檔 .file 列＋查看（題 3b）＋刪除
+// （樣稿 uxOrgFiles）：每區一張 .panel.org-files——section-head h2＋上傳、灰字「每一步都帶・已 N／8,000 字」｜「勾選才帶」、每檔 .file 列＋查看b）＋刪除
 const sharedWhen = (iso) => (iso ? new Date(iso).toLocaleString('zh-TW', { hour12: false, year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '');
 const sharedSizeText = (f) => (f.chars != null ? `${fmtInt(f.chars)} 字` : `${Math.max(1, Math.ceil((f.bytes ?? 0) / 1024))} KB`);
 function sharedSectionHtml(cp, kind) {
@@ -3660,12 +3712,12 @@ function sharedFlowsHtml(category) {
     <div class="libgrid">${flowCardsHtml(list) || '<p class="note" style="margin:0">這個分類還沒有 Workflow。</p>'}</div>`;
 }
 
-// 排版輪 L7（樣稿 uxOrgPage）：組織頁＝麵包屑「工作空間」→ page-head（修改名稱、＋ 新增部門）→ 部門捷徑 → 兩張檔案卡；
+// （樣稿 uxOrgPage）：組織頁＝麵包屑「工作空間」→ page-head（修改名稱、＋ 新增部門）→ 部門捷徑 → 兩張檔案卡；
 // 部門頁＝麵包屑「工作空間 › 組織名」→ page-head（修改名稱）→ 整寬守則卡（拆好的規矩收在卡內 <details>，驗收第 7 條）→ 兩張檔案卡 → 部門 Workflow
 function categoryPageHtml() {
   const cp = state.categoryPage;
-  const company = cp.category === '_company'; // 移植合併輪 U2a：公司頁＝分類頁特例（標題＝公司名，沒有守則卡、沒有 Workflow 區）
-  // 拆法輪 P2：「修改名稱」（公司→設定的 company_name；部門→PUT /api/categories/:name）；「未分類」不能改名，沒有鈕
+  const company = cp.category === '_company'; // 公司頁＝分類頁特例（標題＝公司名，沒有守則卡、沒有 Workflow 區）
+  // 「修改名稱」（公司→設定的 company_name；部門→PUT /api/categories/:name）；「未分類」不能改名，沒有鈕
   const renameBtn = company
     ? '<button class="btn" data-act="rename-open" data-type="company" title="修改名稱"><i class="ph ph-pencil-simple"></i>修改名稱</button>'
     : cp.category === '未分類' ? '' : `<button class="btn" data-act="rename-open" data-type="category" data-cat="${esc(cp.category)}" title="修改名稱"><i class="ph ph-pencil-simple"></i>修改名稱</button>`;
@@ -3681,7 +3733,7 @@ function categoryPageHtml() {
       ${adder}${pills ? `<div class="pillnav">${pills}</div>` : ''}${sharedGrid}</div>`;
   }
   const head = `<nav class="breadcrumb">工作空間 › <span data-act="open-company" tabindex="0" role="button">${esc(companyName())}</span></nav>${pageHeadHtml(catLabel(cp.category), '分類守則與資料，讓同一團隊的工作保持一致。', renameBtn + back)}`;
-  // 群組圈讀不到：守則卡換錯誤卡，檔案卡與 Workflow 區照常（U2b 覆核該修）
+  // 群組圈讀不到：守則卡換錯誤卡，檔案卡與 Workflow 區照常
   if (cp.err) {
     return `<div class="catpage">${head}<section class="panel guidelines err"><h3><i class="ph-fill ph-warning"></i> 這個分類的規矩讀不到</h3>
       <p class="note">${esc(cp.err)}</p>
@@ -3714,8 +3766,8 @@ function categoryPageHtml() {
     </div>`;
 }
 
-// ---------- 記憶輪（M5a）：設定頁——整頁模式（同儀表板／行事曆） ----------
-// 排版輪 L6（樣稿 uxSettings）：五組兩行選單（名稱＋說明）；素材庫組退場（驗收第 13 條，搬到側欄「共用素材」整頁）；
+// ---------- （M5a）：設定頁——整頁模式（同儀表板／行事曆） ----------
+// （樣稿 uxSettings）：五組兩行選單（名稱＋說明）；素材庫組退場（驗收第 13 條，搬到側欄「共用素材」整頁）；
 // 只有「個人與記憶」留四個分頁，其餘各組改同一張白卡內分段（h3），內容一項不少
 const SET_GROUPS = [['個人與記憶', '偏好、身分與資訊範圍'], ['Workflow 預設', '只影響新建的 Workflow'], ['連線', 'AI 與行事曆快照'], ['執行與排程', '啟動、提醒與補跑'], ['資料管理', '備份、垃圾桶與版本']];
 const SET_TABS = { 個人與記憶: ['關於你', '身分', '記憶總覽', '欄位詞典'] };
@@ -3740,7 +3792,7 @@ async function openSettings(group = '個人與記憶', tab = null) {
   closeCategory();
   closeLibrary();
   closeAssets();
-  stashWorkspace(); // 拆法輪 P3
+  stashWorkspace(); //
   state.run = null;
   state.showTrash = false;
   state.corrupt = null;
@@ -3797,7 +3849,7 @@ function settingsHtml() {
   const s = state.settings;
   const d = s.data;
   const exN = d ? Object.values(d.summary.exceptions).reduce((a, v) => a + v.length, 0) : 0;
-  // 第二行平常是說明；記憶有例外、Claude 連不上時改成琥珀字提醒（契約 K）
+  // 第二行平常是說明；記憶有例外、Claude 連不上時改成琥珀字提醒
   const warn = {
     個人與記憶: d && !d.summary.paused && exN ? `${exN} 條例外要看` : '',
     連線: state.claude === false ? 'Claude 連不上' : '',
@@ -3816,11 +3868,11 @@ function settingsHtml() {
   return `${pageHeadHtml('設定', '個人偏好、Workflow 預設與系統執行，各有明確範圍。')}
     <div class="setwrap" data-settings><nav class="setnav" aria-label="設定項目">${nav}</nav><section class="setbody" data-group="${esc(s.group)}"><h2>${esc(s.group)}${hint(SET_LEAD[s.group] ?? '')}</h2>${body}</section></div>`;
 }
-// 組內分段小標（排版輪 L6：原子分頁改同一張卡分段）
+// 組內分段小標（原子分頁改同一張卡分段）
 const setSec = (t) => `<h3>${esc(t)}</h3>`;
 const setRow = (l, d, c, stack = false) => `<div class="row${stack ? ' stack' : ''}"><div class="l">${l}</div>${d ? `<div class="d">${d}</div>` : ''}<div class="c">${c}</div></div>`;
 const setSw = (on, act, extra = '') => `<span class="sw ${on ? 'on' : ''}" data-act="${act}" ${extra} role="switch" aria-checked="${on}">${on ? '開' : '關'}<i></i></span>`;
-const setLater = (l, dsc) => setRow(`${l}${hint(dsc)}`, '', '<span class="chip">下一輪</span>'); // 續票項：「下一輪」膠囊已經說了還沒做，現在是什麼行為收進問號（說明文案輪）
+const setLater = (l, dsc) => setRow(`${l}${hint(dsc)}`, '', '<span class="chip">下一輪</span>'); // 續票項：「下一輪」膠囊已經說了還沒做，現在是什麼行為收進問號
 // 設定頁一句結果／錯誤（快照、備份、垃圾桶、清空）：state.settings.msg={key,text,err}，換組／換子分頁就清
 const setMsgHtml = (key) => { const m = state.settings?.msg; return m?.key === key ? `<div class="setmsg ${m.err ? 'err' : ''}" data-setmsg="${key}"><i class="ph ${m.err ? 'ph-warning-circle' : 'ph-check-circle'}"></i>${esc(m.text)}</div>` : ''; };
 
@@ -3851,11 +3903,11 @@ function setDefaultsHtml(d) {
       ${setRow(`模型檔位${hint('步驟沒自己選檔位時用哪一檔；「不設」＝交給 Claude 的預設。')}`, '', seg('model_tier', df.model_tier ?? 'null', [['null', '不設'], ['fast', '快而省'], ['balanced', '均衡'], ['deep', '深而慢']]))}
       ${setRow(`出錯自動重試${hint('步驟沒自己設時，失敗了自動再試幾次；「不設」＝不重試。')}`, '', seg('retry', df.retry ?? 'null', [['null', '不設'], ['0', '0 次'], ['1', '1 次'], ['2', '2 次']]))}
       ${setLater('產出語言', '現在跟指示的語言一樣。')}</div>`;
-  // 拆法輪 W1（契約 F）：拆之前先出成品卡讓你確認（預設開）；關掉＝一句話直接出草稿，清單頂端印拆解器自己定的長相對照
+  // 拆之前先出成品卡讓你確認（預設開）；關掉＝一句話直接出草稿，清單頂端印拆解器自己定的長相對照
   const stopSec = `${setSec('停點')}<div class="group">${setRow(`拆之前先確認成品長相${hint('關掉＝一句話直接出草稿；等分類拆法偏好學會了再關比較保險。')}`, '', setSw(d.cfg.compose?.confirm_shape !== false, 'set-compose-sw', 'data-k="confirm_shape"'))}</div>
     <div class="group">${setRow('停點', '哪幾步要停下來等你，在每個步驟自己的設定裡改，不在這一頁。', '')}${setLater('停著沒處理多久提醒', '停點提醒間隔下一輪。')}</div>`;
   const permSec = `${setSec('權限與查核')}<div class="group"><h5>產出檔案的權限</h5>
-      ${setRow(`親手建的 Workflow${hint('預設允不允許 AI 工人在該趟的產出資料夾寫檔（Word、Excel）與執行程式；Workflow 頁可以個別改。')}`, '', setSw(df.permissions_files !== false, 'set-def-sw', 'data-k="permissions_files"'))}
+      ${setRow(`親手建的 Workflow${hint('預設允不允許 AI 工人在該趟的產出資料夾寫檔（Word、Excel、簡報）與執行程式；Workflow 頁可以個別改。')}`, '', setSw(df.permissions_files !== false, 'set-def-sw', 'data-k="permissions_files"'))}
       ${setRow(`匯入的 Workflow${hint('一律不允許，不是設定：別人 Workflow 裡藏的指示不可信，不能讓它在你電腦上寫檔。要開，進那條 Workflow 的頁面自己打開。')}`, '', '<span class="chip">固定關</span>')}</div>
     <div class="group"><h5>交貨查核</h5>
       ${setRow(`每步都查${hint('每個 AI 步驟做完先對照原始資料與你的要求查一次；攔到會自動重做一次，還錯才停下問你。Workflow 頁可以個別關。')}`, '', setSw(df.check_enabled !== false, 'set-def-sw', 'data-k="check_enabled"'))}
@@ -3863,7 +3915,7 @@ function setDefaultsHtml(d) {
     <div class="group"><h5>監工</h5>
       ${setRow(`監工：開場備註、每步交接、跑完紀錄${hint('新 Workflow 預設開不開；Workflow 頁可以個別關。')}`, '', setSw(df.supervisor_enabled !== false, 'set-def-sw', 'data-k="supervisor_enabled"'))}
       ${setRow(`每步「監工可以」的預設${hint('新 Workflow 每個 AI 步驟預設打開哪幾個；步驟抽屜可以個別改。')}`, '', `<div class="pills">${SUP_CHK.map(([, k, t]) => `<span class="pill ${fl[k] ? 'on' : ''}" data-act="set-def-flag" data-k="${k}">${t}</span>`).join('')}</div>`)}</div>`;
-  // 說明文案輪：這行跟 h2 旁邊 SET_LEAD[「Workflow 預設」] 講的是同一件事（只差幾個字）——畫面上只留一份
+  // 這行跟 h2 旁邊 SET_LEAD[「Workflow 預設」] 講的是同一件事（只差幾個字）——畫面上只留一份
   return `${permSec}${aiSec}${stopSec}`;
 }
 
@@ -3889,7 +3941,7 @@ function setExecHtml(d) {
       ${setRow(`連接器${hint('只有唯讀；工人環境裡沒有金鑰，呼叫由剝繭本體執行。')}`, '', '<span class="chip">輪 2</span>')}</div>`;
 }
 
-// ---- 多組織（調整輪）：設定→資料管理「組織」段的組織清單／新增／移出 ----
+// ---- 多組織：設定→資料管理「組織」段的組織清單／新增／移出 ----
 // 三道閘與後端同一份：目前組織不能移出、最後一個不能移出、還要打對名字才解鎖那顆鈕（後端一樣會擋，這裡只是別讓人白按）。
 // 改名沿用上面那格「組織名稱」＝改目前組織；別的組織要改名先切過去（不為此多開一支路由）。
 function orgManageHtml() {
@@ -3917,7 +3969,7 @@ function orgManageHtml() {
 }
 
 // ---- 資料：位置與備份／清理／關於（M5b）——位置唯讀；立即備份＋清單；垃圾桶合併表（流程＋卡各自復原）；清空記憶二次確認；版本 ----
-// 還原、匯出全部、清空全部、換位置、每天自動備份＝續票（上桌題 3）
+// 還原、匯出全部、清空全部、換位置、每天自動備份＝續票（上桌
 function setDataHtml(d) {
   const s = state.settings;
   const rows = [
@@ -3932,7 +3984,7 @@ function setDataHtml(d) {
       ${setLater('匯出全部、清空全部', '')}${setMsgHtml('clear')}</div>`;
   const aboutSec = `${setSec('關於')}<div class="group">${setRow(`剝繭 ${esc(d.cfg.version ?? '')}${hint('MIT 授權。你的資料不經過任何人的伺服器，全在你電腦和你自己的 Claude 帳號裡。')}`, '', '')}</div>`;
   const bk = [...d.backups].sort((a, b) => String(b.at).localeCompare(String(a.at)));
-    // 公司（移植合併輪 U3）：名稱 change／Enter 即 PUT（處理在 app 的 change 監聽）；規範上限唯讀（三層 §三固定值，後端 checkRuleLimits 同一份）
+    // 公司：名稱 change／Enter 即 PUT（處理在 app 的 change 監聽）；規範上限唯讀（三層 §三固定值，後端 checkRuleLimits 同一份）
   const orgSec = `${setSec('組織')}<div class="group">
       ${setRow(`組織名稱${hint('側欄最上層、麵包屑、組織頁標題跟著改；清空顯示「組織」。')}`, '', `<input class="notein" id="set-company-name" type="text" maxlength="60" placeholder="組織" value="${esc(d.cfg.company_name ?? '')}" style="margin:0;max-width:260px">`)}
       ${setRow('規範上限', '單檔 4,000 字・每層合計 8,000 字', '<span class="chip">固定</span>')}${setMsgHtml('company')}</div>
@@ -3965,14 +4017,14 @@ const memCovers = (c, cat, wfId) => (c.scope?.level === 'all' ? true : c.scope?.
 const memExpired = (c) => c.expires != null && String(c.expires) < new Date().toISOString().slice(0, 10);
 const memLive = (c) => c.status === 'active' && !memExpired(c);
 const byCreatedAt = (a, b) => String(a.created_at ?? '').localeCompare(String(b.created_at ?? ''));
-// 排版輪 L6（樣稿 uxSettingContent memory）：四個有框分頁鈕；身分從「關於你」拆出、欄位詞典從總覽底部收摺改成自己的分頁（內容照舊，W10）
+// （樣稿 uxSettingContent memory）：四個有框分頁鈕；身分從「關於你」拆出、欄位詞典從總覽底部收摺改成自己的分頁（內容照舊，W10）
 function setMemoryHtml(d) {
   const tab = setTab('個人與記憶');
   const tabs = `<div class="settabs" role="tablist">${SET_TABS.個人與記憶.map((k) => `<button type="button" class="${tab === k ? 'on' : ''}" data-act="set-tab" data-g="個人與記憶" data-k="${esc(k)}">${esc(k)}</button>`).join('')}</div>`;
   const body = tab === '身分' ? setIdentitiesHtml(d) : tab === '記憶總覽' ? setMapHtml(d) : tab === '欄位詞典' ? setDictHtml(d) : setKnowHtml(d);
   return `${tabs}${body}`;
 }
-// 連接器與金鑰：排版輪 L6 從記憶搬到「連線」分段；輪 2 才做，兩列都「尚未提供」
+// 連接器與金鑰： 從記憶搬到「連線」分段；輪 2 才做，兩列都「尚未提供」
 function setKeysHtml() {
   return `<div class="group">
       ${setRow(`連接器與金鑰${hint('AI 永遠看不到金鑰：金鑰放作業系統的認證管理員，不進剝繭的任何檔案、備份、匯出、卷宗；AI 工人拿到的是連接器的名字與它能讀什麼，呼叫由剝繭本體執行。第一版只有讀，沒有寫。')}`, '', '<span class="chip">尚未提供</span>')}
@@ -4110,7 +4162,7 @@ function setIdentitiesHtml(d) {
     <div class="list">${d.identities.map(item).join('') || '<div class="none">還沒有身分</div>'}</div>
     <div class="addrow"><input class="notein" id="id-new" placeholder="新身分的名字，例：跟客戶開會的我" style="margin:0"><button class="btn sm2" data-act="id-add"><i class="ph ph-plus"></i>新增身分</button></div></div>`;
 }
-// ---------- 排版輪 L6：共用素材整頁（樣稿 uxAssets；驗收第 13 條入口在側欄）——角色情境／常用片段＝常用預設庫（presets.json），
+// ---------- 共用素材整頁（樣稿 uxAssets；驗收第 13 條入口在側欄）——角色情境／常用片段＝常用預設庫（presets.json），
 // 編輯／刪除沿用 /api/presets；步驟編輯的常用列讀同一份（複製式）。編輯中的值在 state.assets.edit，輪詢重繪從它還原 ----------
 const ASSET_FIELDS = [['role_context', '角色情境'], ['snippet', '常用片段']];
 function closeAssets() {
@@ -4155,15 +4207,15 @@ function assetsHtml() {
 }
 
 // ---------- render 與輪詢 ----------
-let rendering = false; // render 正在換 DOM（拆法輪 P4：分辨重繪拔掉輸入框的 blur 與使用者真的離開）
-let chatSeen = { chat: null, sig: null }; // 排版輪 L9：上次畫的對話紀錄（哪份 chat、幾則／有沒有卡／在不在等），有變化才捲到最新
+let rendering = false; // render 正在換 DOM（分辨重繪拔掉輸入框的 blur 與使用者真的離開）
+let chatSeen = { chat: null, sig: null }; // 上次畫的對話紀錄（哪份 chat、幾則／有沒有卡／在不在等），有變化才捲到最新
 function render() {
   let inner;
-  if (state.intro) inner = introHtml(); // 記憶輪（M2）：第一次打開先讓它認識你——蓋在儀表板前，答了或跳過才看得到別的
+  if (state.intro) inner = introHtml(); // （M2）：第一次打開先讓它認識你——蓋在儀表板前，答了或跳過才看得到別的
   else if (state.dash) inner = dashHtml();
   else if (state.calendar) inner = calendarHtml();
-  else if (state.settings) inner = settingsHtml(); // 記憶輪（M5a）：設定頁，蓋在工作區上的整頁（同儀表板／行事曆）
-  else if (state.assets) inner = assetsHtml(); // 排版輪 L6：共用素材頁（側欄入口，整頁）
+  else if (state.settings) inner = settingsHtml(); // （M5a）：設定頁，蓋在工作區上的整頁（同儀表板／行事曆）
+  else if (state.assets) inner = assetsHtml(); // 共用素材頁（側欄入口，整頁）
   else if (state.library) inner = libraryHtml(); // 移植第一批 T9：流程庫頁（同上，整頁）
   else if (state.categoryPage) inner = categoryPageHtml();
   else if (state.run) inner = runHtml();
@@ -4179,23 +4231,23 @@ function render() {
       : state.mode === 'canvas' ? canvasModeHtml()
         : state.mode === 'history' ? historyModeHtml()
           : listModeHtml();
-    // 移植合併輪 U4b：右側欄（沒有就不包 grid）。排版輪 L8：清單／畫布＝步驟檢視器；排版輪 L9：聊天（已存與草稿）＝契約 D-聊天右欄；
-    // 排版輪 L11：本次資料分頁右欄＝這次會帶入／執行選項（資料夾在檢視器「Workflow 資料」與履歷「執行紀錄」）；履歷單欄
+    // 右側欄（沒有就不包 grid）。清單／畫布＝步驟檢視器；聊天（已存與草稿）＝；
+    // 本次資料分頁右欄＝這次會帶入／執行選項（資料夾在檢視器「Workflow 資料」與履歷「執行紀錄」）；履歷單欄
     const onDataTab = state.wf && !subjectIsDraft() && state.flowTab === 'data';
     const aside = onDataTab ? dataAsideHtml()
       : state.mode === 'chat' ? chatAsideHtml() : state.mode === 'list' || state.mode === 'canvas' ? inspectorHtml() : '';
-    if (state.mode === 'chat' && !state.wf && !state.chat.refs && refsFor !== state.chat) refreshShapeRefs(); // 排版輪 L9：草稿聊天右欄沒數字＝補抓一次（已存 Workflow 由 openWorkflow 抓）
+    if (state.mode === 'chat' && !state.wf && !state.chat.refs && refsFor !== state.chat) refreshShapeRefs(); // 草稿聊天右欄沒數字＝補抓一次（已存 Workflow 由 openWorkflow 抓）
     inner = workHeadHtml() + (aside ? `<div class="flowlayout"><section class="flowmain">${body}</section>${aside}</div>` : body);
   }
   // 預覽浮窗放在 .layout 外（.work 有 backdrop-filter，會把 fixed 定位框在自己裡面）；重繪前記住它捲到哪，重繪後放回
   const pvScroll = app.querySelector('.pvbody')?.scrollTop ?? 0;
-  // 換 DOM 時正在打字的輸入框會被拔掉→瀏覽器同步發 blur；focusout 那邊看這個旗標分辨「重繪拔掉的」與「使用者離開的」（成品卡格子，拆法輪 P4）
-  // 排版輪 L4（驗收第 3 條）：鍵盤停在側欄或「⋯」選單時，輪詢重繪換掉 DOM 會把焦點丟回 body——記住是哪一顆，重繪後放回
+  // 換 DOM 時正在打字的輸入框會被拔掉→瀏覽器同步發 blur；focusout 那邊看這個旗標分辨「重繪拔掉的」與「使用者離開的」（成品卡格子）
+  // （驗收第 3 條）：鍵盤停在側欄或「⋯」選單時，輪詢重繪換掉 DOM 會把焦點丟回 body——記住是哪一顆，重繪後放回
   const fa = document.activeElement;
   const keepFocus = fa?.dataset?.act && fa.closest('.side, .rowmenu') && fa.matches(':focus-visible') ? { ...fa.dataset } : null;
-  // 排版輪 L9：打字中的輸入框（data-keep，例：聊天多行框、成品卡七格）被輪詢重繪換掉——字由 state 放回，焦點與游標也放回，像沒重繪過
+  // 打字中的輸入框（data-keep，例：聊天多行框、成品卡七格）被輪詢重繪換掉——字由 state 放回，焦點與游標也放回，像沒重繪過
   const typing = fa?.matches?.('[data-keep][id]') ? { id: fa.id, s: fa.selectionStart, e: fa.selectionEnd } : null;
-  cvChromeSeen = { head: null, insp: null }; // 排版輪 L14：整頁換過，畫布補畫面時標題區／右欄要重新比
+  cvChromeSeen = { head: null, insp: null }; // 整頁換過，畫布補畫面時標題區／右欄要重新比
   rendering = true;
   try { app.innerHTML = `<div class="layout">${sideHtml()}<div class="work">${inner}${state.calendar ? calDrawerHtml() + calModalsHtml() : ''}</div></div>` + previewHtml() + memCardModalHtml() + flowSettingsModalHtml() + flowMemModalHtml() + sharedModalHtml() + setConfirmModalHtml() + promptModalHtml(state.run ? state.promptView : state.dash?.promptView) + renameModalHtml() + rowMenuHtml() + drawerHtml(); }
   finally { rendering = false; }
@@ -4205,7 +4257,7 @@ function render() {
     again?.focus();
   }
   if (pvScroll) { const b = app.querySelector('.pvbody'); if (b) b.scrollTop = pvScroll; }
-  syncStepSnap(); // 排版輪 L12：步驟彈窗開窗值（判有沒有未套用的改動）
+  syncStepSnap(); // 步驟彈窗開窗值（判有沒有未套用的改動）
   if (typing && document.activeElement === document.body) {
     const ed = document.getElementById(typing.id);
     if (ed && !ed.disabled) { ed.focus(); if (typing.s !== null && ed.setSelectionRange) ed.setSelectionRange(typing.s, typing.e); }
@@ -4216,13 +4268,13 @@ function render() {
   if (state.permFlashUntil > Date.now()) document.getElementById('perm-files')?.scrollIntoView({ block: 'center', behavior: 'auto' });
   const cvw = app.querySelector('.cvwrap');
   if (cvw) window.BJCanvas.bind(cvw, cvHandlers);
-  // 排版輪 L9：對話紀錄在表單卡下方往下長（整頁捲）——多了一則、出卡、開始等回覆時，把最新那張捲進視野；輪詢重繪沒變化就不動捲軸
+  // 對話紀錄在表單卡下方往下長（整頁捲）——多了一則、出卡、開始等回覆時，把最新那張捲進視野；輪詢重繪沒變化就不動捲軸
   const log = document.getElementById('chatlog');
   const sig = log ? `${state.chat.messages.length}|${!!state.chat.shape}|${state.chat.busy}` : null;
   if (log && chatSeen.chat === state.chat && chatSeen.sig !== sig) log.lastElementChild?.scrollIntoView({ block: 'nearest' });
   chatSeen = { chat: log ? state.chat : null, sig };
   autoGrowAll();
-  // 排版輪 F3：畫完就把「沒存的東西」排進瀏覽器暫存（節流 500ms）
+  // 畫完就把「沒存的東西」排進瀏覽器暫存（節流 500ms）
   dsSchedule();
 }
 
@@ -4255,7 +4307,7 @@ function schedulePoll(recordDelay) {
       state.runJson = json;
       state.run = { ...fresh, workflow: w };
       if (before !== 'done' && state.run.status === 'done') pollProposalsSoon(w);
-      // 列管 L020：跑步中打字（停點回話、人做步驟要交出的內容）本來會被每秒重繪打斷。
+      // 跑步中打字（停點回話、人做步驟要交出的內容）本來會被每秒重繪打斷。
       // 打字時先記帳不重繪，手停了下一輪補畫——不是丟掉，不然畫面會停在舊狀態。
       if (changed || state.pollDirty) {
         if (isTyping()) state.pollDirty = true;
@@ -4278,10 +4330,10 @@ async function refreshRun() {
 }
 
 // 聊天：對草稿講＝改草稿；對已存流程講＝直接改它（走版本履歷，可退回）
-// 拆法輪 W1（契約 A 前端側）：拆解器兩趟——第一趟（phase:'shape'）回成品卡、第二趟（phase:'draft' 帶卡上確認過的格子）回草稿。
+// 拆解器兩趟——第一趟（phase:'shape'）回成品卡、第二趟（phase:'draft' 帶卡上確認過的格子）回草稿。
 // round 沒給＝使用者按送出（讀輸入框、決定趟別）；成品卡兩鈕給 round（「照這樣拆」／「重擬」）＝重送已在對話裡的最後一句。
 async function sendChat(round = null) {
-  // 排版輪 L1（契約 J）：發問當下一次抓住工作區——等待中切去別條 Workflow／草稿，回覆照樣寫回這裡，不寫當下的 state.chat／state.wf
+  // 發問當下一次抓住工作區——等待中切去別條 Workflow／草稿，回覆照樣寫回這裡，不寫當下的 state.chat／state.wf
   const chat = state.chat;
   if (chat.busy) return;
   const current = subjectDef();
@@ -4291,11 +4343,11 @@ async function sendChat(round = null) {
     const input = document.getElementById('chat-input');
     const text = input?.value.trim();
     if (!text) return;
-    input.value = ''; // 排版輪 L9：多行框帶 data-keep，送出後清框與暫存字（否則重繪放回剛送出的句子）
+    input.value = ''; // 多行框帶 data-keep，送出後清框與暫存字（否則重繪放回剛送出的句子）
     delete state.keep[keepKey('chat-input')];
     chat.messages.push({ role: 'user', text });
     // 句子含「重拆」且已有草稿（或已存流程）→明帶 phase:'shape' 出卡，草稿照帶當背景。
-    // 其餘不帶 phase、交伺服器缺省解析（契約 A）：沒草稿→第一趟出卡；有草稿→對話修改不出卡。
+    // 其餘不帶 phase、交伺服器缺省解析：沒草稿→第一趟出卡；有草稿→對話修改不出卡。
     // 第一趟刻意不明帶 'shape'：B4 定案「明帶 shape 永遠只跑一趟」，只有缺省解析出來的 shape 才會在開關關掉時連跑成草稿（auto:true）
     round = current && /重拆/.test(text) ? { phase: 'shape' } : {};
   }
@@ -4305,22 +4357,22 @@ async function sendChat(round = null) {
     const out = await api('POST', '/api/compose', {
       messages: chat.messages.filter((m) => m.role === 'user' || m.role === 'ai'), // 錯誤氣泡與記憶通知行不是對話
       current_draft: current,
-      // 記憶輪（M1c）：已存流程＝它所在的分類；草稿＝拆解器問過後寫在頂層的 category——伺服器拿它讀群組規矩
+      // （M1c）：已存流程＝它所在的分類；草稿＝拆解器問過後寫在頂層的 category——伺服器拿它讀群組規矩
       category,
       ...round, // phase／shape／sources／category（第二趟的卡上分類蓋過上面那個）
     });
     if (out.phase === 'shape' && !out.auto) {
       // 第一趟：只出卡、還沒有草稿。分類空（拆解器沒建議或不合法）→預選第一個分類，沒有分類就「未分類」
       chat.shape = out.shape;
-      chat.sources = out.sources ?? []; // 伺服器已補齊成陣列（契約 A 驗證列）
+      chat.sources = out.sources ?? []; // 伺服器已補齊成陣列
       chat.category = out.category ?? state.categories.find((c) => c !== '未分類') ?? '未分類';
       chat.shapeBase = null;
       chat.refs = null;
-      if (state.chat === chat) refreshShapeRefs(); // 拆法輪 W2：卡底數字另外抓、不等它；已切走＝讀回時補抓（open-draft／openWorkflow）
+      if (state.chat === chat) refreshShapeRefs(); // 卡底數字另外抓、不等它；已切走＝讀回時補抓（open-draft／openWorkflow）
       chat.messages.push({ role: 'ai', text: out.reply || '先看成品長相對不對——格子點一下可以改，沒問題就按「照這樣拆」。' });
     } else if (target) {
       delete out.draft.category; // 分類是路徑，不進 workflow.yaml；PUT 不會替你剝（新建那條路在 confirm-save-draft 剝）
-      // 排版輪 L4（L1 覆核補）：等待中它的部門被改名或搬走＝路徑換了（舊路徑 PUT 會 404、改動丟掉）；原鍵不在最新清單時，
+      // 等待中它的部門被改名或搬走＝路徑換了（舊路徑 PUT 會 404、改動丟掉）；原鍵不在最新清單時，
       // 照 id 找回現在的部門——同 id 恰好一條才認（範例檔 id 可能在兩個部門重複，認不準就照舊路徑、寧可報錯不寫錯條）
       const lib = state.workflows ?? [];
       const sameId = lib.filter((w) => w.id === target.id);
@@ -4339,7 +4391,7 @@ async function sendChat(round = null) {
       chat.shapeBase = null;
       if (out.auto) chat.autoShape = out.shape ?? null;
     }
-    if (out.memory_notice) chat.messages.push({ role: 'memnotice', notice: out.memory_notice }); // 記憶輪（M2）記路④：這句被記成什麼
+    if (out.memory_notice) chat.messages.push({ role: 'memnotice', notice: out.memory_notice }); // （M2）記路④：這句被記成什麼
   } catch (e) {
     chat.messages.push({ role: 'error', text: e.message });
   } finally {
@@ -4354,7 +4406,7 @@ async function saveDef(def) {
     state.chat.draft = def; // 草稿只留在本地，存庫時才驗
     return;
   }
-  const empty = cvEmptyConds(def); // 排版輪 L13（地雷 9）：空條件送出去會 400——先攔、講人話
+  const empty = cvEmptyConds(def); // （地雷 9）：空條件送出去會 400——先攔、講人話
   if (empty.length) throw new Error(`還有 ${empty.length} 條擇一的線沒寫條件——寫好條件再存檔`);
   await api('PUT', wfPath(state.wf), { def });
   state.wf.def = def;
@@ -4382,7 +4434,7 @@ function removeNodeSimple(def, id) {
 }
 
 // 拆掉一個舊式 fork/join：同 removeNodeSimple，但「分岔路接進多目標 fork」的形狀會遺失路徑資訊
-// （一條路只能指一步）→ 回 false 留著不拆，執行不受影響
+//（一條路只能指一步）→ 回 false 留著不拆，執行不受影響
 function dissolveStructural(def, node) {
   const targets = outgoingOf(node).filter((t) => def.nodes.some((x) => x.id === t));
   const hasBranchPred = def.nodes.some((p) => kindOf(p) === 'branch' && (p.branches ?? []).some((b) => b.next === node.id));
@@ -4392,7 +4444,7 @@ function dissolveStructural(def, node) {
 }
 
 // 收整結構：每次編輯順手把舊式 join 拆成直接連線（會合=多入線；進履歷，可退回）。
-// 排版輪 L13：可吸收的並行點（唯一前驅是 task、那張卡只接它）也拆成卡的多條出線（語意相同）；帶 merge 的舊 join 不拆（拆了會丟掉任一條到）
+// 可吸收的並行點（唯一前驅是 task、那張卡只接它）也拆成卡的多條出線（語意相同）；帶 merge 的舊 join 不拆（拆了會丟掉任一條到）
 function normalize(def) {
   const keep = new Set(); // 拆不動的舊結構（見 dissolveStructural）
   for (let guard = 0; guard < def.nodes.length + 5; guard++) {
@@ -4403,9 +4455,9 @@ function normalize(def) {
   }
 }
 
-// ---------- 畫布款 A 資料模型（排版輪 L13，契約 H）：定義檔格式不改 ----------
+// ---------- 畫布款 A 資料模型：定義檔格式不改 ----------
 // 「同時做」＝卡片多條 next；「擇一」＝卡片唯一 next 指向的分岔（畫面藏起來、線畫虛線、條件在線上）；舊 join 畫成直連；
-// 轉不過的 fork／branch＝舊寫法小圓點（題 4 A：照樣能跑能改，轉得過的由使用者按「轉成新寫法」，不自動改寫）。寫回一律先 normalize。
+// 轉不過的 fork／branch＝舊寫法小圓點 A：照樣能跑能改，轉得過的由使用者按「轉成新寫法」，不自動改寫）。寫回一律先 normalize。
 const CV_CHOOSE_DEFAULT = '依每條線上的條件，挑符合的一條走';
 function cvPreds(def) {
   const m = new Map(def.nodes.map((n) => [n.id, []]));
@@ -4446,7 +4498,7 @@ function cvModel(def) {
     seen.add(t);
     return kindOf(n) === 'join' ? (n.next ?? []).flatMap((x) => resolve(x, seen)) : [];
   };
-  // 排版輪 L14：去重與計數改查表（200 步的畫布每次改動都算一次，原本逐條掃是 O(線²)）——結果與逐條掃相同
+  // 去重與計數改查表（200 步的畫布每次改動都算一次，原本逐條掃是 O(線²)）——結果與逐條掃相同
   const seenE = new Set();
   const outN = new Map();
   const push = (e) => { const k = `${e.from}\u0000${e.to}\u0000${e.arm}`; if (seenE.has(k)) return; seenE.add(k); edges.push(e); outN.set(e.from, (outN.get(e.from) ?? 0) + 1); };
@@ -4584,13 +4636,13 @@ function cvConvert(def, id) {
   if (cvCanConvert(def, id)) dissolveStructural(def, cvNode(def, id));
   normalize(def);
 }
-// 座標（契約 H）：畫面上看到的全部卡片座標一次寫進 def.canvas＋layout:'tb'（舊的由左往右座標不沿用）；藏起來的節點不存座標
+// 座標：畫面上看到的全部卡片座標一次寫進 def.canvas＋layout:'tb'（舊的由左往右座標不沿用）；藏起來的節點不存座標
 function cvShownPositions(def) {
   const pos = window.BJCanvas.layout(cvModel(def), def.canvas).pos;
   return Object.fromEntries([...pos].map(([id, p]) => [id, { x: p.x, y: p.y }]));
 }
 
-// 畫布上一步／重做（畫布回饋輪）：每次成功的畫布編輯先照快照；換流程（或草稿）自動歸零
+// 畫布上一步／重做：每次成功的畫布編輯先照快照；換流程（或草稿）自動歸零
 const cvHistory = { key: null, undo: [], redo: [] };
 function cvHistoryFor() {
   const k = subjectIsDraft() ? 'draft' : state.wf ? `${state.wf.category}/${state.wf.id}` : null;
@@ -4606,7 +4658,7 @@ async function cvApplySnapshot(snap) {
     await saveDef(structuredClone(snap));
   }
   if (state.canvasSel && !snap.nodes.some((n) => n.id === state.canvasSel)) { state.canvasSel = null; state.drawerOpen = false; }
-  if (state.mode === 'canvas' && !state.drawerOpen) cvRefresh(); else render(); // 排版輪 L14：畫布上復原／重做只補畫布
+  if (state.mode === 'canvas' && !state.drawerOpen) cvRefresh(); else render(); // 畫布上復原／重做只補畫布
 }
 async function cvUndo() {
   const h = cvHistoryFor();
@@ -4625,8 +4677,8 @@ async function cvRedo() {
   try { await cvApplySnapshot(nxt); } catch (e) { h.redo.push(nxt); h.undo.pop(); window.alert(e.message); render(); }
 }
 
-// 排版輪 L14（契約 I 效能①）：畫布上的改動＝改工作本（草稿直接改草稿）＋cvHistory＋cvDirty，不重繪；回傳新定義、有沒有動到結構、新模型
-// 排版輪 L13：先把畫面上看到的座標全部定下來（fn 裡 setPos 再蓋過），做完補新卡座標、只留卡片的——之後加卡別張不跳。
+// （①）：畫布上的改動＝改工作本（草稿直接改草稿）＋cvHistory＋cvDirty，不重繪；回傳新定義、有沒有動到結構、新模型
+// 先把畫面上看到的座標全部定下來（fn 裡 setPos 再蓋過），做完補新卡座標、只留卡片的——之後加卡別張不跳。
 // 畫面上的座標直接跟 canvas.js 拿（同一份定義才給），拿不到才重排一次
 function canvasCommit(fn) {
   const cur = cvDef();
@@ -4677,7 +4729,7 @@ async function canvasOp(fn) {
   render();
 }
 
-// 排版輪 L14：畫布改完只補畫面——結構動了換 .cvwrap 裡有變的元素，只搬位置什麼都不用換；再補頁面工具列、復原鈕、右欄。畫布不在畫面上才整頁畫
+// 畫布改完只補畫面——結構動了換 .cvwrap 裡有變的元素，只搬位置什麼都不用換；再補頁面工具列、復原鈕、右欄。畫布不在畫面上才整頁畫
 function cvRefresh(r = null) {
   const def = cvDef();
   if (!def || !app.querySelector('.cvwrap')) { render(); return; }
@@ -4766,7 +4818,7 @@ async function cvSave() {
   if (subjectIsDraft() || !state.cvDirty || !state.cvWork) return;
   const def = state.cvWork;
   const issues = canvasIssues(def);
-  const empty = cvEmptyConds(def); // 排版輪 L13（地雷 9）：擇一條件有空的不送出，標出那幾條線（L14 畫琥珀「點此寫條件」）
+  const empty = cvEmptyConds(def); // （地雷 9）：擇一條件有空的不送出，標出那幾條線（L14 畫琥珀「點此寫條件」）
   state.cvCondIssues = empty.length ? empty : null;
   if (empty.length) {
     window.alert(`還有 ${empty.length} 條擇一的線沒寫條件——點線上的條件格寫好再存檔`);
@@ -4787,7 +4839,7 @@ async function cvSave() {
   render();
 }
 
-// ---------- 畫布自由化（F5）：拖擺存座標、拉線接人、剪線、線上插步 ----------
+// ---------- 畫布自由化：拖擺存座標、拉線接人、剪線、線上插步 ----------
 function setPos(def, id, x, y) {
   ((def.canvas ??= {}).positions ??= {})[id] = { x, y };
 }
@@ -4816,7 +4868,7 @@ function doConnect(def, from, to) {
 
 // 畫布問題清單：未接進流程的步驟 ＋ 線不足兩條的並行／分岔點（離開畫布前標紅擋下）
 function canvasIssues(def) {
-  const hidden = new Set(cvModel(def).hidden); // 排版輪 L13：藏起來的擇一分岔一條線也合法（卡上只剩一條線），不標
+  const hidden = new Set(cvModel(def).hidden); // 藏起來的擇一分岔一條線也合法（卡上只剩一條線），不標
   const thin = def.nodes
     .filter((n) => !hidden.has(n.id))
     .filter((n) => (kindOf(n) === 'fork' && (n.next ?? []).length < 2) || (kindOf(n) === 'branch' && (n.branches ?? []).length < 2))
@@ -4824,7 +4876,7 @@ function canvasIssues(def) {
   return [...new Set([...unconnectedIds(def), ...thin])];
 }
 
-// 離開畫布前的接線檢查（D17）：還沒接進流程的步驟要標紅、擋下切換。
+// 離開畫布前的接線檢查：還沒接進流程的步驟要標紅、擋下切換。
 // 接進流程＝與第一顆節點連在同一張圖（不分方向）——多起點平行流程合法（與後端 schema.js 同規則）
 function unconnectedIds(def) {
   if (!def || def.nodes.length < 2) return [];
@@ -4877,22 +4929,22 @@ async function openWorkflow(category, id) {
     throw err;
   }
   const runs = await api('GET', `${wfPath({ category, id })}/runs`);
-  stashWorkspace(); // 拆法輪 P3：離開的那條先打包
+  stashWorkspace(); // 離開的那條先打包
   state.wf = { category, id, def, runs };
   state.run = null;
-  // 拆法輪 P3：有暫存包＝讀回（草稿、聊天、本次資料、分頁、選取、畫布工作本）；沒有才重設成預設（mode list、flowTab design、paramNow {}…）
+  // 有暫存包＝讀回（草稿、聊天、本次資料、分頁、選取、畫布工作本）；沒有才重設成預設（mode list、flowTab design、paramNow {}…）
   restoreWorkspace(flowKey({ category, id }));
   state.editingParam = null;
   state.editingNode = null;
   state.cvShowIssues = false;
-  state.cvCondEdit = null; // 排版輪 L14：畫布條件格編輯、選中的線不跨 Workflow
+  state.cvCondEdit = null; // 畫布條件格編輯、選中的線不跨 Workflow
   state.cvEdgeSel = null;
   state.cvCondIssues = null;
   state.addingParam = false;
-  state.dataCard = 'data'; // 調整輪：換流程回到預設展開「填寫這次的值」
+  state.dataCard = 'data'; // 換流程回到預設展開「填寫這次的值」
   state.flowSettingsOpen = false; // 移植第一批 T10：換流程關兩浮窗
   state.flowMemOpen = false;
-  state.sharedOpen = false; // 移植合併輪 U4b：換流程關共用檔浮窗、「查看全部」收回
+  state.sharedOpen = false; // 換流程關共用檔浮窗、「查看全部」收回
   state.wfRuns = [];
   state.shared = { company: null, dept: null, err: null };
   state.feedbackSent = false;
@@ -4903,11 +4955,11 @@ async function openWorkflow(category, id) {
   await refreshProposals(state.wf);
   state.wfFiles = await api('GET', `${wfPath(state.wf)}/files`);
   await refreshFolder(); // 右側資料夾：歷次執行摘要＋兩層共用檔（任一讀不到＝該塊印讀不到，流程照開）
-  // 記憶輪（M3b）：開跑表單的習慣選項——每次重抓；點過的卡、改掉的、身分在暫存包裡（P3），沒包才歸零
+  // （M3b）：開跑表單的習慣選項——每次重抓；點過的卡、改掉的、身分在暫存包裡，沒包才歸零
   state.wfMemory = null;
   state.memMore = {};
   await refreshWfMemory();
-  if (!state.chat.refs) refreshShapeRefs(); // 排版輪 L1：wfMemory／shared 抓好了再抓；排版輪 L9：聊天右欄常駐「這次拆解會參考」，沒卡也抓
+  if (!state.chat.refs) refreshShapeRefs(); // wfMemory／shared 抓好了再抓；聊天右欄常駐「這次拆解會參考」，沒卡也抓
   return true;
 }
 
@@ -4922,7 +4974,7 @@ async function gotoNode(category, id, nodeId) {
   render();
 }
 
-// 排版輪 L14：畫布手勢的改動——canvasCommit 改工作本、cvRefresh 只補畫面（不整頁重繪）；丟錯（例：繞圈）講人話、畫面照工作本補回。
+// 畫布手勢的改動——canvasCommit 改工作本、cvRefresh 只補畫面（不整頁重繪）；丟錯（例：繞圈）講人話、畫面照工作本補回。
 // 這次改動打開了步驟彈窗（雙擊空白加步驟、線上插一步）才整頁畫（彈窗要掛上）
 function cvEdit(fn) {
   const opened = state.drawerOpen;
@@ -4970,9 +5022,9 @@ const cvHandlers = {
     state.canvasSel = t.id;
     state.drawerOpen = true;
   }),
-  // 排版輪 L13：拿掉「一步只接一條出線」——第二條線起出口就是同時做（或擇一），成環由 cvConnect 擋、cvEdit 講人話
+  // 拿掉「一步只接一條出線」——第二條線起出口就是同時做（或擇一），成環由 cvConnect 擋、cvEdit 講人話
   onConnect: (from, to) => cvEdit((d) => cvConnect(d, from, to)),
-  // 拉到空白 → 原地長出下一步並接上、選中它（排版輪 L14：不自動開彈窗，連拉幾步不被打斷；雙擊卡再命名）
+  // 拉到空白 → 原地長出下一步並接上、選中它（不自動開彈窗，連拉幾步不被打斷；雙擊卡再命名）
   onNewFrom: (from, x, y) => cvEdit((d) => {
     const t = makeTask('新步驟');
     d.nodes.push(t);
@@ -4980,7 +5032,7 @@ const cvHandlers = {
     state.canvasSel = t.id;
     cvConnect(d, from, t.id);
   }),
-  // edge 是 cvModel 的線（from＝卡片；擇一線帶 arm）：剪到剩一條＝自動拉直（D17 慣例）
+  // edge 是 cvModel 的線（from＝卡片；擇一線帶 arm）：剪到剩一條＝自動拉直
   onCut: (edge) => cvEdit((def) => cvCut(def, edge.from, edge.to, edge.arm)),
   onInsert: (edge, mid) => cvEdit((def) => {
     const t = makeTask('新步驟');
@@ -4999,22 +5051,22 @@ const cvHandlers = {
 // ---------- 事件 ----------
 app.addEventListener('keydown', (e) => {
   if (keyActivate(e)) return;
-  if (e.target.id === 'chat-input' && e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.isComposing) { e.preventDefault(); sendChat(); } // 排版輪 L9：多行框 Ctrl+Enter 送出、Enter 換行
+  if (e.target.id === 'chat-input' && e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.isComposing) { e.preventDefault(); sendChat(); } // 多行框 Ctrl+Enter 送出、Enter 換行
   if (e.target.matches?.('[data-pedit]') && e.key === 'Enter') commitParamEdit(e.target);
-  if (e.target.id === 'set-company-name' && e.key === 'Enter') e.target.blur(); // 設定→資料 公司名稱（U3）：Enter＝失焦，交給 change 存
-  if (e.target.dataset?.act === 'param-label' && e.key === 'Enter') e.target.blur(); // 排版輪 L8：欄位名稱 Enter＝失焦，交給 change 存
-  if (e.target.id === 'rename-name' && e.key === 'Enter') { e.preventDefault(); renameSave(); } // 改名浮窗（拆法輪 P2）：Enter＝儲存
-  if (e.target.id === 'cvcond-edit') cvCondKey(e); // 排版輪 L14：畫布條件格 Enter 存、Esc 放棄
+  if (e.target.id === 'set-company-name' && e.key === 'Enter') e.target.blur(); // 設定→資料 公司名稱：Enter＝失焦，交給 change 存
+  if (e.target.dataset?.act === 'param-label' && e.key === 'Enter') e.target.blur(); // 欄位名稱 Enter＝失焦，交給 change 存
+  if (e.target.id === 'rename-name' && e.key === 'Enter') { e.preventDefault(); renameSave(); } // 改名浮窗：Enter＝儲存
+  if (e.target.id === 'cvcond-edit') cvCondKey(e); // 畫布條件格 Enter 存、Esc 放棄
 });
 
 // 畫布快捷鍵：Ctrl+Z 上一步、Ctrl+Shift+Z / Ctrl+Y 重做、Ctrl+S 存檔（打字中不攔，交還瀏覽器原生行為）
 document.addEventListener('keydown', (e) => {
-  // 說明文案輪：釘住的說明鈕 Esc 關，焦點留在那顆鈕上（就地改，不重繪）
+  // 釘住的說明鈕 Esc 關，焦點留在那顆鈕上（就地改，不重繪）
   if (e.key === 'Escape') {
     const open = document.querySelector('.hint[aria-expanded="true"]');
     if (open) { open.setAttribute('aria-expanded', 'false'); open.focus(); return; }
   }
-  if (e.key === 'Escape' && state.rowMenu) { // 排版輪 L4：「⋯」選單 Esc 關，焦點回那顆「⋯」
+  if (e.key === 'Escape' && state.rowMenu) { // 「⋯」選單 Esc 關，焦點回那顆「⋯」
     const { cat, id } = state.rowMenu;
     state.rowMenu = null;
     render();
@@ -5024,21 +5076,21 @@ document.addEventListener('keydown', (e) => {
     // 註：滑鼠點開再按 Esc 也會把焦點放回「⋯」（該列鉛筆與「⋯」留著顯示到焦點移走），刻意不分鍵盤／滑鼠
     return;
   }
-  if (e.key === 'Escape' && state.rename) { if (!state.rename.busy) { state.rename = null; render(); } return; } // 改名浮窗（拆法輪 P2）：Esc 關；存到一半不關
-  if (e.key === 'Escape' && state.memModal) { state.memModal = null; render(); return; } // 卡片浮窗（記憶輪 M4）：Esc 關
-  if (e.key === 'Escape' && state.flowMemOpen) { state.flowMemOpen = false; render(); return; } // 記憶浮窗（T10）：Esc 關
-  if (e.key === 'Escape' && state.flowSettingsOpen) { state.flowSettingsOpen = false; render(); return; } // 流程設定浮窗（T10）：Esc 關
-  if (e.key === 'Escape' && state.sharedOpen) { state.sharedOpen = false; render(); return; } // 共用檔浮窗（U4b）：Esc 關
-  if (e.key === 'Escape' && state.dash?.usageOpen) { state.dash.usageOpen = false; render(); return; } // 用量明細浮窗（U5）：Esc 關
-  if (e.key === 'Escape' && state.promptView) { state.promptView = null; render(); return; } // 執行頁卷宗浮窗（U6b）：Esc 關
+  if (e.key === 'Escape' && state.rename) { if (!state.rename.busy) { state.rename = null; render(); } return; } // 改名浮窗：Esc 關；存到一半不關
+  if (e.key === 'Escape' && state.memModal) { state.memModal = null; render(); return; } // 卡片浮窗：Esc 關
+  if (e.key === 'Escape' && state.flowMemOpen) { state.flowMemOpen = false; render(); return; } // 記憶浮窗：Esc 關
+  if (e.key === 'Escape' && state.flowSettingsOpen) { state.flowSettingsOpen = false; render(); return; } // 流程設定浮窗：Esc 關
+  if (e.key === 'Escape' && state.sharedOpen) { state.sharedOpen = false; render(); return; } // 共用檔浮窗：Esc 關
+  if (e.key === 'Escape' && state.dash?.usageOpen) { state.dash.usageOpen = false; render(); return; } // 用量明細浮窗：Esc 關
+  if (e.key === 'Escape' && state.promptView) { state.promptView = null; render(); return; } // 執行頁卷宗浮窗：Esc 關
   if (e.key === 'Escape' && state.settings?.confirm && !state.settings.busy) { state.settings.confirm = null; render(); return; } // 清空記憶的二次確認（M5b）：Esc 關
   if (e.key === 'Escape' && state.preview) { state.preview = null; render(); return; } // 成品預覽浮窗：Esc 關
   if (e.key === 'Escape' && state.calPicker) { state.calPicker = null; render(); return; } // 快速跳月浮層：Esc 關
-  if (e.key === 'Escape' && state.calMore) { state.calMore = false; render(); return; } // 排版輪 L6：行事曆「⋯」Esc 關
-  if (e.key === 'Escape' && !e.isComposing && state.drawerOpen && document.querySelector('.stepmodal')) { if (state.stepAsk) hideStepAsk(); else if (stepModalDirty()) showStepAsk(); else { closeStepModal(); render(); } return; } // 排版輪 L10：步驟彈窗 Esc 關；L12：有未套用改動先問（詢問開著再按 Esc＝繼續編輯）
+  if (e.key === 'Escape' && state.calMore) { state.calMore = false; render(); return; } // 行事曆「⋯」Esc 關
+  if (e.key === 'Escape' && !e.isComposing && state.drawerOpen && document.querySelector('.stepmodal')) { if (state.stepAsk) hideStepAsk(); else if (stepModalDirty()) showStepAsk(); else { closeStepModal(); render(); } return; } // 步驟彈窗 Esc 關；L12：有未套用改動先問（詢問開著再按 Esc＝繼續編輯）
   if (state.mode !== 'canvas' || state.run || state.dash || state.calendar || state.categoryPage || state.settings) return; // 儀表板/行事曆/分類頁/設定頁蓋在上面時畫布不收快捷鍵
-  if (document.querySelector('.stepmodal')) return; // 排版輪 L10：彈窗開著，復原／重做／存檔不動到後面的畫布
-  if (cvKeyDelete(e)) return; // 排版輪 L14：點線選取後 Delete＝剪線
+  if (document.querySelector('.stepmodal')) return; // 彈窗開著，復原／重做／存檔不動到後面的畫布
+  if (cvKeyDelete(e)) return; // 點線選取後 Delete＝剪線
   if (!(e.ctrlKey || e.metaKey)) return;
   if (e.target.matches?.('input, textarea, select, [contenteditable]')) return;
   const k = e.key.toLowerCase();
@@ -5047,16 +5099,16 @@ document.addEventListener('keydown', (e) => {
   else if (k === 's') { e.preventDefault(); cvSave(); }
 });
 
-// 關頁前的最後防線。排版輪 F3：聊天草稿與成品卡已經隨打隨存進瀏覽器，重新整理不會丟——所以「只在真的會丟東西時」才攔：
+// 關頁前的最後防線。聊天草稿與成品卡已經隨打隨存進瀏覽器，重新整理不會丟——所以「只在真的會丟東西時」才攔：
 // ①畫布還有未存檔改動（工作本沒進瀏覽器，照舊一律攔）②沒存的東西存不進瀏覽器（隱私模式、配額滿、認不得資料夾）
 window.addEventListener('beforeunload', (e) => {
   dsSaveNow(); // 節流還沒到期的那一次，關頁前補寫進去
-  if (state.cvDirty || dsAtRisk() || [...wsByFlow.values()].some((p) => p.cvDirty)) { e.preventDefault(); e.returnValue = ''; } // 拆法輪 P3：別條流程暫存包裡的未存改動也算
+  if (state.cvDirty || dsAtRisk() || [...wsByFlow.values()].some((p) => p.cvDirty)) { e.preventDefault(); e.returnValue = ''; } // 別條流程暫存包裡的未存改動也算
 });
 
 app.addEventListener('focusout', (e) => {
   if (e.target.matches?.('[data-pedit]') && state.editingParam) commitParamEdit(e.target);
-  if (e.target.id === 'cvcond-edit' && state.cvCondEdit && !rendering) cvCondFinish(e.target.value, true); // 排版輪 L14：條件格點到別處＝存（重繪換掉的不算）
+  if (e.target.id === 'cvcond-edit' && state.cvCondEdit && !rendering) cvCondFinish(e.target.value, true); // 條件格點到別處＝存（重繪換掉的不算）
 });
 
 // 權限列亮框動畫一跑完就收（比 1.5 秒的計時器準；計時器留著兜底，例如系統關掉動畫時）
@@ -5067,30 +5119,30 @@ app.addEventListener('animationend', (e) => {
   }
 });
 
-// 多行框（T5）：邊打邊存進 state.keep（重繪後放回）＋自動長高
+// 多行框：邊打邊存進 state.keep（重繪後放回）＋自動長高
 app.addEventListener('input', (e) => {
   const t = e.target;
   if (t.matches?.('[data-keep]')) state.keep[keepKey(t.id)] = t.value;
-  if (t.matches?.('[data-shape-input]')) { // 排版輪 L9（題 5-4）：成品卡七格常駐輸入框——打字寫回 state（輪詢重繪讀 state 不洗字），依據小字就地換、不整頁重繪
+  if (t.matches?.('[data-shape-input]')) { // 成品卡七格常駐輸入框——打字寫回 state（輪詢重繪讀 state 不洗字），依據小字就地換、不整頁重繪
     shapeInput(t.dataset.shapeInput, t.value);
     const b = t.closest('label')?.querySelector('.basis');
     const cell = state.chat.shape?.[t.dataset.shapeInput];
     if (b && cell) b.textContent = BASIS_TXT[cell.basis] ?? cell.basis;
   }
-  if (t.id === 'rename-name' && state.rename) state.rename.value = t.value; // 改名浮窗（拆法輪 P2）：打字寫回 state，輪詢重繪讀回、錯了紅字也不洗字
+  if (t.id === 'rename-name' && state.rename) state.rename.value = t.value; // 改名浮窗：打字寫回 state，輪詢重繪讀回、錯了紅字也不洗字
   if (t.matches?.('textarea.autogrow')) autoGrow(t);
   if (t.dataset?.param !== undefined) { // 「本次資料」邊打邊存＋句內膠囊就地同步（不等 change、不重繪）；點過的卡被改字＝取消核可
     state.paramNow[t.dataset.param] = t.value;
     syncParamChips(t.dataset.param, t.value);
     memParamEdited(t.dataset.param, t.value);
-    scheduleHealth(); // 排版輪 L11：停 600ms 重算健檢，只補畫健檢卡
+    scheduleHealth(); // 停 600ms 重算健檢，只補畫健檢卡
   }
-  if (t.id === 'run-note') state.runNote = t.value; // 排版輪 L11（題 3f）：本次補充寫回 state（跟著這條 Workflow 的暫存包走）
+  if (t.id === 'run-note') state.runNote = t.value; // 本次補充寫回 state（跟著這條 Workflow 的暫存包走）
   if (t.id === 'cal-pick-year' && state.calPicker && /^\d{4}$/.test(t.value)) { // 年份直接打：存進 state、月格就地更新
     state.calPicker.year = Number(t.value);
     patchCalPickerGrid();
   }
-  // 設定頁的編輯表單（記憶輪 M5a）：身分名字、角色／片段的名字與內容每打一字寫進 state，重繪從它還原
+  // 設定頁的編輯表單：身分名字、角色／片段的名字與內容每打一字寫進 state，重繪從它還原
   if (t.id === 'lib-search' && state.library) { // 流程庫頁搜尋：只換卡片格，不整頁重繪
     state.library.q = t.value;
     const g = document.getElementById('lib-grid');
@@ -5098,16 +5150,16 @@ app.addEventListener('input', (e) => {
   }
   if (t.dataset?.idf && state.settings?.idEdit) state.settings.idEdit[t.dataset.idf] = t.value;
   if (t.dataset?.pf && state.assets?.edit) state.assets.edit[t.dataset.pf] = t.value;
-  // 多組織（調整輪）：移出確認——打對名字才解鎖那顆鈕。就地改 disabled、不整頁重繪，字才不會被輪詢洗掉
+  // 多組織：移出確認——打對名字才解鎖那顆鈕。就地改 disabled、不整頁重繪，字才不會被輪詢洗掉
   if (t.dataset?.orgKill !== undefined) {
     const go = document.getElementById('org-kill-go');
     if (go) go.disabled = t.value.trim() !== t.dataset.orgKill;
   }
   keepModalField(t);
-  dsSchedule(); // 排版輪 F3：打字（聊天框、成品卡七格、本次資料）不一定重繪，這裡也排一次寫入
+  dsSchedule(); // 打字（聊天框、成品卡七格、本次資料）不一定重繪，這裡也排一次寫入
 });
 
-// 行事曆浮窗表單暫存（T3）：排程視窗 sc-*／步驟浮窗 sm-* 每個欄位一改就寫進各自的 form——
+// 行事曆浮窗表單暫存：排程視窗 sc-*／步驟浮窗 sm-* 每個欄位一改就寫進各自的 form——
 // 整頁重繪（calendarPoll 每 5 秒）照 form 還原，值不會丟
 const MODAL_FIELDS = {
   'sc-wf': ['schedModal', 'wf'], 'sc-freq': ['schedModal', 'freq'], 'sc-weekday': ['schedModal', 'weekday'], 'sc-day': ['schedModal', 'day'],
@@ -5124,12 +5176,12 @@ function keepModalField(t) {
 
 app.addEventListener('change', async (e) => {
   if (keepModalField(e.target) && e.target.id === 'sc-freq') { render(); return; } // 換頻率＝換露出的欄位，重繪（值都在 form 裡）
-  if (e.target.id === 'lib-dept' && state.library) { // Workflow 庫部門下拉（排版輪 L5 取代膠囊 lib-cat）：同搜尋只換卡片格
+  if (e.target.id === 'lib-dept' && state.library) { // Workflow 庫部門下拉（ 取代膠囊 lib-cat）：同搜尋只換卡片格
     state.library.cat = e.target.value;
     const g = document.getElementById('lib-grid');
     if (g) g.innerHTML = libraryCardsHtml();
   }
-  // 排版輪 L8：標題列「搬到別的部門」下拉退場（驗收第 5 條：移至部門在「⋯」選單，走 moveWorkflowTo）
+  // 標題列「搬到別的部門」下拉退場（驗收第 5 條：移至部門在「⋯」選單，走 moveWorkflowTo）
   if (e.target.dataset?.act === 'param-label' && state.wf && !subjectIsDraft()) { // 執行需要的資料：欄位名稱改完即 PUT 定義（key 不變，只改 label）
     const label = e.target.value.trim();
     delete state.keep[keepKey(e.target.id)];
@@ -5144,7 +5196,7 @@ app.addEventListener('change', async (e) => {
     }
     render(); // 空白或沒改＝撥回原名
   }
-  if (e.target.id === 'shape-category') { // 成品卡分類下拉（拆法輪 P4）：只進 state，W1 第二趟 body 帶它；W2：部門規範數跟著分類換，再讀一遍
+  if (e.target.id === 'shape-category') { // 成品卡分類下拉：只進 state，W1 第二趟 body 帶它；W2：部門規範數跟著分類換，再讀一遍
     state.chat.category = e.target.value;
     state.chat.refs = null;
     refreshShapeRefs();
@@ -5153,13 +5205,13 @@ app.addEventListener('change', async (e) => {
     const newInput = document.getElementById('save-new-category');
     if (newInput) newInput.style.display = e.target.value === '__new__' ? '' : 'none';
   }
-  if (e.target.id === 'mem-identity') { // 這次以哪個身分跑（記憶輪 M3b）：隨「開始」送出；換了身分重抓這條流程會帶什麼（兩格、抽屜一列跟著變，M5a）
+  if (e.target.id === 'mem-identity') { // 這次以哪個身分跑：隨「開始」送出；換了身分重抓這條流程會帶什麼（兩格、抽屜一列跟著變，M5a）
     state.memIdentity = e.target.value;
     state.memIdentitySet = true;
     await refreshWfMemory();
     render();
   }
-  if (e.target.id === 'set-company-name' && state.settings?.data) { // 設定→資料 公司名稱（移植合併輪 U3）：change 即 PUT；成功同步側欄／麵包屑／公司頁用的 state.companyName；失敗一句＋重繪撥回現值
+  if (e.target.id === 'set-company-name' && state.settings?.data) { // 設定→資料 公司名稱：change 即 PUT；成功同步側欄／麵包屑／公司頁用的 state.companyName；失敗一句＋重繪撥回現值
     const s = state.settings;
     const name = e.target.value.trim();
     try {
@@ -5170,7 +5222,7 @@ app.addEventListener('change', async (e) => {
     } catch (err) { s.msg = { key: 'company', text: err.message, err: true }; }
     render();
   }
-  // 設定頁（記憶輪 M5a）：身分編輯的勾選寫進 state（不重繪）；詞典改性質即 PUT；合併的「併進哪個」記住
+  // 設定頁：身分編輯的勾選寫進 state（不重繪）；詞典改性質即 PUT；合併的「併進哪個」記住
   if (e.target.dataset?.idc !== undefined && state.settings?.idEdit) {
     if (e.target.checked) state.settings.idEdit.cards.add(e.target.dataset.idc); else state.settings.idEdit.cards.delete(e.target.dataset.idc);
   }
@@ -5190,7 +5242,7 @@ app.addEventListener('change', async (e) => {
     state.wf.def = def;
     render();
   }
-  if (e.target.dataset?.upload !== undefined && state.wf && !subjectIsDraft()) { // 排版輪 L11（題 2 A）：欄位「每次上傳檔案」勾選：直接存進定義（input:'file'，取消＝拿掉鍵）
+  if (e.target.dataset?.upload !== undefined && state.wf && !subjectIsDraft()) { // 欄位「每次上傳檔案」勾選：直接存進定義（input:'file'，取消＝拿掉鍵）
     const def = structuredClone(state.wf.def);
     const p = def.params.find((x) => x.key === e.target.dataset.upload);
     if (!p) return;
@@ -5202,8 +5254,30 @@ app.addEventListener('change', async (e) => {
   if (e.target.dataset?.presetFor && e.target.value) {
     const p = (state.presets[e.target.dataset.presetField] ?? []).find((x) => x.name === e.target.value);
     const target = document.getElementById(e.target.dataset.presetFor);
-    if (p && target) { target.value = p.text; target.dispatchEvent(new Event('input', { bubbles: true })); } // 複製式：填入後各改各的；排版輪 L10：走 input 存進暫存字，輪詢重繪不洗掉
+    if (p && target) { target.value = p.text; target.dispatchEvent(new Event('input', { bubbles: true })); } // 複製式：填入後各改各的；走 input 存進暫存字，輪詢重繪不洗掉
     e.target.value = '';
+  }
+});
+
+// 成品卡的「照著像的舊作品」。草稿這時還沒進 Workflow 庫（沒有可以掛檔案的地方），
+// 所以先擱在 state.chat.sample，存進庫那一刻才真的上傳成流程參考檔。
+document.getElementById('sample-file').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (!file || !state.chat.shape) return;
+  try {
+    // 檔名與大小在這裡就擋掉。等到按儲存才炸的話，流程已經存好、
+    // 拆解器也已經把這個檔名寫進 attachments，留下一個永遠找不到檔的設定。
+    const bad = badSampleName(file.name);
+    if (bad) { window.alert(bad); return; }
+    if (file.size > 10 * 1024 * 1024) { window.alert('這份檔案超過 10MB，剝繭存不下——換一份小一點的，或把它放進 Workflow 的參考檔。'); return; }
+    const buf = new Uint8Array(await file.arrayBuffer());
+    let bin = '';
+    for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+    state.chat.sample = { name: file.name, b64: btoa(bin) };
+    render();
+  } catch (err) {
+    window.alert(err.message);
   }
 });
 
@@ -5218,13 +5292,13 @@ document.getElementById('ref-file').addEventListener('change', async (e) => {
     for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
     await api('POST', `${wfPath(state.wf)}/files`, { name: file.name, content_b64: btoa(bin) });
     await refreshRefSection();
-    repaintAside(); // 移植合併輪 U4b：側欄「流程參考檔」也從這顆「上傳參考檔」進來——只換側欄，抽屜開著時不整頁重繪
+    repaintAside(); // 側欄「流程參考檔」也從這顆「上傳參考檔」進來——只換側欄，抽屜開著時不整頁重繪
   } catch (err) {
     window.alert(err.message);
   }
 });
 
-// 移植合併輪 U2b：公司頁／部門頁共用檔上傳——層與區看 state.sharedUpload；規範區前端先擋副檔名（句子同伺服器），伺服器再擋一次；
+// 公司頁／部門頁共用檔上傳——層與區看 state.sharedUpload；規範區前端先擋副檔名（句子同伺服器），伺服器再擋一次；
 // 成功＝POST 回的就是最新清單，直接換上；失敗一句紅字印在該區標題下（伺服器訊息原句：413 太長／409 同名／400 格式）
 document.getElementById('shared-file').addEventListener('change', async (e) => {
   const file = e.target.files[0];
@@ -5252,10 +5326,10 @@ document.getElementById('shared-file').addEventListener('change', async (e) => {
   render();
 });
 
-let backDown = null; // 排版輪 L10：步驟彈窗背景點一下才關——記住按下點（框內選字拖到遮罩放開，click 目標也是遮罩）
+let backDown = null; // 步驟彈窗背景點一下才關——記住按下點（框內選字拖到遮罩放開，click 目標也是遮罩）
 app.addEventListener('pointerdown', (e) => { backDown = e.target; }, true);
 app.addEventListener('click', async (e) => {
-  // 說明文案輪：說明鈕就地開合——不進 state 也不重繪（重繪會搶輸入焦點、也拖慢），
+  // 說明鈕就地開合——不進 state 也不重繪（重繪會搶輸入焦點、也拖慢），
   // 點任何地方都先把已經釘住的關掉，再決定要不要開自己這一顆。
   const hintBtn = e.target.closest('.hint');
   document.querySelectorAll('.hint[aria-expanded="true"]').forEach((h) => { if (h !== hintBtn) h.setAttribute('aria-expanded', 'false'); });
@@ -5276,17 +5350,17 @@ app.addEventListener('click', async (e) => {
     state.calPicker = null;
     render();
   }
-  // 排版輪 L6：行事曆「⋯」點外面就關（同上）
+  // 行事曆「⋯」點外面就關（同上）
   if (state.calMore && !e.target.closest('.calmore') && !e.target.closest('[data-act="cal-more"]')) {
     state.calMore = false;
     render();
   }
-  // 排版輪 L4：「⋯」選單點外面就關（點的若是別的動作，關掉後照常執行）
+  // 「⋯」選單點外面就關（點的若是別的動作，關掉後照常執行）
   if (state.rowMenu && !e.target.closest('.rowmenu') && !e.target.closest('[data-act="row-menu"]')) {
     state.rowMenu = null;
     render();
   }
-  // 多組織（調整輪）：側欄組織切換浮層點外面就關（同上）
+  // 多組織：側欄組織切換浮層點外面就關（同上）
   if (state.orgMenu && !e.target.closest('.org-menu') && !e.target.closest('[data-act="org-menu"]')) {
     state.orgMenu = false;
     render();
@@ -5296,7 +5370,7 @@ app.addEventListener('click', async (e) => {
   const act = el.dataset.act;
   try {
     if (act === 'reconnect') { await refreshHealth(); render(); }
-    // ===== 排版輪 L4：側欄 Workflow 列「⋯」選單與共用素材入口 =====
+    // ===== 側欄 Workflow 列「⋯」選單與共用素材入口 =====
     else if (act === 'row-menu') {
       const { cat, id, name } = el.dataset;
       if (state.rowMenu?.cat === cat && state.rowMenu.id === id) { state.rowMenu = null; render(); return; } // 再點同一顆＝關
@@ -5322,14 +5396,14 @@ app.addEventListener('click', async (e) => {
       state.rowMenu = null;
       render();
       window.location.href = `${wfPath({ category: cat, id })}/export`; // 同 export-wf 語意（附件下載，不離開頁面）
-    } else if (act === 'open-assets') { await openAssets(); } // 排版輪 L6：共用素材整頁
-    // ===== 儀表板（儀表板輪）=====
+    } else if (act === 'open-assets') { await openAssets(); } // 共用素材整頁
+    // ===== 儀表板=====
     else if (act === 'open-dash') {
       clearTimeout(state.pollTimer);
       closeCalendar();
       closeCategory();
       closeSettings(); closeLibrary(); closeAssets();
-      stashWorkspace(); // 拆法輪 P3：離開工作區先打包（畫布未存改動也帶著，不再問「丟掉？」）
+      stashWorkspace(); // 離開工作區先打包（畫布未存改動也帶著，不再問「丟掉？」）
       state.run = null;
       state.showTrash = false;
       state.importPreview = null;
@@ -5368,16 +5442,16 @@ app.addEventListener('click', async (e) => {
       state.promptView = null;
       render();
     } else if (act === 'run-prompt') {
-      // 執行頁右欄「當時指示」（U6b）：抓這一步的卷宗全文→state.promptView→重繪（浮窗掛 .layout 外，輪詢重繪不會關）
+      // 執行頁右欄「當時指示」：抓這一步的卷宗全文→state.promptView→重繪（浮窗掛 .layout 外，輪詢重繪不會關）
       const w = state.run.workflow;
       let text;
       try { text = (await api('GET', `/api/workflows/${encodeURIComponent(w.category)}/${encodeURIComponent(w.id)}/runs/${state.run.run_id}/prompts/${encodeURIComponent(el.dataset.pname)}`)).text; }
-      // 列管 L021：兩種情況都會讀不到，講清楚是哪一種，不要讓人以為是壞了
+      // 兩種情況都會讀不到，講清楚是哪一種，不要讓人以為是壞了
       catch (err) { text = `讀不到這一步的指示。可能是這一步還沒送出過工作單，也可能這一趟是「每步留存指示」上線前跑的——那時候沒有存。\n\n（${err?.message ?? err}）`; }
       state.promptView = { title: el.dataset.ptitle, text };
       render();
     }
-    // ===== 成品預覽浮窗＋文字成品排版（產檔輪）=====
+    // ===== 成品預覽浮窗＋文字成品排版=====
     else if (act === 'preview-file') {
       e.preventDefault(); // chip 在 <summary> 裡時，別順手把成品收起來
       const { cat, id, rid, fname } = el.dataset;
@@ -5406,7 +5480,7 @@ app.addEventListener('click', async (e) => {
       if (state.cvWork) state.cvWork.permissions = def.permissions; // 畫布工作本同步，之後存檔不會把開關蓋回去
       render();
     }
-    // ===== 交貨查核（交貨查核輪）=====
+    // ===== 交貨查核=====
     else if (act === 'check-toggle' || act === 'facts-toggle' || act === 'supervisor-toggle') {
       // 三個流程層開關：切換即 PUT 定義；沒存成就講一句並把開關撥回原樣（重繪照定義畫）。
       // check 兩個開關一律展開既有值再改——整張換掉會把旁邊那個靜默撥回缺省
@@ -5458,13 +5532,13 @@ app.addEventListener('click', async (e) => {
       delete state.keep[keepKey('edit-rules-text')];
       await refreshRun();
     }
-    // ===== 行事曆（D20）=====
+    // ===== 行事曆=====
     else if (act === 'open-calendar') {
       clearTimeout(state.pollTimer);
       closeDash();
       closeCategory();
       closeSettings(); closeLibrary(); closeAssets();
-      stashWorkspace(); // 拆法輪 P3
+      stashWorkspace(); //
       state.run = null;
       state.showTrash = false;
       state.importPreview = null;
@@ -5616,7 +5690,7 @@ app.addEventListener('click', async (e) => {
       await loadCalendar();
       render();
     } else if (act === 'autostart-toggle') {
-      // 開機自啟開關搬到設定→執行與排程→常駐（記憶輪 M5b）；狀態在 state.settings.data.autostart，失敗一句原因、畫面不假成功
+      // 開機自啟開關搬到設定→執行與排程→常駐；狀態在 state.settings.data.autostart，失敗一句原因、畫面不假成功
       const s = state.settings;
       try { s.data.autostart = await api('POST', '/api/autostart', { enabled: !(s.data.autostart?.enabled === true) }); } catch (err) { window.alert(err.message); }
       render();
@@ -5637,7 +5711,7 @@ app.addEventListener('click', async (e) => {
       closeDash();
       closeCategory();
       closeSettings(); closeLibrary(); closeAssets();
-      stashWorkspace(); // 拆法輪 P3：離開的那條先打包，換到這條的包（沒有＝預設），免得前一條的聊天／欄位值黏到這條
+      stashWorkspace(); // 離開的那條先打包，換到這條的包（沒有＝預設），免得前一條的聊天／欄位值黏到這條
       state.wf = { category: cat, id, def: await api('GET', `/api/workflows/${encodeURIComponent(cat)}/${encodeURIComponent(id)}`), runs: [] };
       restoreWorkspace(`${cat}/${id}`);
       state.run = { ...(await api('GET', `/api/workflows/${encodeURIComponent(cat)}/${encodeURIComponent(id)}/runs/${rid}`)), workflow: { category: cat, id } };
@@ -5653,7 +5727,7 @@ app.addEventListener('click', async (e) => {
       closeSettings(); closeLibrary(); closeAssets();
       const cat = el.dataset.cat;
       const id = el.dataset.id;
-      stashWorkspace(); // 拆法輪 P3：同 todo-go
+      stashWorkspace(); // 同 todo-go
       state.wf = { category: cat, id, def: await api('GET', `/api/workflows/${encodeURIComponent(cat)}/${encodeURIComponent(id)}`), runs: await api('GET', `/api/workflows/${encodeURIComponent(cat)}/${encodeURIComponent(id)}/runs`) };
       restoreWorkspace(`${cat}/${id}`);
       state.mode = 'list';
@@ -5662,7 +5736,7 @@ app.addEventListener('click', async (e) => {
       await refreshFolder();
       render();
     }
-    // ===== 群組圈分類頁（記憶輪 M1c）=====
+    // ===== 群組圈分類頁=====
     else if (act === 'open-category') {
       e.preventDefault(); // 移植第一批 T9：summary 上的文字＝開分類頁，不讓 details 原生收合（樹不跳動）
       clearTimeout(state.pollTimer);
@@ -5670,7 +5744,7 @@ app.addEventListener('click', async (e) => {
       closeDash();
       closeCategory();
       closeSettings(); closeLibrary(); closeAssets();
-      stashWorkspace(); // 拆法輪 P3
+      stashWorkspace(); //
       state.run = null;
       state.showTrash = false;
       state.corrupt = null;
@@ -5680,13 +5754,13 @@ app.addEventListener('click', async (e) => {
       render();
       await loadCategoryPage();
       render();
-    } else if (act === 'open-company') { // 移植合併輪 U2a：側欄公司節點／麵包屑第一節→公司頁（分類頁特例）
+    } else if (act === 'open-company') { // 側欄公司節點／麵包屑第一節→公司頁（分類頁特例）
       clearTimeout(state.pollTimer);
       closeCalendar();
       closeDash();
       closeCategory();
       closeSettings(); closeLibrary(); closeAssets();
-      stashWorkspace(); // 拆法輪 P3
+      stashWorkspace(); //
       state.run = null;
       state.showTrash = false;
       state.corrupt = null;
@@ -5723,15 +5797,15 @@ app.addEventListener('click', async (e) => {
       }
       cp.saving = false;
       render();
-    } else if (act === 'shared-upload') { // 移植合併輪 U2b：記下層與區，再開檔案選擇（規範區只列 md／txt／docx，參考區任何檔）
+    } else if (act === 'shared-upload') { // 記下層與區，再開檔案選擇（規範區只列 md／txt／docx，參考區任何檔）
       const cp = state.categoryPage;
       state.sharedUpload = { scope: cp.category, kind: el.dataset.kind };
       const input = document.getElementById('shared-file');
       input.accept = el.dataset.kind === 'rule' ? '.md,.txt,.docx' : '';
       input.click();
-    } else if (act === 'shared-view') { // 排版輪 L7（題 3b）：組織頁／部門頁共用檔「查看」——開既有預覽浮窗
+    } else if (act === 'shared-view') { // 組織頁／部門頁共用檔「查看」——開既有預覽浮窗
       await openSharedPreview(state.categoryPage.category, el.dataset.name);
-    } else if (act === 'shared-del') { // 移植合併輪 U2b：刪共用檔不進垃圾桶；參考類會順帶取消步驟裡的勾選（伺服器回 unlinked_steps）
+    } else if (act === 'shared-del') { // 刪共用檔不進垃圾桶；參考類會順帶取消步驟裡的勾選（伺服器回 unlinked_steps）
       const cp = state.categoryPage;
       const { kind, name } = el.dataset;
       const layer = cp.category === '_company' ? '全組織每一條 Workflow' : `「${catLabel(cp.category)}」分類的每一條 Workflow`;
@@ -5754,7 +5828,7 @@ app.addEventListener('click', async (e) => {
       render();
     }
     else if (act === 'new-flow') {
-      // 拆法輪 P3：已有一份沒存的草稿（暫存的，或正在看的）→先問；丟掉＝不進暫存
+      // 已有一份沒存的草稿（暫存的，或正在看的）→先問；丟掉＝不進暫存
       const onDraft = !state.wf && subjectIsDraft();
       if ((onDraft || wsByFlow.has('__draft__')) && !window.confirm('已有一份沒存的草稿，要丟掉重來嗎？')) return;
       closeCalendar();
@@ -5776,7 +5850,7 @@ app.addEventListener('click', async (e) => {
       state.cvDirty = false;
       state.mode = 'chat';
       render();
-    } else if (act === 'open-draft') { // 拆法輪 P3：側欄「草稿・還沒存」列→讀回暫存的新流程草稿
+    } else if (act === 'open-draft') { // 側欄「草稿・還沒存」列→讀回暫存的新流程草稿
       clearTimeout(state.pollTimer);
       closeCalendar();
       closeDash();
@@ -5791,9 +5865,9 @@ app.addEventListener('click', async (e) => {
       state.editingParam = null;
       state.cvShowIssues = false;
       restoreWorkspace('__draft__');
-      if (state.chat.shape && !state.chat.refs) refreshShapeRefs(); // 排版輪 L1：卡是離開後才回來的→補抓卡底數字
+      if (state.chat.shape && !state.chat.refs) refreshShapeRefs(); // 卡是離開後才回來的→補抓卡底數字
       render();
-    } else if (act === 'drop-draft') { // 排版輪 F3：側欄草稿列旁的「丟掉」——問一次，連瀏覽器裡存的那份一起清掉
+    } else if (act === 'drop-draft') { // 側欄草稿列旁的「丟掉」——問一次，連瀏覽器裡存的那份一起清掉
       if (!window.confirm('丟掉這份還沒存的草稿？裡面的對話與成品卡都會不見，救不回來。')) return;
       wsByFlow.delete('__draft__');
       if (!state.wf) { state.chat = emptyChat(); state.savingDraft = false; }
@@ -5801,7 +5875,7 @@ app.addEventListener('click', async (e) => {
       render();
     } else if (act === 'del-wf-row') {
       const { cat, id, name } = el.dataset;
-      if (state.rowMenu) { state.rowMenu = null; render(); } // 排版輪 L4：從「⋯」選單點的，先收選單再問
+      if (state.rowMenu) { state.rowMenu = null; render(); } // 從「⋯」選單點的，先收選單再問
       if (!window.confirm(`把「${name}」移到垃圾桶？30 天內都能復原。`)) return;
       await api('DELETE', `/api/workflows/${encodeURIComponent(cat)}/${encodeURIComponent(id)}`, undefined);
       wsByFlow.delete(`${cat}/${id}`);
@@ -5825,7 +5899,7 @@ app.addEventListener('click', async (e) => {
       state.canvasSel = el.dataset.node;
       state.drawerOpen = true;
       render();
-    } else if (act === 'step-pick') { // 排版輪 L8：清單卡「查看」＝只選取，右欄檢視器換成這一步（不開編輯）
+    } else if (act === 'step-pick') { // 清單卡「查看」＝只選取，右欄檢視器換成這一步（不開編輯）
       state.canvasSel = el.dataset.node;
       state.inspectorTab = 'step';
       render();
@@ -5838,16 +5912,36 @@ app.addEventListener('click', async (e) => {
       render();
     } else if (act === 'send-chat') await sendChat();
     else if (act === 'shape-confirm') {
-      // 拆法輪 W1：「照這樣拆」＝第二趟——卡上確認過的七格、來源、分類下拉帶回去拆；拆好 sendChat 會清卡
-      await sendChat({ phase: 'draft', shape: state.chat.shape, sources: state.chat.sources, category: state.chat.category });
+      // 「照這樣拆」＝第二趟——卡上確認過的七格、來源、分類下拉帶回去拆；拆好 sendChat 會清卡
+      // 檔案種類與參考作品跟著第二趟下去——拆解器要照它定最後一步的 output_file 與 attachments
+      await sendChat({
+        phase: 'draft', shape: state.chat.shape, sources: state.chat.sources, category: state.chat.category,
+        // 沒動過就不要送——硬塞 md 會把「最後一步是寄信」這種流程也逼著掛檔案屬性
+        output_file: state.chat.fileKind, sample_name: state.chat.sample?.name ?? null,
+      });
+    } else if (act === 'shape-kind') {
+      // 就地改（不整頁重繪，重繪會把七格打字中的焦點搶掉）
+      state.chat.fileKind = el.dataset.kind;
+      for (const b of document.querySelectorAll('[data-act="shape-kind"]')) {
+        const on = b.dataset.kind === state.chat.fileKind;
+        b.classList.toggle('on', on);
+        b.setAttribute('aria-pressed', String(on));
+      }
+      const unit = document.getElementById('shape-len-unit');
+      if (unit) unit.textContent = lenUnit(state.chat.fileKind);
+    } else if (act === 'shape-sample') {
+      document.getElementById('sample-file').click();
+    } else if (act === 'shape-sample-del') {
+      state.chat.sample = null;
+      render();
     } else if (act === 'shape-redo') {
-      // 拆法輪 W1：「重擬」＝同一句重送第一趟；明帶 phase 伺服器永遠只跑一趟（開關關掉也不連跑），卡上改的格子不帶回去
+      // 「重擬」＝同一句重送第一趟；明帶 phase 伺服器永遠只跑一趟（開關關掉也不連跑），卡上改的格子不帶回去
       await sendChat({ phase: 'shape' });
     }
     else if (act === 'clear-draft') {
       state.chat = emptyChat();
       state.savingDraft = false;
-      dsSaveNow(); // 排版輪 F3：清掉的東西不留在瀏覽器裡
+      dsSaveNow(); // 清掉的東西不留在瀏覽器裡
       render();
     } else if (act === 'save-draft') {
       state.savingDraft = true;
@@ -5867,16 +5961,29 @@ app.addEventListener('click', async (e) => {
       const def = structuredClone(state.chat.draft);
       delete def.category; // 分類是路徑，不進 workflow.yaml（改稿那條路在 sendChat 剝）
       const saved = await api('POST', '/api/workflows', { category, def });
+      // 卡上選的舊作品現在才有地方放——存進庫之後補上傳成這條 Workflow 的參考檔。
+      // 上傳失敗不擋存檔（流程本身已經存好了），只講一句；檔案沒上去＝拆解器寫進 attachments 的名字會找不到檔。
+      const sample = state.chat.sample;
+      let uploadedFiles = null;
+      if (sample) {
+        try {
+          // 回應本來就帶最新的檔案清單——接住它，不然剛存好的 Workflow 頁會說「還沒有參考檔」
+          const up = await api('POST', `${wfPath({ category: saved.category, id: saved.id })}/files`, { name: sample.name, content_b64: sample.b64 });
+          uploadedFiles = up?.files ?? null;
+        } catch (err) {
+          window.alert(`Workflow 存好了，但那份舊作品沒上傳成功：${err.message}\n到 Workflow 頁的參考檔再上傳一次就好。`);
+        }
+      }
       state.chat = emptyChat();
       state.savingDraft = false;
       await refreshLibrary();
-      // dict_similar（記憶輪）：欄位名跟詞典裡的很像——只提醒不擋，掛在這條流程上，換流程就消失
+      // dict_similar：欄位名跟詞典裡的很像——只提醒不擋，掛在這條流程上，換流程就消失
       state.wf = { category: saved.category, id: saved.id, def, runs: [], dictSimilar: saved.dict_similar ?? [] };
       state.versions = await api('GET', `${wfPath(state.wf)}/versions`);
       await refreshProposals(state.wf);
-      state.wfFiles = [];
+      state.wfFiles = uploadedFiles ?? [];
       state.mode = 'list';
-      dsSaveNow(); // 排版輪 F3：已經存進 Workflow 庫了，瀏覽器裡那份草稿同時清掉
+      dsSaveNow(); // 已經存進 Workflow 庫了，瀏覽器裡那份草稿同時清掉
       render();
     } else if (act === 'cv-new-blank') {
       state.chat.draft = { format: 1, name: '新 Workflow', params: [], nodes: [makeTask('第一步')] };
@@ -5887,7 +5994,7 @@ app.addEventListener('click', async (e) => {
       state.addingCategory = true;
       render();
       document.getElementById('new-category')?.focus();
-    } else if (act === 'cancel-category') { // 排版輪 L7：組織頁行內表單的取消
+    } else if (act === 'cancel-category') { // 組織頁行內表單的取消
       state.addingCategory = false;
       delete state.keep[keepKey('new-category')];
       render();
@@ -5919,7 +6026,7 @@ app.addEventListener('click', async (e) => {
       state.addingParam = false;
       render();
     } else if (act === 'open') {
-      await openWorkflow(el.dataset.cat, el.dataset.id); // 拆法輪 P3：畫布未存改動進暫存包，不再問「丟掉？」
+      await openWorkflow(el.dataset.cat, el.dataset.id); // 畫布未存改動進暫存包，不再問「丟掉？」
       render();
     } else if (act === 'del-run') {
       if (!window.confirm('這一趟不用跑完了？會連同它的紀錄、產出檔、指示卷宗一起刪掉，救不回來。')) return;
@@ -5943,7 +6050,7 @@ app.addEventListener('click', async (e) => {
       const defKey = JSON.stringify(state.wf.def);
       if (act === 'start') {
         let pf = null;
-        try { pf = await preflightNow(state.wf.def, { ...healthValues(state.wf.def), ...overrides }); } catch { /* 健檢端點讀不到：交給 POST /runs 的 409 兜底 */ } // 排版輪 L11：上傳欄位的值＝上傳好的檔名
+        try { pf = await preflightNow(state.wf.def, { ...healthValues(state.wf.def), ...overrides }); } catch { /* 健檢端點讀不到：交給 POST /runs 的 409 兜底 */ } // 上傳欄位的值＝上傳好的檔名
         if (pf?.issues?.length) {
           state.startCheck = { key: defKey, level: pf.issues.some((i) => i.level === 'block') ? 'block' : 'warn', issues: pf.issues };
           render();
@@ -5953,8 +6060,8 @@ app.addEventListener('click', async (e) => {
       state.startCheck = null;
       let run;
       try {
-        // 記憶輪（M3b）：點了的習慣卡＝核可、點了又改掉的、身分，隨開跑一起送
-        run = await api('POST', `${wfPath(state.wf)}/runs`, { overrides, ...memStartFields(overrides), ...runStartExtras() }); // 排版輪 L11：＋本次上傳與本次補充
+        // （M3b）：點了的習慣卡＝核可、點了又改掉的、身分，隨開跑一起送
+        run = await api('POST', `${wfPath(state.wf)}/runs`, { overrides, ...memStartFields(overrides), ...runStartExtras() }); // ＋本次上傳與本次補充
       } catch (err) {
         if (err.status === 409 && Array.isArray(err.body?.issues)) { // 後端兜底擋下：用同一張卡顯示
           state.startCheck = { key: defKey, level: 'block', issues: err.body.issues };
@@ -5964,7 +6071,7 @@ app.addEventListener('click', async (e) => {
         throw err;
       }
       state.run = run;
-      state.runUploads = {}; // 排版輪 L11：token 已用掉（檔跟著這一趟存）；補充也只給這一趟
+      state.runUploads = {}; // token 已用掉（檔跟著這一趟存）；補充也只給這一趟
       state.runNote = '';
       state.run.workflow = { category: state.wf.category, id: state.wf.id };
       state.runJson = null;
@@ -5979,7 +6086,7 @@ app.addEventListener('click', async (e) => {
       state.startCheck = null;
       render();
     } else if (act === 'mem-pick') {
-      // 習慣選項 chip（記憶輪 M3b）：點了＝把卡的內容填進那一格、記成核可；再點同一張＝取消（值留著）；換一張＝換核可
+      // 習慣選項 chip：點了＝把卡的內容填進那一格、記成核可；再點同一張＝取消（值留著）；換一張＝換核可
       const key = el.dataset.key;
       const id = el.dataset.id;
       if (state.memPicks[key] === id) {
@@ -5996,9 +6103,9 @@ app.addEventListener('click', async (e) => {
     } else if (act === 'mem-more') {
       state.memMore[el.dataset.key] = !state.memMore[el.dataset.key];
       render();
-    } else if (act === 'pf-recheck') { // 排版輪 L11：健檢卡「重新檢查」
+    } else if (act === 'pf-recheck') { // 健檢卡「重新檢查」
       recheckHealth();
-    } else if (act === 'run-upload') { // 排版輪 L11（題 2 A）：選檔→上傳進暫存區
+    } else if (act === 'run-upload') { // 選檔→上傳進暫存區
       const key = el.dataset.key;
       const input = document.createElement('input');
       input.type = 'file';
@@ -6011,14 +6118,14 @@ app.addEventListener('click', async (e) => {
       recheckHealth();
     } else if (act === 'pf-fix') {
       if (el.dataset.kind === 'node') { // 開那一步的抽屜
-        state.flowTab = 'design'; // 排版輪 L11：健檢卡常駐在本次資料，步驟彈窗只在設計分頁畫得出來
+        state.flowTab = 'design'; // 健檢卡常駐在本次資料，步驟彈窗只在設計分頁畫得出來
         state.canvasSel = el.dataset.id;
         state.drawerOpen = true;
         render();
       } else if (el.dataset.kind === 'flow') {
         // 流程層設定（目前只有產檔權限開關）：亮 1.5 秒＋捲到它。狀態驅動——class 由 permRowHtml 依 permFlashUntil 帶、
         // 捲動在 render() 尾端對新元素做，中途任何整頁重繪（通知輪詢等）都不會把亮框和捲動弄丟
-        if (state.flowTab === 'data') state.dataCard = 'execution'; // 調整輪：本次資料分頁的三開關在任務卡裡，展開它再亮、再捲
+        if (state.flowTab === 'data') state.dataCard = 'execution'; // 本次資料分頁的三開關在任務卡裡，展開它再亮、再捲
         else state.flowSettingsOpen = true; // 移植第一批 T10：三開關在浮窗裡，先開浮窗再亮、再捲
         state.permFlashUntil = Date.now() + 1500;
         render();
@@ -6027,8 +6134,8 @@ app.addEventListener('click', async (e) => {
           if (!isTyping()) render(); // 到期拿掉 class（動畫本身已跑完，打字中就留到下次重繪）
         }, 1500);
       } else { // 捲到那個欄位並聚焦
-        if (state.flowTab === 'data' && state.dataCard !== 'data') { state.dataCard = 'data'; render(); } // 調整輪：欄位與上傳框在「填寫這次的值」卡裡，先展開它才找得到
-        const t = app.querySelector(`[data-param="${CSS.escape(el.dataset.id)}"], [data-upload-box="${CSS.escape(el.dataset.id)}"] button`); // 排版輪 L11：上傳欄位捲到上傳框
+        if (state.flowTab === 'data' && state.dataCard !== 'data') { state.dataCard = 'data'; render(); } // 欄位與上傳框在「填寫這次的值」卡裡，先展開它才找得到
+        const t = app.querySelector(`[data-param="${CSS.escape(el.dataset.id)}"], [data-upload-box="${CSS.escape(el.dataset.id)}"] button`); // 上傳欄位捲到上傳框
         if (t) { t.scrollIntoView({ block: 'center', behavior: 'smooth' }); t.focus(); }
       }
     } else if (act === 'back') {
@@ -6061,7 +6168,7 @@ app.addEventListener('click', async (e) => {
       state.supOpen[nid] = !state.supOpen[nid];
       render();
     }
-    // ===== 就地看（記憶輪 M4）：「這步用了 N 條」展開、卡片浮窗、儀表板第一列 =====
+    // ===== 就地看：「這步用了 N 條」展開、卡片浮窗、儀表板第一列 =====
     else if (act === 'mem-toggle') {
       state.memOpen[el.dataset.node] = !state.memOpen[el.dataset.node];
       render();
@@ -6069,28 +6176,28 @@ app.addEventListener('click', async (e) => {
     else if (act === 'mem-modal-close' || (act === 'mem-modal-back' && e.target === el)) { state.memModal = null; render(); }
     else if (act === 'mem-retire' || act === 'mem-del') { await memCardAction(act === 'mem-retire' ? 'retire' : 'del'); }
     else if (act === 'open-settings-memory') { await openSettings('個人與記憶', '記憶總覽'); }
-    // ===== 設定頁（記憶輪 M5a）：容器、個人與記憶分頁、卡片浮窗的「改」 =====
+    // ===== 設定頁：容器、個人與記憶分頁、卡片浮窗的「改」 =====
     else if (act === 'open-settings') { await openSettings(state.settings?.group ?? '個人與記憶'); }
     else if (act === 'open-library') { openLibrary(); }
     else if (act === 'cv-more') { e.preventDefault(); const d = el.closest('details'); if (d) { d.open = !d.open; state.cvMore = d.open; } } // 抽屜收摺：只動 DOM 與 state，不 render（打到一半的字不洗掉）
     else if (act === 'flow-tab') { state.flowTab = el.dataset.tab === 'data' ? 'data' : 'design'; render(); } // 移植第一批 T10
-    // 調整輪：在本次資料分頁，三開關就在「確認執行選項」任務卡裡（展開它，不開浮窗——同一組 id 不重複出現在 DOM）
+    // 在本次資料分頁，三開關就在「確認執行選項」任務卡裡（展開它，不開浮窗——同一組 id 不重複出現在 DOM）
     else if (act === 'flow-settings') { if (state.flowTab === 'data') state.dataCard = 'execution'; else state.flowSettingsOpen = true; render(); }
     else if (act === 'data-card') { const c = el.dataset.card; state.dataCard = state.dataCard === c ? null : c; render(); }
     else if (act === 'flow-settings-close') { if (!el.classList.contains('pvback') || e.target === el) { state.flowSettingsOpen = false; render(); } }
     else if (act === 'flowmem-open') { state.flowMemOpen = true; render(); }
     else if (act === 'flowmem-close') { if (!el.classList.contains('pvback') || e.target === el) { state.flowMemOpen = false; render(); } }
-    // ===== 移植合併輪 U4b：流程頁右側資料夾、共用檔浮窗、本次資料收摺 =====
+    // ===== 流程頁右側資料夾、共用檔浮窗、本次資料收摺 =====
     else if (act === 'folder-toggle') {
       // details 的開合：讓瀏覽器原生切換，只把「切換後」的值記進 state（下次重繪讀回）；不整頁 render——本次資料打到一半的值不洗
       const d = el.closest('details');
       if (d) state.folderOpen[el.dataset.k] = !d.open;
     }
-    // ===== 移植合併輪 U6a：執行頁三欄 =====
+    // ===== 執行頁三欄 =====
     else if (act === 'run-inspect') {
-      // 移植合併輪 U6c：左軌點步驟＝切成那一步的歷史視圖（demo runPage 的 inspect）；點目前這步存 null 不存它的 id——不然跑到下一步時會彈成歷史
+      // 左軌點步驟＝切成那一步的歷史視圖（demo runPage 的 inspect）；點目前這步存 null 不存它的 id——不然跑到下一步時會彈成歷史
       const node = el.dataset.node;
-      state.runInspect = node === currentNodeOf(state.run) && state.run.status !== 'done' ? null : node; // 排版輪 L12：跑完的 run 點最後一步＝看它的歷史
+      state.runInspect = node === currentNodeOf(state.run) && state.run.status !== 'done' ? null : node; // 跑完的 run 點最後一步＝看它的歷史
       render();
     }
     else if (act === 'run-current') {
@@ -6106,7 +6213,7 @@ app.addEventListener('click', async (e) => {
     else if (act === 'runs-all') { state.folderOpen.runsAll = true; repaintAside(); }
     else if (act === 'shared-open') { state.sharedOpen = true; render(); }
     else if (act === 'shared-close') { if (!el.classList.contains('pvback') || e.target === el) { state.sharedOpen = false; render(); } }
-    // ===== 拆法輪 P2：三層改名浮窗（公司／部門／流程）=====
+    // ===== 三層改名浮窗（公司／部門／流程）=====
     else if (act === 'rename-open') {
       e.preventDefault(); // summary 內的鉛筆：不讓 details 原生切換
       const type = el.dataset.type;
@@ -6128,9 +6235,9 @@ app.addEventListener('click', async (e) => {
     }
     else if (act === 'set-group') { state.settings.group = el.dataset.g; state.settings.merge = null; state.settings.msg = null; render(); }
     else if (act === 'set-tab') { state.settings.tab[el.dataset.g] = el.dataset.k; state.settings.merge = null; state.settings.msg = null; render(); }
-    // ===== 設定頁後四組（記憶輪 M5b）：新流程的預設／執行與排程的開關即 PUT；連線、資料的動作走既有 API =====
+    // ===== 設定頁後四組：新流程的預設／執行與排程的開關即 PUT；連線、資料的動作走既有 API =====
     else if (act === 'set-def-sw') { const k = el.dataset.k; await setPut({ defaults: { [k]: state.settings.data.cfg.defaults?.[k] === false } }); }
-    else if (act === 'set-compose-sw') { await setPut({ compose: { confirm_shape: state.settings.data.cfg.compose?.confirm_shape === false } }); } // 拆法輪 W1（契約 F）：缺值視為開，反轉
+    else if (act === 'set-compose-sw') { await setPut({ compose: { confirm_shape: state.settings.data.cfg.compose?.confirm_shape === false } }); } // 缺值視為開，反轉
     else if (act === 'set-def-flag') { const k = el.dataset.k; await setPut({ defaults: { supervisor_flags: { [k]: !state.settings.data.cfg.defaults?.supervisor_flags?.[k] } } }); }
     else if (act === 'set-def-val') { const v = el.dataset.v; await setPut({ defaults: { [el.dataset.k]: v === 'null' ? null : /^\d+$/.test(v) ? Number(v) : v } }); }
     else if (act === 'set-exec-sw') { const k = el.dataset.k; await setPut({ exec: { [k]: state.settings.data.cfg.exec?.[k] === false } }); }
@@ -6242,7 +6349,7 @@ app.addEventListener('click', async (e) => {
       await api('DELETE', `/api/memory/identities/${encodeURIComponent(el.dataset.id)}`, undefined);
       await afterMemChange();
       render();
-    } else if (act === 'assets-tab') { state.assets.tab = el.dataset.t; render(); } // 排版輪 L6：共用素材頁（原設定→素材庫的列表改刪，搬成整頁卡片）
+    } else if (act === 'assets-tab') { state.assets.tab = el.dataset.t; render(); } // 共用素材頁（原設定→素材庫的列表改刪，搬成整頁卡片）
     else if (act === 'asset-new') {
       state.assets.edit = { field: state.assets.tab === '常用片段' ? 'snippet' : 'role_context', orig: null, name: '', text: '', err: null };
       render();
@@ -6363,11 +6470,11 @@ app.addEventListener('click', async (e) => {
       const text = document.getElementById('run-feedback-input')?.value.trim();
       if (!text) return;
       const out = await api('POST', `${wfPath(state.run.workflow)}/runs/${state.run.run_id}/run-feedback`, { text });
-      state.feedbackSent = out.memory_notice ?? true; // 記憶輪（M2）：回覆照它講記成什麼；舊伺服器沒回就照舊「收到」
+      state.feedbackSent = out.memory_notice ?? true; // （M2）：回覆照它講記成什麼；舊伺服器沒回就照舊「收到」
       pollProposalsSoon(state.run.workflow);
       await refreshRun(); // 頁頂那一行「記下來了…不要記」從 run 讀，剛寫進去的要重抓才看得到
     }
-    // ===== 記憶輪（M2）：首次三題介紹、通知「不要記」=====
+    // ===== （M2）：首次三題介紹、通知「不要記」=====
     else if (act === 'intro-save' || act === 'intro-skip') {
       const body = act === 'intro-skip' ? { skip: true } : { answers: introAnswers() };
       state.intro = { saving: true, err: null };
@@ -6415,8 +6522,8 @@ app.addEventListener('click', async (e) => {
       state.versions = await api('GET', `${wfPath(state.wf)}/versions`);
       render();
     } else if (act === 'cv-close-drawer') {
-      if (el.classList.contains('pvback') && (e.target !== el || backDown !== el)) return; // 排版輪 L10：背景點一下＝關——只認按下與放開都在遮罩本身（框內點冒泡上來、框內選字拖到外面放開都不算）
-      // 排版輪 L12：有未套用改動——背景不關只閃框；✕／取消先問；詢問列的「丟掉」（data-discard）才真的丟
+      if (el.classList.contains('pvback') && (e.target !== el || backDown !== el)) return; // 背景點一下＝關——只認按下與放開都在遮罩本身（框內點冒泡上來、框內選字拖到外面放開都不算）
+      // 有未套用改動——背景不關只閃框；✕／取消先問；詢問列的「丟掉」（data-discard）才真的丟
       if (!el.dataset?.discard && stepModalDirty()) { if (el.classList.contains('pvback')) nudgeStepModal(); else showStepAsk(); return; }
       closeStepModal(); // 重開同一顆也回預設；未套用的改動丟掉（同原抽屜「關閉」）
       render();
@@ -6458,8 +6565,8 @@ app.addEventListener('click', async (e) => {
         if (['分岔', '依情況'].includes(n.title)) n.title = '並行';
       });
     } else if (act === 'cv-apply') {
-      state.stepAsk = false; // 排版輪 L12：詢問列的「套用」也走這裡
-      let flip = false; // 排版輪 L10：換了「你來處理」＝窗留著（重繪換出對應欄位）；其餘套用成功就關窗（樣稿 applyEdit）
+      state.stepAsk = false; // 詢問列的「套用」也走這裡
+      let flip = false; // 換了「你來處理」＝窗留著（重繪換出對應欄位）；其餘套用成功就關窗（樣稿 applyEdit）
       await canvasOp((def) => {
         const n = def.nodes.find((x) => x.id === state.canvasSel);
         if (!n) return;
@@ -6469,7 +6576,7 @@ app.addEventListener('click', async (e) => {
         if (kindOf(n) === 'task') {
           const ex = document.getElementById('cv-human').checked ? 'human' : 'ai';
           flip = ex !== n.executor;
-          if (flip) state.stepSnap = null; // 排版輪 L12：換執行者留窗——canvasOp 重繪後重記開窗值（欄位換了一批）
+          if (flip) state.stepSnap = null; // 換執行者留窗——canvasOp 重繪後重記開窗值（欄位換了一批）
           n.executor = ex;
           n.stop_point = document.getElementById('cv-stop').checked ? 'always' : 'never';
           const optText = [['cv-output-format', 'output_format'], ['cv-role', 'role_context'], ['cv-bg', 'background'],
@@ -6504,7 +6611,7 @@ app.addEventListener('click', async (e) => {
             const picked = attBoxes.filter((c) => c.checked).map((c) => { const scope = c.dataset.attScope ?? 'flow', name = c.dataset.att; return scope === 'flow' ? name : { scope, name }; });
             if (picked.length) n.attachments = picked; else delete n.attachments;
           }
-          // 排版輪 L13：擇一怎麼挑、每條線的條件、入口（等全部／任一條到）——欄位有畫出來才寫
+          // 擇一怎麼挑、每條線的條件、入口（等全部／任一條到）——欄位有畫出來才寫
           const chooseEl = document.getElementById('cv-choose');
           if (chooseEl) cvSetChoose(def, n.id, chooseEl.value);
           for (const inp of document.querySelectorAll('[data-cond-arm]')) cvSetCond(def, n.id, inp.dataset.condTo, inp.value, Number(inp.dataset.condArm));
@@ -6524,12 +6631,12 @@ app.addEventListener('click', async (e) => {
         removeNodeSimple(def, state.canvasSel);
       });
     } else if (act === 'cv-convert') {
-      await canvasOp((def) => cvConvert(def, state.canvasSel)); // 排版輪 L13（題 4 A）：使用者按了才轉舊寫法，不自動改寫
+      await canvasOp((def) => cvConvert(def, state.canvasSel)); // 使用者按了才轉舊寫法，不自動改寫
       closeStepModal();
       render();
     } else if (act === 'cv-dissolve') {
       await canvasOp(() => {}); // 空編輯：normalize 會把舊式 fork/join 拆直
-    } else if (act === 'cv-help') { // 排版輪 L14：「？」操作說明浮層，只切 hidden 不重繪
+    } else if (act === 'cv-help') { // 「？」操作說明浮層，只切 hidden 不重繪
       state.cvHelp = !state.cvHelp;
       const hp = app.querySelector('.cvhelp');
       if (hp) hp.hidden = !state.cvHelp;
@@ -6545,9 +6652,9 @@ app.addEventListener('click', async (e) => {
     } else if (act === 'export-wf') {
       window.location.href = `${wfPath(state.wf)}/export`;
     } else if (act === 'pick-import') {
-      // 排版輪 L6：只開選檔；選到檔才關頁（在 import-file 的 change 裡）——取消選檔＝留在 Workflow 庫
+      // 只開選檔；選到檔才關頁（在 import-file 的 change 裡）——取消選檔＝留在 Workflow 庫
       document.getElementById('import-file').click();
-    } else if (act === 'cancel-import') { // 排版輪 L7：從 Workflow 庫發起的匯入，「不匯入」回 Workflow 庫
+    } else if (act === 'cancel-import') { // 從 Workflow 庫發起的匯入，「不匯入」回 Workflow 庫
       const back = state.importFromLib;
       state.importFromLib = false;
       state.importPreview = null;
@@ -6566,7 +6673,7 @@ app.addEventListener('click', async (e) => {
       state.mode = 'list';
       render();
     } else if (act === 'view-trash') {
-      state.trashFromLib = !!state.library; // 排版輪 L6：從 Workflow 庫進來的，「回 Workflow 庫」回庫頁
+      state.trashFromLib = !!state.library; // 從 Workflow 庫進來的，「回 Workflow 庫」回庫頁
       closeCalendar();
       closeDash();
       closeCategory();
@@ -6610,7 +6717,7 @@ app.addEventListener('click', async (e) => {
       state.mode = 'list';
       render();
     }
-    // ===== 多組織（調整輪）：側欄切換器＋設定頁組織管理。一律追加在鏈尾，不動上面任何一支 =====
+    // ===== 多組織：側欄切換器＋設定頁組織管理。一律追加在鏈尾，不動上面任何一支 =====
     else if (act === 'org-menu') {
       state.orgMenu = !state.orgMenu;
       render();
@@ -6622,11 +6729,11 @@ app.addEventListener('click', async (e) => {
       const { id } = el.dataset;
       state.orgMenu = false;
       if (id === state.orgId) { render(); return; } // 點的是現在這個＝只關浮層
-      dsSaveNow(); // 大跑輪：等下要整頁重載，節流（500ms）還沒到期的那次先補寫進去，免得剛打的字跟著重載沒了
+      dsSaveNow(); // 等下要整頁重載，節流（500ms）還沒到期的那次先補寫進去，免得剛打的字跟著重載沒了
       await api('PUT', '/api/orgs/current', { id });
       // 整頁重載，不逐一清 state：state 有 40+ 欄位（開著的流程、畫布工作本、暫存包、輪詢計時器），漏一個就串到別的組織。
       // 重載走既有 init()，本機 <100ms；順帶讓 dsBind 換成新組織的資料夾＝沒存的草稿也跟著各歸各的
-      // （各組織的鍵在開站清殘骸時互不相清，見 dsLiveKeys：切走再切回來，這邊沒存的字還在）
+      //（各組織的鍵在開站清殘骸時互不相清，見 dsLiveKeys：切走再切回來，這邊沒存的字還在）
       location.reload();
     } else if (act === 'org-add') {
       const s = state.settings;
@@ -6639,7 +6746,7 @@ app.addEventListener('click', async (e) => {
         delete state.keep[keepKey('org-new-name')];
         await refreshCompanyName(); // 清單多一個（側欄切換器也是這一下才出現）
         s.busy = null;
-        // 大跑輪（覆核退回②）：後端 seedExamples 對每個新組織都種 2 條「範例」Workflow，訊息不能說「它現在是空的」
+        // 後端 seedExamples 對每個新組織都種 2 條「範例」Workflow，訊息不能說「它現在是空的」
         s.msg = { key: 'org', text: `建好了：「${made.name}」。裡面附了 2 條「範例」Workflow（週報、季報）可以直接看，不想要就刪掉；切過去就能開始建自己的。` };
         if (window.confirm(`「${made.name}」建好了。要現在切過去嗎？`)) {
           await api('PUT', '/api/orgs/current', { id: made.id });
@@ -6683,7 +6790,7 @@ document.getElementById('import-file').addEventListener('change', async (e) => {
   const file = e.target.files[0];
   e.target.value = '';
   if (!file) return;
-  state.importFromLib = !!state.library; // 排版輪 L7：記住從 Workflow 庫發起（「不匯入」與掃描失敗回庫頁）
+  state.importFromLib = !!state.library; // 記住從 Workflow 庫發起（「不匯入」與掃描失敗回庫頁）
   closeCalendar(); // 匯入預覽畫面在儀表板／行事曆／分類頁／設定頁／Workflow 庫之下，開著時會看不到
   closeDash();
   closeCategory();
@@ -6702,7 +6809,7 @@ document.getElementById('import-file').addEventListener('change', async (e) => {
   render();
 });
 
-// 行事曆拖拉改時間（D20）：拖排程事件到別的日期格＝單次覆寫 move（保留原時分）
+// 行事曆拖拉改時間：拖排程事件到別的日期格＝單次覆寫 move（保留原時分）
 app.addEventListener('dragstart', (e) => {
   const ev = e.target.closest('.cev[draggable="true"]');
   if (!ev) return;
@@ -6739,20 +6846,20 @@ async function noticePollGlobal() {
 // ---------- 啟動 ----------
 (async function init() {
   await refreshHealth();
-  await refreshCompanyName(); // 移植合併輪 U2a：側欄根節點的名字
+  await refreshCompanyName(); // 側欄根節點的名字
   await refreshLibrary();
-  dsLoad(); // 排版輪 F3：上次沒存完的草稿讀回來（側欄「草稿・還沒存」那列）；要在 refreshLibrary 之後，已經不在庫裡的那份才判得掉
+  dsLoad(); // 上次沒存完的草稿讀回來（側欄「草稿・還沒存」那列）；要在 refreshLibrary 之後，已經不在庫裡的那份才判得掉
   try {
     state.presets = await api('GET', '/api/presets');
   } catch { /* 常用庫讀不到就先空著 */ }
   try {
     applyNotices(await api('GET', '/api/notices'));
   } catch { /* 通知讀不到就先空著 */ }
-  // 記憶輪（M2）：還沒介紹過自己（也沒跳過）→三題先蓋在儀表板前；摘要讀不到就不問，照開儀表板
+  // （M2）：還沒介紹過自己（也沒跳過）→三題先蓋在儀表板前；摘要讀不到就不問，照開儀表板
   try {
     if (!(await api('GET', '/api/memory/summary')).intro_done) state.intro = { saving: false, err: null };
   } catch { /* 讀不到就當問過了 */ }
-  // 預設首頁＝儀表板（儀表板輪定案第 5 點）：有事先看到事
+  // 預設首頁＝儀表板（定案第 5 點）：有事先看到事
   state.dash = { data: null, usageView: 'flow', open: {}, promptView: null, usageOpen: false, showAll: false, calendar: null };
   render();
   try {

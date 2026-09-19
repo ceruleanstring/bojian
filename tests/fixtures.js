@@ -13,7 +13,7 @@ export const PAR_DEF = {
   ],
 };
 
-// 畫布回饋輪：不用 fork/join 的同形流程——多出線＝並行、多入線＝會合
+// 不用 fork/join 的同形流程——多出線＝並行、多入線＝會合
 export const PAR_DIRECT_DEF = {
   format: 1,
   name: '直連並行測試',

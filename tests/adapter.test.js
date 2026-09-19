@@ -53,6 +53,20 @@ test('產檔輪：fileMode → 加放行 Write/Edit/Bash(node *)、cwd＝產出�
   assert.ok(!plain.includes('# 產檔規則'), '一般步驟沒有產檔規則段');
 });
 
+test('成品格式輪：檔名是 .pptx → 產檔規則段改教 pptxgenjs，並擋掉簡報的兩個翻車點', async () => {
+  let child;
+  const adapter = createHostAdapter({ spawnFn: () => (child = fakeChild()) });
+  const p = adapter.executeNode({ ...NODE_ARGS, fileMode: { cwd: 'C:/tmp/run-out', fileName: '月報.pptx' } });
+  child.stdout.emit('data', 'ok');
+  child.emit('close', 0);
+  await p;
+  const w = child.stdin.written;
+  assert.ok(w.includes('pptxgenjs') && w.includes('月報.pptx'), w);
+  assert.ok(!w.includes('exceljs') && !w.includes('docxtemplater'), '別把其他格式的套件也塞給它');
+  assert.ok(w.includes('一張投影片只放一個重點'), '擋「整段文章塞一張」');
+  assert.ok(w.includes('中文不必嵌字型'), '擋「為了字型去連網或讀系統檔」');
+});
+
 test('步驟呼叫放行讀類工具（WebSearch/WebFetch/Read），不放行寫檔與執行；complete 不帶工具旗標', async () => {
   let child;
   let spawnArgs;
@@ -155,7 +169,7 @@ test('complete：原文 prompt 直送 stdin、回 stdout 文字', async () => {
   assert.equal(child.stdin.written, '把這件事拆成流程：訂餐廳');
 });
 
-// ===== 儀表板輪：--output-format json 解析＋用量帳本＋卷宗協定 =====
+// ===== --output-format json 解析＋用量帳本＋卷宗協定 =====
 const jsonReply = (over = {}) => JSON.stringify({
   type: 'result', is_error: false, result: '整理好的表格', total_cost_usd: 0.0123,
   usage: { input_tokens: 10, output_tokens: 20, cache_creation_input_tokens: 30, cache_read_input_tokens: 40 },
@@ -235,7 +249,7 @@ test('卷宗協定：renderPrompt 與實際送進 stdin 的 prompt 一字不差'
   assert.equal(adapter.renderPrompt(args), child.stdin.written);
 });
 
-// ===== 查核輪 T3：buildPrompt 四新段 =====
+// ===== buildPrompt 四新段 =====
 
 test('buildPrompt：paramBlocks → 「# 欄位內容（原文）」段出現在「# 上一步的產出」之前，每塊帶 label 與原文', () => {
   const adapter = createHostAdapter({});
@@ -300,7 +314,7 @@ test('buildPrompt：四個新段都不給 → 輸出與現況逐字相同（固�
   assert.equal(adapter.renderPrompt(SAMPLE_ARGS), FIXED_SAMPLE);
 });
 
-// ===== 記憶輪 M3a：工作單的「關於你」與「分類守則」兩段 =====
+// ===== 工作單的「關於你」與「分類守則」兩段 =====
 
 test('buildPrompt：coreNotes → 「# 關於你」段在「# 角色與情境」之前；groupRules → 「# 分類守則」段在「# 限制條件」之後、「# 使用者在停點改過的要求」之前；逐條列點', () => {
   const adapter = createHostAdapter({});
@@ -345,7 +359,7 @@ test('卷宗協定：帶兩新段的 renderPrompt 與實際送進 stdin 的 prom
   assert.ok(child.stdin.written.includes('# 關於你') && child.stdin.written.includes('# 分類守則'));
 });
 
-// ===== 監工輪 K2：工作單的監工交接段＋查網開關 =====
+// ===== 工作單的監工交接段＋查網開關 =====
 
 test('buildPrompt：supervisorNotes → 「# 監工交接」段出現在「# 上一步的產出」之前，逐條列點；空清單不出現', () => {
   const adapter = createHostAdapter({});
@@ -557,7 +571,7 @@ test('BOJIAN_LEAN=0：退回帶行李——spawn 參數與帶行李版本逐字�
   });
 });
 
-// 監工輪 K5：連接器例外——探針（reviews/監工輪-實走-2026-09-09/連接器探針.md）判定停在第一層，
+// 連接器例外——探針（reviews/-實走-2026-09-09/連接器探針.md）判定停在第一層，
 // 兇手是 --strict-mcp-config：不推它連接器就回來了，其餘輕裝旗標照推。
 test('連接器例外：meta.mcp 的呼叫不推 --strict-mcp-config、--allowedTools 加行事曆工具；其餘呼叫照舊嚴格', async () => {
   const a = capture();
@@ -583,7 +597,7 @@ test('連接器例外：meta.mcp 的呼叫不推 --strict-mcp-config、--allowed
   assert.ok(d.args.includes('--strict-mcp-config') && !d.args.includes(CALENDAR_TOOLS), '沒有 mcp 的步驟照舊輕裝');
 });
 
-// ===== 移植合併輪 U1b：工作單的「公司規範」與「部門規範」兩段（規範類每步都帶、全文貼進去；外圈在前：公司→部門→分類守則） =====
+// ===== 工作單的「公司規範」與「部門規範」兩段（規範類每步都帶、全文貼進去；外圈在前：公司→部門→分類守則） =====
 
 test('U1b ①：companyRules／deptRules → 「# 公司規範」「# 部門規範」在「# 限制條件」之後、「# 分類守則」之前；每檔「## 檔名」＋全文；空層不印段', () => {
   const adapter = createHostAdapter({});
@@ -645,7 +659,7 @@ test('U1b 覆核該修：規範內文行首 # 全部降一級（# → ##、#####
   assert.deepEqual(h1, ['# 這一步：整理歸納', '# 要求', '# 公司規範（每一步都照做；查核員也會對）', '# 部門規範（分類「旅遊」，同上）', '# 上一步的產出（你的輸入）'], '一級標題只剩系統段');
 });
 
-// ── 2026-09-18 審查修正輪：真子行程迴歸（假 stream 驗不到編碼，只有真的 pipe 才會分塊）──
+// ── 2026-09-18 真子行程迴歸（假 stream 驗不到編碼，只有真的 pipe 才會分塊）──
 
 test('長中文產出不被切壞：stdout 跨 64KB 塊界的中文要原樣回來', async () => {
   const { spawn } = await import('node:child_process');

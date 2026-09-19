@@ -1,4 +1,4 @@
-// 真 AI 案例集（交貨查核輪 T7）：拿真的 claude 當查核員，逐案跑 checker.runCheck，看它攔不攔得到。
+// 真 AI 案例集：拿真的 claude 當查核員，逐案跑 checker.runCheck，看它攔不攔得到。
 // 這不是 node --test 的一員（副檔名 .mjs、放在 tests/eval/，不符合預設 test glob）——它會花錢、要連宿主，
 // 是量測工具不是門禁，所以結束碼永遠 0：報表歸報表，不擋 CI。
 //

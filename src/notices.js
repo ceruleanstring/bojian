@@ -1,4 +1,4 @@
-// notices — 通知中心（D20）：系統事件存放、指紋去重、已處理留痕。不做業務判斷，事件由 scheduler/server 產生。
+// notices — 通知中心：系統事件存放、指紋去重、已處理留痕。不做業務判斷，事件由 scheduler/server 產生。
 // notices.json 是扁平清單；type='trigger' 是純觸發指紋（防重發防重跑，UI 不顯示）。
 
 export const NOTICE_TYPES = ['trigger', 'missed', 'overlap', 'start_failed', 'step_failed', 'snapshot_failed', 'reminder'];
