@@ -1,0 +1,56 @@
+format: 1
+name: 跟主管報告季度業績
+params:
+  - key: script_length
+    label: 講稿長度
+    default: 3 分鐘
+  - key: data_range
+    label: 資料範圍
+    default: 本季
+  - key: report_pages
+    label: 報告頁數
+    default: 5 頁內
+nodes:
+  - id: fetch-data
+    title: 抓資料（銷售系統）
+    executor: ai
+    stop_point: never
+    instruction: |
+      這是剝繭的內建範例流程，不連任何真實系統。請生成一份擬真的示範用銷售資料：
+      資料範圍取「{{data_range}}」，逐月列出訂單數、營收、對上月增減百分比，
+      再附一份前十商品排行（品名、件數、營收）。輸出用表格文字呈現，
+      結尾註明「（示範資料，非真實數字）」。
+    next: [organize]
+  - id: organize
+    title: 整理歸納
+    executor: ai
+    stop_point: always
+    instruction: |
+      把上一步的銷售資料整理成月度彙總表（按月份排、金額加千分位）與前十商品排行。
+      表格之外加三行以內的摘要，指出最值得注意的變化。
+    next: [analyze]
+  - id: analyze
+    title: 分析重點
+    executor: ai
+    stop_point: never
+    instruction: |
+      根據整理後的彙總，找出本期三個最重要的重點（成長動能、風險、異常），
+      每點附一句原因推測與一句建議。條列呈現。
+    next: [compose]
+  - id: compose
+    title: 做成報告＋講稿
+    executor: ai
+    stop_point: always
+    instruction: |
+      把前面步驟的彙總與重點做成兩份產出：
+      1) 報告大綱：控制在 {{report_pages}}，每頁一行標題＋兩行內容要點；
+      2) 口頭講稿：長度 {{script_length}}，開場一句、重點三段、收尾一句，口語化。
+    next: [present]
+  - id: present
+    title: 上台報告
+    executor: human
+    stop_point: always
+    instruction: |
+      拿著上一步的報告與講稿上台報告。完成後回來標記完成，
+      可以順手留一句戰果（例如主管的反應），讓流程之後學著調整。
+    next: []

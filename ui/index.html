@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>剝繭</title>
+<!-- 字型與圖示全部內建：沒網路時介面不會變樣，資料也不會因為載字型而透出去 -->
+<link rel="stylesheet" href="/vendor/geist/geist.css">
+<link rel="stylesheet" href="/vendor/phosphor/regular.css">
+<link rel="stylesheet" href="/vendor/phosphor/fill.css">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main id="app">
+  <div class="card" style="max-width:640px;margin:40px auto">
+    <div class="skel" style="height:38px;margin-bottom:8px"></div>
+    <div class="skel" style="height:80px"></div>
+  </div>
+</main>
+<input type="file" id="import-file" accept=".yaml,.yml" hidden>
+<input type="file" id="ref-file" accept=".docx,.xlsx,.pptx,.pdf,.md,.txt,.csv,.json,.html" hidden>
+<input type="file" id="sample-file" accept=".docx,.xlsx,.pptx,.pdf,.md,.txt,.html" hidden>
+<input type="file" id="shared-file" hidden>
+<script src="/canvas.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>
