@@ -1,0 +1,21 @@
+{
+  "_說明": "13 畫面兩邊的進頁腳本（由 scratchpad plan-demo.json／plan-now.json 整理）。demo＝樣稿（PROTO 靜態伺服器上的 page），now＝8788 分身首頁。步驟：{click: CSS, index?, text?}＝點第 index 個（text＝只挑含這段字的）；{eval: JS}＝在頁面跑。每步後等 after 毫秒（預設 demo 1200、now 1800）。畫面 task 改了 data-act 或文字時，同 task 更新這裡。",
+  "demoPage": "ux-unified-workspace-demo.html",
+  "screens": [
+    { "id": "01", "name": "儀表板", "demo": [], "now": [] },
+    { "id": "02", "name": "Workflow庫", "demo": [{ "eval": "go('library')" }], "now": [{ "click": "[data-act=open-library]" }] },
+    { "id": "03", "name": "行事曆", "demo": [{ "eval": "go('calendar')" }], "now": [{ "click": "[data-act=open-calendar]" }] },
+    { "id": "04", "name": "設定", "demo": [{ "eval": "go('settings')" }], "now": [{ "click": "[data-act=open-settings]" }] },
+    { "id": "05", "name": "組織頁", "demo": [{ "eval": "uxOrg('company')" }], "now": [{ "click": "[data-act=open-company]" }] },
+    { "id": "06", "name": "分類頁", "demo": [{ "eval": "uxOrg('operations')" }], "now": [{ "click": "[data-act=open-category][data-cat=\"範例\"]" }] },
+    { "id": "07", "name": "Workflow頁-聊天", "demo": [{ "eval": "openFlow('quarter');go('chat')" }], "now": [{ "click": "[data-act=open][data-id=\"quarterly-report\"]" }, { "click": "[data-act=mode-chat]" }] },
+    { "id": "07b", "name": "建立新Workflow-成品卡",
+      "demo": [{ "eval": "uxNewFlow();uxChatSend()" }, { "eval": "[...document.querySelectorAll('main *')].find(x=>x.children.length===0&&x.textContent.trim().startsWith('先以季度報告作為示範成品')).scrollIntoView({block:'start'})" }],
+      "now": [{ "click": "[data-act=new-flow]" }, { "eval": "state.chat.messages.push({role:'user',text:'每季要跟主管報告業績，幫我拆成流程'},{role:'ai',text:'先看成品長相對不對——格子點一下可以改，沒問題就按「照這樣拆」。'});state.chat.shape={deliverable:{value:'季度業績簡報',basis:'你說的'},type:{value:'簡報',basis:'推測'},audience:{value:'主管',basis:'你說的'},style:{value:'重點先講',basis:'預設'},length:{value:'10 頁內',basis:'預設'},sections:{value:'摘要／數字／下季計畫',basis:'推測'},range:{value:'上一季',basis:'推測'}};state.chat.sources=[{name:'季度銷售數字',from:'paste',note:'你貼'},{name:'市場概況',from:'web',note:'AI 上網查'}];state.chat.category=state.categories.find(c=>c!=='未分類')??'未分類';render();document.querySelector('[data-shapecard]')?.scrollIntoView({block:'start'})" }] },
+    { "id": "08", "name": "Workflow頁-清單", "demo": [{ "eval": "openFlow('quarter');view('list')" }], "now": [{ "click": "[data-act=open][data-id=\"quarterly-report\"]" }, { "click": "[data-act=mode-list]" }] },
+    { "id": "09", "name": "Workflow頁-畫布", "demo": [{ "eval": "openFlow('quarter');view('canvas')" }], "now": [{ "click": "[data-act=open][data-id=\"quarterly-report\"]" }, { "click": "[data-act=mode-canvas]" }] },
+    { "id": "10", "name": "Workflow頁-本次資料", "demo": [{ "eval": "openFlow('quarter');go('data')" }], "now": [{ "click": "[data-act=open][data-id=\"quarterly-report\"]" }, { "click": "[data-act=flow-tab]", "index": 1 }] },
+    { "id": "11", "name": "步驟編輯", "demo": [{ "eval": "openFlow('quarter');view('list');edit(2)" }], "now": [{ "click": "[data-act=open][data-id=\"quarterly-report\"]" }, { "click": "[data-act=mode-list]" }, { "click": "[data-act=edit-step]", "index": 2 }] },
+    { "id": "12", "name": "執行頁", "demo": [{ "eval": "uxResumeDashboard('quarter')" }], "now": [{ "click": "[data-act=todo-go][data-id=\"quarterly-report\"]", "text": "去處理" }] }
+  ]
+}
