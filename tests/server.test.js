@@ -4213,3 +4213,77 @@ test('B02：同一趟附兩份同名 source.csv 兩份都在——第二份落�
     for (const t of [t1, t2, t3]) assert.ok(!fs.existsSync(path.join(dataDir, 'uploads', t)), '暫存照舊用過即刪');
   } finally { await app.stop(); }
 });
+
+// —— 一句話安裝：開機自啟 .cmd 要把目前行程的資料夾／埠帶過去，不然裝到 %LOCALAPPDATA% 後開機會用錯資料夾 ——
+test('server：開機自啟 .cmd——行程帶 BOJIAN_DATA_DIR／BOJIAN_PORT 就寫 set 行，不帶就照舊（API 形狀不變）', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bojian-autostart-'));
+  const startup = path.join(root, 'Startup');
+  const saved = { d: process.env.BOJIAN_DATA_DIR, p: process.env.BOJIAN_PORT, c: process.env.BOJIAN_CLAUDE_BIN };
+  const restore = () => {
+    if (saved.d === undefined) delete process.env.BOJIAN_DATA_DIR; else process.env.BOJIAN_DATA_DIR = saved.d;
+    if (saved.p === undefined) delete process.env.BOJIAN_PORT; else process.env.BOJIAN_PORT = saved.p;
+    if (saved.c === undefined) delete process.env.BOJIAN_CLAUDE_BIN; else process.env.BOJIAN_CLAUDE_BIN = saved.c;
+  };
+  delete process.env.BOJIAN_CLAUDE_BIN;
+  const app = createApp({ dataDir: path.join(root, 'data'), adapter: fakeAdapter(), autostartDir: startup });
+  await app.start(0);
+  const base = `http://127.0.0.1:${app.port()}`;
+  const cmdFile = path.join(startup, 'bojian-autostart.cmd');
+  try {
+    // 帶 env：set 行在、且在啟動那行之前
+    const dataAbs = path.join(root, 'my data 100%');
+    process.env.BOJIAN_DATA_DIR = dataAbs;
+    process.env.BOJIAN_PORT = '8899';
+    let r = await api(base, 'POST', '/api/autostart', { enabled: true });
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.json, { supported: true, enabled: true });
+    let body = fs.readFileSync(cmdFile, 'utf8');
+    const setData = `set "BOJIAN_DATA_DIR=${dataAbs.replace(/%/g, '%%')}"\r\n`;
+    assert.ok(body.includes(setData), `.cmd 要有資料夾 set 行（% 要雙寫）：\n${body}`);
+    assert.ok(body.includes('set "BOJIAN_PORT=8899"\r\n'), `.cmd 要有埠 set 行：\n${body}`);
+    assert.ok(body.indexOf(setData) < body.indexOf('node src\\server.js'), 'set 行要在啟動之前');
+    assert.ok(body.includes('start "bojian" /min cmd /c "node src\\server.js"'), '啟動那行照舊');
+
+    // 相對路徑的資料夾：寫成絕對路徑（開機時 cwd 是程式夾，不是當初啟動的地方）
+    process.env.BOJIAN_DATA_DIR = 'rel-data';
+    delete process.env.BOJIAN_PORT;
+    await api(base, 'POST', '/api/autostart', { enabled: true });
+    body = fs.readFileSync(cmdFile, 'utf8');
+    assert.ok(body.includes(`set "BOJIAN_DATA_DIR=${path.resolve('rel-data')}"\r\n`), `相對路徑要轉絕對：\n${body}`);
+    assert.ok(!body.includes('BOJIAN_PORT'), '沒帶埠就不寫埠');
+    assert.ok(!body.includes('BOJIAN_CLAUDE_BIN'), '沒帶 claude 路徑就不寫');
+
+    // 桌面版內建的 claude（BOJIAN_CLAUDE_BIN）：跟 DATA_DIR 同一套，有就寫 set 行
+    const claudeBin = 'C:\\Users\\王 小明\\AppData\\Roaming\\Claude\\claude-code\\2.1.281\\claude.exe';
+    process.env.BOJIAN_CLAUDE_BIN = claudeBin;
+    await api(base, 'POST', '/api/autostart', { enabled: true });
+    body = fs.readFileSync(cmdFile, 'utf8');
+    assert.ok(body.includes(`set "BOJIAN_CLAUDE_BIN=${claudeBin}"\r\n`), `.cmd 要有 claude 路徑 set 行：\n${body}`);
+    assert.ok(body.indexOf('BOJIAN_CLAUDE_BIN') < body.indexOf('cd /d'), 'set 行在 cd 之前');
+    delete process.env.BOJIAN_CLAUDE_BIN;
+
+    // 不帶 env：跟以前一模一樣，沒有任何 set 行
+    delete process.env.BOJIAN_DATA_DIR;
+    delete process.env.BOJIAN_PORT;
+    r = await api(base, 'POST', '/api/autostart', { enabled: true });
+    assert.equal(r.status, 200);
+    body = fs.readFileSync(cmdFile, 'utf8');
+    assert.ok(!/\bset\b/i.test(body), `不帶 env 不該有 set 行：\n${body}`);
+    const { fileURLToPath } = await import('node:url');
+    const appRoot = path.join(fileURLToPath(new URL('../src/', import.meta.url)), '..');
+    assert.equal(body, `@echo off\r\nchcp 65001>nul\r\ncd /d "${appRoot}"\r\nstart "bojian" /min cmd /c "node src\\server.js"\r\n`, '不帶 env＝只多一行 chcp，其餘與改之前逐字相同');
+    // 中文路徑：cmd 用系統碼頁讀批次檔，檔案是 UTF-8 寫的 → 第一行（@echo off 之後）必須先切 65001，且不帶 BOM
+    const lines = body.split('\r\n');
+    assert.equal(lines[1], 'chcp 65001>nul', '第二行（@echo off 之後第一行）要是 chcp 65001>nul');
+    assert.ok(!fs.readFileSync(cmdFile).subarray(0, 3).equals(Buffer.from([0xef, 0xbb, 0xbf])), '不帶 BOM');
+
+    // GET 形狀不變；關掉＝刪檔
+    assert.deepEqual((await api(base, 'GET', '/api/autostart')).json, { supported: true, enabled: true });
+    r = await api(base, 'POST', '/api/autostart', { enabled: false });
+    assert.deepEqual(r.json, { supported: true, enabled: false });
+    assert.ok(!fs.existsSync(cmdFile));
+  } finally {
+    restore();
+    await app.stop();
+  }
+});

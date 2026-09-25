@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import path from 'node:path';
-import { createHostAdapter, HostError, LEAN_WORKER_SYSTEM, LEAN_GENERIC_SYSTEM, CALENDAR_TOOLS, CALENDAR_BLOCKED, readHostInit, CAGE_BASH_RULES, CAGE_CMD, CAGE_PATH, editRuleFor, WORKER_SETTINGS, killTree } from '../src/host-adapter.js';
+import { createHostAdapter, HostError, resolveClaudeBin, defaultSpawn, LEAN_WORKER_SYSTEM, LEAN_GENERIC_SYSTEM, CALENDAR_TOOLS, CALENDAR_BLOCKED, readHostInit, CAGE_BASH_RULES, CAGE_CMD, CAGE_PATH, editRuleFor, WORKER_SETTINGS, killTree } from '../src/host-adapter.js';
 
 // 假子行程：可控 stdout／stderr／結束碼／不結束
 function fakeChild() {
@@ -1052,4 +1052,70 @@ test('L052 killTree：taskkill 起不來（spawnFn 丟錯）直接 kill()；非 
   assert.doesNotThrow(() => killTree(null, { spawnFn: () => { throw new Error('不該被叫'); }, platform: 'win32' }), 'child 為 null 不炸');
   // kill() 自己丟錯（行程已經結束）也吞掉
   assert.doesNotThrow(() => killTree({ pid: FAKE_PID, kill: () => { throw new Error('ESRCH'); } }, { spawnFn: () => { throw new Error('x'); }, platform: 'win32' }));
+});
+
+// —— 一句話安裝輪：找 claude 執行檔（桌面版內建的 claude.exe 不在 PATH）——全部假 env／假 fs／假 spawn，不起真行程 ——
+function fakeFs(existing) {
+  // 測試跑在哪個平台都一樣：path.join 在 Windows 會把 / 換成 \，所以兩邊都正規化成 \ 再比
+  const norm = (p) => String(p).toLowerCase().replace(/\//g, '\\');
+  const set = new Set(existing.map(norm));
+  return {
+    existsSync: (p) => set.has(norm(p)),
+    readdirSync: (dir) => {
+      const prefix = norm(dir).replace(/[\\/]+$/, '') + '\\';
+      const names = new Set();
+      for (const p of set) if (p.startsWith(prefix)) names.add(p.slice(prefix.length).split('\\')[0]);
+      if (!names.size) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      return [...names];
+    },
+  };
+}
+const APPDATA = 'C:\\Users\\王 小明\\AppData\\Roaming';
+const WIN_ENV = { APPDATA, PATH: 'C:\\Windows\\system32;C:\\Program Files\\nodejs', PATHEXT: '.COM;.EXE;.BAT;.CMD' };
+
+test('找 claude ①：有 BOJIAN_CLAUDE_BIN 就用它（不看 PATH、不掃 APPDATA）；Windows 完整路徑走 cmd /d /s /c 加外引號、自己引參數', async () => {
+  const bin = `${APPDATA}\\Claude\\claude-code\\2.1.281\\claude.exe`;
+  const fs = fakeFs([`${WIN_ENV.PATH.split(';')[0]}\\claude.cmd`]); // PATH 上也有，仍以 env 為準
+  assert.equal(resolveClaudeBin({ env: { ...WIN_ENV, BOJIAN_CLAUDE_BIN: bin }, fs, platform: 'win32' }), bin);
+  assert.equal(resolveClaudeBin({ env: { BOJIAN_CLAUDE_BIN: '/opt/claude' }, fs: fakeFs([]), platform: 'darwin' }), '/opt/claude');
+  // spawn 形狀：路徑含空白與中文，引號要對；含空白的參數與空字串參數也要引
+  const calls = [];
+  const spawnImpl = (cmd, args, opts) => { calls.push({ cmd, args, opts }); return fakeChild(); };
+  defaultSpawn(['-p', '--tools', '', '--system-prompt', '你 好 "引號"'], {}, { spawnImpl, bin, platform: 'win32' });
+  assert.equal(calls[0].cmd, 'cmd');
+  assert.deepEqual(calls[0].args.slice(0, 3), ['/d', '/s', '/c']);
+  assert.equal(calls[0].args[3], `""${bin}" -p --tools "" --system-prompt "你 好 \\"引號\\"""`);
+  assert.equal(calls[0].opts.windowsVerbatimArguments, true);
+  // PATH 上的裸字：寫法與以前一模一樣（不加 /s、不加外引號）
+  defaultSpawn(['--version'], {}, { spawnImpl, bin: 'claude', platform: 'win32' });
+  assert.deepEqual(calls[1].args, ['/c', 'claude', '--version']);
+  assert.ok(!calls[1].opts.windowsVerbatimArguments);
+  // 非 Windows：直接 spawn 路徑
+  defaultSpawn(['--version'], {}, { spawnImpl, bin: '/opt/claude', platform: 'linux' });
+  assert.equal(calls[2].cmd, '/opt/claude');
+  assert.deepEqual(calls[2].args, ['--version']);
+});
+
+test('找 claude ②③：PATH 有就回裸字 claude；PATH 沒有 → 掃 %APPDATA%\\Claude\\claude-code\\*\\claude.exe 取版本最大（2.1.279 與 2.1.281 選 281）', () => {
+  // ② PATH 上有 claude.cmd
+  assert.equal(resolveClaudeBin({ env: WIN_ENV, fs: fakeFs(['C:\\Program Files\\nodejs\\claude.cmd']), platform: 'win32' }), 'claude');
+  assert.equal(resolveClaudeBin({ env: { PATH: '/usr/local/bin:/usr/bin' }, fs: fakeFs(['/usr/local/bin/claude']), platform: 'darwin' }), 'claude');
+  // ③ PATH 沒有 → 掃桌面版資料夾；2.1.10 要輸給 2.1.9？不：按數字比（10 > 9），所以還是 2.1.281 最大；沒有 claude.exe 的夾（9.9.9）不算
+  const base = `${APPDATA}\\Claude\\claude-code`;
+  const fs = fakeFs([`${base}\\2.1.279\\claude.exe`, `${base}\\2.1.281\\claude.exe`, `${base}\\2.1.10\\claude.exe`, `${base}\\9.9.9\\readme.txt`]);
+  assert.equal(resolveClaudeBin({ env: WIN_ENV, fs, platform: 'win32' }), `${base}\\2.1.281\\claude.exe`);
+  // 非 Windows 不掃 APPDATA
+  assert.equal(resolveClaudeBin({ env: { ...WIN_ENV, PATH: '/usr/bin' }, fs, platform: 'darwin' }), null);
+});
+
+test('找 claude ④：都沒有 → null；defaultSpawn 不起任何行程、checkAvailable 為 false；executeNode 拒絕成現有的「連不上 Claude」', async () => {
+  const bin = resolveClaudeBin({ env: WIN_ENV, fs: fakeFs([]), platform: 'win32' });
+  assert.equal(bin, null);
+  assert.equal(resolveClaudeBin({ env: { ...WIN_ENV, APPDATA: undefined }, fs: fakeFs([]), platform: 'win32' }), null, '沒有 APPDATA 也不炸');
+  let spawned = 0;
+  const spawnFn = (args, extra) => defaultSpawn(args, extra, { spawnImpl: () => { spawned++; return fakeChild(); }, bin, platform: 'win32' });
+  const adapter = createHostAdapter({ spawnFn });
+  assert.equal(await adapter.checkAvailable(), false);
+  await assert.rejects(adapter.executeNode(NODE_ARGS), (e) => e instanceof HostError && e.code === 'UNAVAILABLE' && e.message.includes('連不上 Claude'));
+  assert.equal(spawned, 0, '沒有 claude 就不該 spawn');
 });
