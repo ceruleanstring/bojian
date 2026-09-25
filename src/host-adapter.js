@@ -1,6 +1,7 @@
 // host-adapter — 與宿主（Claude）的一切接點（ADR-001：宿主知識只准存在這裡）。
 // AI 呼叫走 `claude -p` headless 子行程，prompt 由 stdin 餵入。
 import { spawn } from 'node:child_process';
+import nodeFs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -151,16 +152,57 @@ export function readHostInit({ spawnFn = defaultSpawn, killFn = killTree, timeou
   });
 }
 
-function defaultSpawn(args, extra = {}) {
+// 找 claude 執行檔（一句話安裝輪）：只裝 Claude 桌面版的使用者，終端機叫不到 claude——桌面版把自己的
+// claude.exe 放在 %APPDATA%\Claude\claude-code\<版本>\claude.exe，不在 PATH。解析順序（與 install.ps1／SKILL 共用的契約）：
+// ① 環境變數 BOJIAN_CLAUDE_BIN（完整路徑，照用不驗） ② PATH 上的 claude（回傳裸字 'claude'，spawn 行為與以前完全一樣）
+// ③ Windows 掃 %APPDATA%\Claude\claude-code\*\claude.exe，取版本號最大的資料夾 ④ 都沒有 → null（呼叫端給現有「連不上 Claude」訊息）。
+// env／fs／platform 可注入，測試不碰真機器。
+export function resolveClaudeBin({ env = process.env, fs = nodeFs, platform = process.platform } = {}) {
+  if (env.BOJIAN_CLAUDE_BIN) return env.BOJIAN_CLAUDE_BIN;
+  const win = platform === 'win32';
+  const exts = win ? String(env.PATHEXT || '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean) : [''];
+  const dirs = String(env.PATH ?? env.Path ?? '').split(win ? ';' : ':').filter(Boolean);
+  for (const d of dirs) {
+    for (const ext of exts) {
+      try { if (fs.existsSync(path.join(d, 'claude' + ext.toLowerCase())) || (ext && fs.existsSync(path.join(d, 'claude' + ext)))) return 'claude'; } catch { /* 目錄壞了就跳過 */ }
+    }
+  }
+  if (win && env.APPDATA) {
+    const base = path.join(env.APPDATA, 'Claude', 'claude-code');
+    let names = [];
+    try { names = fs.readdirSync(base); } catch { return null; }
+    const ver = (n) => n.split('.').map((s) => Number.parseInt(s, 10));
+    const isVer = (n) => /^\d+(\.\d+)*$/.test(n);
+    const cmp = (a, b) => { const x = ver(a), y = ver(b); for (let i = 0; i < Math.max(x.length, y.length); i++) { const d = (x[i] ?? 0) - (y[i] ?? 0); if (d) return d; } return 0; };
+    const found = names.filter((n) => isVer(n) && fs.existsSync(path.join(base, n, 'claude.exe'))).sort(cmp);
+    if (found.length) return path.join(base, found[found.length - 1], 'claude.exe');
+  }
+  return null;
+}
+
+// Windows 命令列引號（CRT 規則）：有空白／引號才包，內部引號與其前的反斜線照規則跳脫；空字串要成 ""
+function winQuote(a) {
+  const s = String(a);
+  if (s !== '' && !/[\s"]/.test(s)) return s;
+  return '"' + s.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1') + '"';
+}
+
+// spawnImpl／bin／platform 只為回歸測試能注入（不起真行程）；預設＝真 spawn＋自動解析＋本機平台。
+export function defaultSpawn(args, extra = {}, { spawnImpl = spawn, bin = resolveClaudeBin(), platform = process.platform } = {}) {
   // 工人在中立目錄開工（已定案）：繼承伺服器 cwd 會吃到使用者本地的專案
   // CLAUDE.md 與 hooks——實案：工作區的收工門禁把步驟最後一句換成「本次無入庫項」，成品被調包。
   // 本專案會公開，任何使用者的本地規矩都不該套在步驟工人頭上；附件走絕對路徑，不受 cwd 影響。
   // 程式／產檔模式例外：cwd 改成這趟執行的產出資料夾（extra.cwd），env 帶 NODE_PATH 給自帶套件與籠子設定（BOJIAN_CAGE_*）。
   const opts = { cwd: extra.cwd ?? os.tmpdir(), windowsHide: true, ...(extra.env ? { env: extra.env } : {}) };
-  // Windows 下 claude 是 .cmd，直接 spawn 會 EINVAL——走 cmd /c
-  return process.platform === 'win32'
-    ? spawn('cmd', ['/c', 'claude', ...args], opts)
-    : spawn('claude', args, opts);
+  // 找不到 claude：直接丟 UNAVAILABLE（checkAvailable 接到就是 false；executeNode／complete 的 Promise 一樣拒絕成 HostError）
+  if (!bin) throw new HostError(UNAVAILABLE_MSG, 'UNAVAILABLE');
+  if (platform !== 'win32') return spawnImpl(bin, args, opts);
+  // Windows 下 claude 是 .cmd，直接 spawn 會 EINVAL——走 cmd /c。PATH 上的裸字照舊寫法。
+  if (bin === 'claude') return spawnImpl('cmd', ['/c', 'claude', ...args], opts);
+  // 完整路徑（可能含空白與中文）：cmd /c 看到開頭是引號會把第一個和最後一個引號剝掉、整行毀掉，
+  // 所以用 /s 加一層外引號，命令列自己組、自己引（windowsVerbatimArguments），不讓 Node 再引一次。
+  const line = [bin, ...args].map(winQuote).join(' ');
+  return spawnImpl('cmd', ['/d', '/s', '/c', `"${line}"`], { ...opts, windowsVerbatimArguments: true });
 }
 
 const CREATIVITY_TEXT = {

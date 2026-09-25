@@ -1095,7 +1095,12 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
           if (enabled) {
             const root = path.join(HERE, '..');
             fs.mkdirSync(startupDir, { recursive: true });
-            fs.writeFileSync(autostartFile, `@echo off\r\ncd /d "${root}"\r\nstart "bojian" /min cmd /c "node src\\server.js"\r\n`, 'utf8');
+            // 一句話安裝把資料放在程式夾外（BOJIAN_DATA_DIR）；開機起來要沿用同一個資料夾／埠，沒帶就照舊。
+            // 相對路徑轉絕對（開機時 cwd 是程式夾）；.cmd 裡 % 要雙寫才不會被當變數展開。
+            const envLines = [['BOJIAN_DATA_DIR', process.env.BOJIAN_DATA_DIR && path.resolve(process.env.BOJIAN_DATA_DIR)], ['BOJIAN_PORT', process.env.BOJIAN_PORT], ['BOJIAN_CLAUDE_BIN', process.env.BOJIAN_CLAUDE_BIN]]
+              .filter(([, v]) => v).map(([k, v]) => `set "${k}=${String(v).replace(/%/g, '%%')}"\r\n`).join('');
+            // 檔案以 UTF-8（無 BOM）寫；cmd 預設用系統碼頁讀批次檔，路徑含中文（例如中文帳號名）會亂碼，所以第一行先切 65001。
+            fs.writeFileSync(autostartFile, `@echo off\r\nchcp 65001>nul\r\n${envLines}cd /d "${root}"\r\nstart "bojian" /min cmd /c "node src\\server.js"\r\n`, 'utf8');
           } else if (fs.existsSync(autostartFile)) fs.unlinkSync(autostartFile);
           return json(200, { supported: true, enabled: !!enabled });
         }
