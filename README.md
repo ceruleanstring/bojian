@@ -9,7 +9,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/ceruleanstring/bojian?label=release)](https://github.com/ceruleanstring/bojian/releases)
 [![Node ≥ 20](https://img.shields.io/badge/node-%E2%89%A5%2020-brightgreen.svg)](https://nodejs.org)
-[![Tests](https://img.shields.io/badge/tests-404%20passing-brightgreen.svg)](#參與開發)
+[![Tests](https://img.shields.io/badge/tests-1129%20passing-brightgreen.svg)](#參與開發)
 [![Runs on Claude Code](https://img.shields.io/badge/runs%20on-Claude%20Code-d97757.svg)](https://claude.com/claude-code)
 
 [快速開始](#快速開始) · [它怎麼運作](#三十秒看懂) · [交貨先查](#交貨先查) · [常見問題](#常見問題) · [路線圖](#路線圖)
@@ -52,10 +52,23 @@ flowchart LR
 
 ## 快速開始
 
+兩條路，挑一條。
+
+### 不寫程式（Windows）
+
+裝好 [Claude Code](https://claude.com/claude-code) 並登入，然後在 Claude Code 貼這一句：
+
+> 幫我安裝剝繭，照 https://github.com/ceruleanstring/bojian/blob/main/INSTALL.md 做
+
+其他交給 Claude：它會幫你裝好需要的東西、把剝繭放到你的使用者資料夾、打開瀏覽器。細節見 [INSTALL.md](INSTALL.md)。
+
+### 會用終端機
+
 **需要什麼**
 
 - [Claude Code](https://claude.com/claude-code)，已登入——剝繭掛在你自己的 Claude 上跑，不另外付 AI 的錢
 - Node.js 20 以上
+- Git
 
 **四行開跑**
 
@@ -68,7 +81,7 @@ node src/server.js
 
 打開 http://127.0.0.1:8787，點「跑跑看範例」。
 
-也可以當 Claude Code plugin 安裝（含 `/bojian` 啟動 skill）。
+也可以裝成 Claude Code 的外掛：`claude plugin marketplace add ceruleanstring/bojian`，再 `claude plugin install bojian@bojian`。裝了之後在 Claude Code 說「開剝繭」就會幫你啟動。
 
 **環境變數**
 
@@ -120,7 +133,7 @@ node src/server.js
 
 ## 你的資料
 
-全部在 `data/` 資料夾裡，人可讀的 YAML 檔案樹：流程、每次執行的每一步、產出檔、參考檔、用量帳本。沒有伺服器、沒有帳號、沒有任何使用追蹤；搬資料夾＝搬家，備份＝複製資料夾。AI 呼叫走你本機的 Claude，額度用你自己的。
+全部在一個資料夾裡（一句話安裝＝`%LOCALAPPDATA%\bojian\data`；從原始碼跑＝`data/`），人可讀的 YAML 檔案樹：流程、每次執行的每一步、產出檔、參考檔、用量帳本。沒有伺服器、沒有帳號、沒有任何使用追蹤；搬資料夾＝搬家，備份＝複製資料夾。AI 呼叫走你本機的 Claude，額度用你自己的。
 
 ## 常見問題
 
@@ -132,7 +145,7 @@ node src/server.js
 
 **查核會不會攔太兇？** 實測八題案例集一題都沒漏抓、誤攔一題；它對「判斷」寬鬆、對「事實」嚴格。攔錯了按「就這樣過」，流程照走。
 
-**跟 Claude Code plugin 是什麼關係？** 剝繭可以當 plugin 安裝，多一個 `/bojian` 指令幫你啟動；本體還是這個本地網頁。
+**跟 Claude Code plugin 是什麼關係？** 剝繭也可以裝成 Claude Code 的外掛，裝了之後在 Claude Code 說「開剝繭」就會幫你啟動；本體還是這個本地網頁。裝法：在終端機跑 `claude plugin marketplace add ceruleanstring/bojian`，再跑 `claude plugin install bojian@bojian`。
 
 ## 路線圖
 
@@ -152,9 +165,11 @@ node src/server.js
 ## 參與開發
 
 ```bash
-npm test          # node --test，目前 816 條
+npm test          # node --test，目前 1,129 條
 node src/server.js
 ```
+
+Windows 安裝腳本的完整測試（會真的下載、`npm install`、起一次伺服器，約一分鐘）預設不跑；要跑就設環境變數：PowerShell `$env:BOJIAN_INSTALL_E2E='1'; node --test tests/install.test.js`。
 
 Issue 與 PR 都歡迎。介面文案是繁體中文；程式、指令、資料格式維持英文。
 
