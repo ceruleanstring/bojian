@@ -12,6 +12,10 @@ import {
   parseGroupText, coversWorkflow, widenScope, tickShown,
   MEMORY_ROUTE_RULES, buildRoutePrompt, parseRoute, route, paramSignal, stopEditSignal,
   selectCore, resolveOverrides, habitOptions, createMemory,
+  MANUAL_SECTIONS, MANUAL_ROUND1, MANUAL_FALLBACK, MANUAL_BANNED, MANUAL_ROUNDS_MAX, MANUAL_PER_ROUND_MAX,
+  normalizeTranscript, manualCovered, parseManualQuestions, guardManualQuestions, fallbackManualQuestions,
+  parseManualDraft, fallbackManualDraft, buildManualQuestionPrompt, buildManualDraftPrompt, repairJsonTail,
+  hasSimplified, TRADITIONAL_RULE,
 } from '../src/memory.js';
 import { CheckParseError } from '../src/checker.js';
 import { createStore } from '../src/store.js';
@@ -827,4 +831,321 @@ test('L018：同一句話只記一次——拆解器第二趟重跑不會再記�
   // 檔案不會無限長大
   const src = fs.readFileSync(new URL('../src/memory.js', import.meta.url), 'utf8');
   assert.ok(src.includes('slice(-200)'), '只留最近 200 筆，檔案不會長大');
+});
+
+// ---- 說明書問答（US-115）：五段、三輪、每輪三題；出題與寫草稿兩種小呼叫走 route() 同一個 adapter 通道 ----
+
+// 第一輪三題答完＝who／talk／ask 三段有內容，show／redline 還空
+const R1_TRANSCRIPT = () => [
+  { round: 1, q: MANUAL_ROUND1[0].q, section: 'who', a: '設計公司負責人，看不懂程式' },
+  { round: 1, q: MANUAL_ROUND1[1].q, section: 'talk', a: '報告、簡報。最煩它先鋪陳一大段' },
+  { round: 1, q: MANUAL_ROUND1[2].q, section: 'ask', a: '花錢和對外的事要自己決定' },
+];
+const manualSetup = (reply) => {
+  const { store } = facadeSetup();
+  const calls = [];
+  const adapter = reply === null ? null : { async complete({ prompt, meta }) { calls.push({ prompt, meta }); return typeof reply === 'function' ? reply() : reply; } };
+  return { store, calls, memory: createMemory({ store, adapter }) };
+};
+
+test('說明書常數：五段（who 內容層、其餘表達層）、三輪、每輪三題、第一輪三題固定對 who／talk／ask、備用題每段一題且不含禁問字', () => {
+  assert.deepEqual(MANUAL_SECTIONS.map((s) => s.key), ['who', 'talk', 'ask', 'show', 'redline']);
+  assert.deepEqual(MANUAL_SECTIONS.map((s) => s.label), ['我是誰', '怎麼跟我講話', '什麼事要問我、什麼事自己決定', '什麼時候叫我看', '紅線']);
+  assert.deepEqual(MANUAL_SECTIONS.map((s) => s.layer), ['content', 'expression', 'expression', 'expression', 'expression']);
+  assert.equal(MANUAL_ROUNDS_MAX, 3);
+  assert.equal(MANUAL_PER_ROUND_MAX, 3);
+  assert.deepEqual(MANUAL_ROUND1.map((q) => q.section), ['who', 'talk', 'ask']);
+  assert.ok(MANUAL_ROUND1.every((q) => q.id && q.q));
+  assert.deepEqual(Object.keys(MANUAL_FALLBACK), ['who', 'talk', 'ask', 'show', 'redline']);
+  for (const [key, f] of Object.entries(MANUAL_FALLBACK)) {
+    assert.ok(f.q && f.why.startsWith('為什麼問'), key);
+    assert.ok(!MANUAL_BANNED.some((w) => f.q.includes(w)), `備用題「${key}」不能含禁問字`);
+  }
+  for (const w of ['給誰看', '讀者', '什麼形式', '多長', '健康', '政治', '宗教', '財務']) assert.ok(MANUAL_BANNED.includes(w), w);
+});
+
+test('makeCard／validateCard：認識卡給 section 才帶；不給就沒有這個鍵（舊卡形狀不變）；section 不是五段之一→一句人話', () => {
+  const plain = makeCard(PROFILE_INPUT);
+  assert.equal('section' in plain, false);
+  const withSection = makeCard({ ...PROFILE_INPUT, section: 'redline' });
+  assert.equal(withSection.section, 'redline');
+  assert.deepEqual(validateCard(withSection), []);
+  assert.ok(validateCard({ ...withSection, section: 'audience' }).some((m) => m.includes('五段')));
+  const habit = makeCard({ ...HABIT_INPUT, section: 'who' });
+  assert.equal('section' in habit, false, '習慣卡沒有段落');
+});
+
+test('normalizeTranscript／manualCovered：沒答的題不算；round 只認 1～3；section 只認五段；答案去前後空白', () => {
+  const t = normalizeTranscript([
+    { round: 1, q: 'a', section: 'who', a: '  我是負責人 ' },
+    { round: 1, q: 'b', section: 'talk', a: '   ' },
+    { round: 9, q: 'c', section: 'nope', a: '亂的' },
+    null, 'x',
+  ]);
+  assert.deepEqual(t, [{ round: 1, q: 'a', section: 'who', a: '我是負責人' }, { round: null, q: 'c', section: null, a: '亂的' }]);
+  assert.deepEqual([...manualCovered(R1_TRANSCRIPT())], ['who', 'talk', 'ask']);
+  assert.deepEqual([...manualCovered([])], []);
+});
+
+test('parseManualQuestions：{"questions":[…]}→逐題正規化（q 空、section 怪的剔掉）；{"done":true}→done；純文字→CheckParseError', () => {
+  const v = parseManualQuestions('好的：{"questions":[{"q":"什麼時候叫你看？","why":"為什麼問：你剛說…","section":"show"},{"q":"","section":"redline"},{"q":"x","section":"nope"},{"q":"紅線？","section":"redline"}]}');
+  assert.deepEqual(v, { questions: [{ q: '什麼時候叫你看？', why: '為什麼問：你剛說…', section: 'show' }, { q: '紅線？', why: '', section: 'redline' }] });
+  assert.deepEqual(parseManualQuestions('{"done":true,"why":"五段都夠了"}'), { done: true, why: '五段都夠了' });
+  assert.throws(() => parseManualQuestions('我覺得不用問了'), CheckParseError);
+});
+
+// 2026-09-25 實走卷宗原文（logs/memory/2026-09-25T14-54-59.750Z-manual-round2.reply.txt）：模型偶發少最後一個 }，整份就不是 JSON 候選
+const TRUNCATED_REPLY = '{"questions":[{"q":"做完一份報告或簡報，你會想自己先看過再定稿，還是它做完直接用、你只是偶爾抽查？","why":"為什麼問：你說措辭排版它自己定，但沒說完成後你要不要先過目，這會影響它是先給你看還是直接送出。","section":"show"},{"q":"有沒有什麼事，就算它先問過你、你也點頭了，事後你還是會希望「早知道就不要做」？","why":"為什麼問：你提到花錢、對外、不可逆的事要先問，但問過同意的事之後還可能有哪些是碰都不能碰的底線，還沒講清楚。","section":"redline"}]';
+
+test('repairJsonTail：少收尾括號補回來（忽略字串內的括號、最多補 3 個）；字串沒關、括號對不上、沒缺、缺超過 3 個→null', () => {
+  assert.equal(repairJsonTail(TRUNCATED_REPLY), `${TRUNCATED_REPLY}}`);
+  assert.equal(repairJsonTail('{"a":[1,2'), '{"a":[1,2]}');
+  assert.equal(repairJsonTail('{"a":[{"b":"x"'), '{"a":[{"b":"x"}]}', '三個依序補');
+  assert.equal(repairJsonTail('{"a":"有 } 和 ] 在字串裡"'), '{"a":"有 } 和 ] 在字串裡"}', '字串內的括號不算');
+  assert.equal(repairJsonTail('{"a":"逃脫 \\" 引號"'), '{"a":"逃脫 \\" 引號"}');
+  assert.equal(repairJsonTail('{"a":[{"b":{"c":[1'), null, '缺 4 個：不修');
+  assert.equal(repairJsonTail('{"a":"沒關的字串'), null);
+  assert.equal(repairJsonTail('{"a":[1}'), null, '括號對不上');
+  assert.equal(repairJsonTail('{"a":1}'), null, '沒缺就不動');
+  assert.equal(repairJsonTail('純文字'), null);
+  assert.equal(repairJsonTail(''), null);
+});
+
+test('parseManualQuestions／parseManualDraft／parseRoute：少收尾括號的回覆補齊後照解；修不好的仍 CheckParseError（退備用題）', () => {
+  const v = parseManualQuestions(TRUNCATED_REPLY);
+  assert.equal(v.questions.length, 2, '卷宗那份少一個 } 要解出 2 題');
+  assert.deepEqual(v.questions.map((q) => q.section), ['show', 'redline']);
+  assert.ok(v.questions[0].q.startsWith('做完一份報告或簡報') && v.questions[1].why.startsWith('為什麼問'));
+  const minus3 = TRUNCATED_REPLY.slice(0, -2); // 少 }]}：結尾停在 "section":"redline"
+  assert.ok(minus3.endsWith('"section":"redline"'));
+  assert.deepEqual(parseManualQuestions(minus3).questions.map((q) => q.section), ['show', 'redline'], '少三個也補得回來');
+  assert.throws(() => parseManualQuestions(TRUNCATED_REPLY.slice(0, -3)), CheckParseError, '字串沒關（"redline 缺右引號）修不了');
+  assert.throws(() => parseManualQuestions('{"questions":[{"q":"a","section":"show","why":{"x":[{"y":['), CheckParseError, '缺超過 3 個修不了');
+  assert.throws(() => parseManualQuestions('{"questions":[{"q":"a","section":"show"}}]'), CheckParseError, '括號對不上修不了');
+  assert.deepEqual(parseManualQuestions('前言：{"done":true,"why":"夠了"'), { done: true, why: '夠了' });
+  const d = parseManualDraft('{"sections":[{"key":"redline","lines":[{"text":"不准自己編數字","round":2}]'); // 少 }]}
+  assert.deepEqual(d[4].lines, [{ text: '不准自己編數字', round: 2 }]);
+  assert.deepEqual(parseRoute('{"cards":[{"bucket":"profile","layer":"expression","text":"不要客套","reason":"對人"'), [{ bucket: 'profile', field: null, kind: null, layer: 'expression', text: '不要客套', reason: '對人' }]);
+  assert.throws(() => parseRoute('這句我覺得不用記'), CheckParseError, '純文字照舊失敗');
+});
+
+test('繁體保險：兩支 prompt 都硬要求「繁體中文」；hasSimplified 認得名單裡的簡體字、繁體全文不誤判；簡體回覆→parse 丟 CheckParseError→出題退備用題、草稿退原句', async () => {
+  assert.ok(TRADITIONAL_RULE.includes('繁體中文') && TRADITIONAL_RULE.includes('不准出現簡體字'));
+  assert.ok(buildManualQuestionPrompt({ transcript: R1_TRANSCRIPT(), round: 2 }).includes('繁體中文'), '出題提示');
+  assert.ok(buildManualDraftPrompt({ transcript: R1_TRANSCRIPT() }).includes('繁體中文'), '草稿提示');
+  // 實走 2026-09-25 抓到的簡體題目（節錄）
+  const simplified = '{"questions":[{"q":"东西做到什么程度，你会想在动工前先看一眼草稿？","why":"为什么问：你说过要自己决定","section":"show"}]}';
+  assert.equal(hasSimplified(simplified), true);
+  assert.equal(hasSimplified(TRUNCATED_REPLY), false, '卷宗那份繁體回覆不誤判');
+  assert.equal(hasSimplified('第一句就講結論，不要鋪陳；花錢、對外、不可逆的事先問我'), false);
+  for (const ch of ['么', '这', '说', '会', '为', '决', '对', '让', '问', '时', '间', '应', '还', '没', '过', '动', '东', '后', '们', '个', '关', '于', '发', '现', '该', '经', '验', '请', '报', '单']) assert.equal(hasSimplified(`x${ch}y`), true, ch);
+  assert.throws(() => parseManualQuestions(simplified), (e) => e instanceof CheckParseError && e.message.includes('簡體'));
+  assert.throws(() => parseManualDraft('{"sections":[{"key":"who","lines":[{"text":"设计公司负责人，看不懂这些东西","round":1}]}]}'), (e) => e instanceof CheckParseError && e.message.includes('簡體'));
+  const r = await manualSetup(simplified).memory.manualRound({ round: 2, transcript: R1_TRANSCRIPT() });
+  assert.deepEqual(r.questions.map((q) => [q.section, q.q]), [['show', MANUAL_FALLBACK.show.q], ['redline', MANUAL_FALLBACK.redline.q]], '簡體題目不收，退備用題');
+  const d = await manualSetup('{"sections":[{"key":"who","lines":[{"text":"设计公司负责人，不懂这些","round":1}]}]}').memory.manualDraft({ transcript: R1_TRANSCRIPT() });
+  assert.deepEqual(d.sections, fallbackManualDraft(R1_TRANSCRIPT()), '簡體草稿不收，退原句');
+});
+
+test('manualRound 門面：卷宗那份少 } 的回覆→兩題真題照回（不退備用題）', async () => {
+  const { memory, calls } = manualSetup(TRUNCATED_REPLY);
+  const r = await memory.manualRound({ round: 2, transcript: R1_TRANSCRIPT() });
+  assert.equal(calls.length, 1);
+  assert.deepEqual(r.questions.map((q) => q.section), ['show', 'redline']);
+  assert.ok(r.questions.every((q) => q.q !== MANUAL_FALLBACK[q.section].q), '不是備用題');
+});
+
+test('guardManualQuestions 程式硬擋：覆蓋段不再問、含禁問字的剔掉、最多 3 題、每題帶 id；fallbackManualQuestions 只取還空的段、最多 3 題、文案照備用題', () => {
+  const covered = manualCovered(R1_TRANSCRIPT());
+  const qs = [
+    { q: '你是誰？', why: '', section: 'who' }, // 已覆蓋
+    { q: '你的東西給誰看？', why: '', section: 'show' }, // 禁問
+    { q: '報告要多長？', why: '', section: 'redline' }, // 禁問
+    { q: '什麼時候叫你看 1', why: 'w1', section: 'show' },
+    { q: '什麼時候叫你看 2', why: 'w2', section: 'show' },
+    { q: '紅線 1', why: 'w3', section: 'redline' },
+    { q: '紅線 2', why: 'w4', section: 'redline' },
+  ];
+  const g = guardManualQuestions(qs, covered, 2);
+  assert.deepEqual(g.map((q) => q.q), ['什麼時候叫你看 1', '什麼時候叫你看 2', '紅線 1']);
+  assert.ok(g.every((q) => typeof q.id === 'string' && q.id));
+  assert.equal(new Set(g.map((q) => q.id)).size, 3);
+  assert.deepEqual(guardManualQuestions(qs, new Set(['who', 'talk', 'ask', 'show', 'redline']), 2), [], '五段都覆蓋＝沒題可問');
+  const fb = fallbackManualQuestions(covered, 2);
+  assert.deepEqual(fb.map((q) => [q.section, q.q, q.why]), [['show', MANUAL_FALLBACK.show.q, MANUAL_FALLBACK.show.why], ['redline', MANUAL_FALLBACK.redline.q, MANUAL_FALLBACK.redline.why]]);
+  assert.equal(fallbackManualQuestions(new Set(), 3).length, 3, '五段都空也只出 3 題');
+  assert.deepEqual(fallbackManualQuestions(new Set(['who', 'talk', 'ask', 'show', 'redline']), 2), []);
+});
+
+test('buildManualQuestionPrompt／buildManualDraftPrompt：含五段、禁問清單、已答問答逐條（輪次＋段落＋問＋答）、只輸出一個 JSON；草稿多「用他的意思改寫不加東西」與允許的敏感類別', () => {
+  const p = buildManualQuestionPrompt({ transcript: R1_TRANSCRIPT(), round: 2 });
+  for (const s of MANUAL_SECTIONS) assert.ok(p.includes(s.label), s.label);
+  for (const w of MANUAL_BANNED) assert.ok(p.includes(w), `禁問清單要列「${w}」`);
+  assert.ok(p.includes('第 1 輪') && p.includes('設計公司負責人，看不懂程式') && p.includes(MANUAL_ROUND1[0].q));
+  assert.ok(p.includes('第 2 輪'));
+  assert.ok(p.includes('為什麼問'));
+  assert.ok(p.includes('只輸出一個 JSON'));
+  assert.ok(p.includes('什麼時候叫我看') && p.includes('紅線'), '還空的段落要點名');
+  const d = buildManualDraftPrompt({ transcript: R1_TRANSCRIPT(), sensitive: { health: true } });
+  assert.ok(d.includes('不加') && d.includes('第幾輪') && d.includes('只輸出一個 JSON'));
+  assert.ok(d.includes('花錢和對外的事要自己決定'));
+  assert.ok(d.includes('- 健康'), '開著的敏感類別列進允許清單');
+  assert.ok(!d.includes('- 政治'));
+});
+
+test('parseManualDraft／fallbackManualDraft：五段固定順序、缺的段補空；行的 text 去空白、空行剔掉、round 只認 1～3；退路＝各輪答案照題目段落原句放、一題一行', () => {
+  const v = parseManualDraft('{"sections":[{"key":"redline","lines":[{"text":" 不准自己編數字 ","round":2},{"text":"","round":1},{"text":"不准動口吻","round":"x"}]},{"key":"nope","lines":[{"text":"亂","round":1}]}]}');
+  assert.deepEqual(v.map((s) => s.key), ['who', 'talk', 'ask', 'show', 'redline']);
+  assert.deepEqual(v[4].lines, [{ text: '不准自己編數字', round: 2 }, { text: '不准動口吻', round: null }]);
+  assert.deepEqual(v[0].lines, []);
+  assert.throws(() => parseManualDraft('寫不出來'), CheckParseError);
+  const fb = fallbackManualDraft([...R1_TRANSCRIPT(), { round: 2, q: 'x', section: 'redline', a: '不准自己編數字' }, { round: 2, q: 'y', section: 'show', a: '   ' }]);
+  assert.deepEqual(fb.map((s) => [s.key, s.label, s.lines]), [
+    ['who', '我是誰', [{ text: '設計公司負責人，看不懂程式', round: 1 }]],
+    ['talk', '怎麼跟我講話', [{ text: '報告、簡報。最煩它先鋪陳一大段', round: 1 }]],
+    ['ask', '什麼事要問我、什麼事自己決定', [{ text: '花錢和對外的事要自己決定', round: 1 }]],
+    ['show', '什麼時候叫我看', []],
+    ['redline', '紅線', [{ text: '不准自己編數字', round: 2 }]],
+  ]);
+});
+
+test('manualRound 門面：一次 AI 呼叫（meta.kind=memory、phase=manual-questions）→硬擋後最多 3 題；AI 說夠了→done；AI 壞掉／純文字／沒有 adapter→備用題；五段都覆蓋→不打 AI 直接 done；round 不是 2 或 3→400', async () => {
+  const ai = '{"questions":[{"q":"你是誰？","why":"","section":"who"},{"q":"這要給誰看？","why":"","section":"show"},{"q":"什麼時候叫你看？","why":"為什麼問：你剛說要自己決定","section":"show"},{"q":"紅線 1","why":"w","section":"redline"},{"q":"紅線 2","why":"w","section":"redline"},{"q":"紅線 3","why":"w","section":"redline"}]}';
+  const { memory, calls } = manualSetup(ai);
+  const r2 = await memory.manualRound({ round: 2, transcript: R1_TRANSCRIPT() });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].meta.kind, 'memory');
+  assert.equal(calls[0].meta.phase, 'manual-questions');
+  assert.deepEqual(r2.questions.map((q) => q.q), ['什麼時候叫你看？', '紅線 1', '紅線 2'], '已覆蓋的 who 與含「給誰看」的剔掉、>3 砍到 3');
+  assert.ok(r2.questions.every((q) => q.id && typeof q.why === 'string' && ['show', 'redline'].includes(q.section)));
+  assert.equal(r2.done, undefined);
+
+  const done = await manualSetup('{"done":true,"why":"五段都夠了"}').memory.manualRound({ round: 3, transcript: R1_TRANSCRIPT() });
+  assert.deepEqual(done, { done: true, why: '五段都夠了' });
+
+  const boom = await manualSetup(() => { throw new Error('連不上 Claude'); }).memory.manualRound({ round: 2, transcript: R1_TRANSCRIPT() });
+  assert.deepEqual(boom.questions.map((q) => [q.section, q.q]), [['show', MANUAL_FALLBACK.show.q], ['redline', MANUAL_FALLBACK.redline.q]], 'AI 壞掉退備用題');
+  const junk = await manualSetup('我覺得不用問').memory.manualRound({ round: 2, transcript: R1_TRANSCRIPT() });
+  assert.deepEqual(junk.questions.map((q) => q.section), ['show', 'redline'], '回覆看不懂退備用題');
+  const noAi = await manualSetup(null).memory.manualRound({ round: 2, transcript: R1_TRANSCRIPT() });
+  assert.deepEqual(noAi.questions.map((q) => q.section), ['show', 'redline'], '沒有 adapter 退備用題');
+  const onlyCovered = await manualSetup('{"questions":[{"q":"你是誰？","why":"","section":"who"}]}').memory.manualRound({ round: 2, transcript: R1_TRANSCRIPT() });
+  assert.deepEqual(onlyCovered.questions.map((q) => q.section), ['show', 'redline'], '剔完是空也退備用題');
+
+  const full = manualSetup(ai);
+  const allCovered = [...R1_TRANSCRIPT(), { round: 2, q: 'x', section: 'show', a: '只看成品' }, { round: 2, q: 'y', section: 'redline', a: '不准編數字' }];
+  assert.deepEqual(await full.memory.manualRound({ round: 3, transcript: allCovered }), { done: true, why: '五段都有內容了，直接寫草稿' });
+  assert.equal(full.calls.length, 0, '五段都夠：不打 AI');
+
+  for (const round of [1, 4, '2x', null]) {
+    await assert.rejects(() => full.memory.manualRound({ round, transcript: R1_TRANSCRIPT() }), (e) => e.status === 400 && /2|3/.test(e.message), `round=${round}`);
+  }
+  await assert.rejects(() => full.memory.manualRound({ round: 2, transcript: 'x' }), (e) => e.status === 400);
+  await assert.rejects(() => full.memory.manualRound({ round: 2, transcript: Array.from({ length: 10 }, () => R1_TRANSCRIPT()[0]) }), (e) => e.status === 400 && e.message.includes('9'), '超過 9 題拒收並講上限');
+});
+
+test('manualDraft 門面：一次 AI 呼叫（phase=manual-draft）→五段草稿；AI 壞掉／看不懂／五段全空→各輪答案照題目段落原句放進去', async () => {
+  const ai = '{"sections":[{"key":"who","lines":[{"text":"設計公司負責人","round":1}]},{"key":"talk","lines":[{"text":"不要鋪陳","round":1}]},{"key":"ask","lines":[{"text":"花錢、對外的事先問","round":1}]}]}';
+  const { memory, calls } = manualSetup(ai);
+  const d = await memory.manualDraft({ transcript: R1_TRANSCRIPT() });
+  assert.equal(calls[0].meta.kind, 'memory');
+  assert.equal(calls[0].meta.phase, 'manual-draft');
+  assert.deepEqual(d.sections.map((s) => [s.key, s.label, s.lines.length]), [['who', '我是誰', 1], ['talk', '怎麼跟我講話', 1], ['ask', '什麼事要問我、什麼事自己決定', 1], ['show', '什麼時候叫我看', 0], ['redline', '紅線', 0]]);
+  assert.deepEqual(d.sections[0].lines, [{ text: '設計公司負責人', round: 1 }]);
+  const fallback = fallbackManualDraft(R1_TRANSCRIPT());
+  assert.deepEqual((await manualSetup(() => { throw new Error('連不上'); }).memory.manualDraft({ transcript: R1_TRANSCRIPT() })).sections, fallback, 'AI 壞掉');
+  assert.deepEqual((await manualSetup('寫不出來').memory.manualDraft({ transcript: R1_TRANSCRIPT() })).sections, fallback, '看不懂');
+  assert.deepEqual((await manualSetup('{"sections":[]}').memory.manualDraft({ transcript: R1_TRANSCRIPT() })).sections, fallback, '五段全空＝沒寫出來');
+  assert.deepEqual((await manualSetup(null).memory.manualDraft({ transcript: R1_TRANSCRIPT() })).sections, fallback, '沒有 adapter');
+  await assert.rejects(() => memory.manualDraft({ transcript: {} }), (e) => e.status === 400);
+});
+
+test('manualSave 門面：舊說明書卡（有 section 的 active）全部退休、沒 section 的舊卡不動；新卡 section／layer／scope 全部／source.kind=intro／quote 帶輪次；空行不存；寫 intro_done_at；段落鍵不對→400 且一張都不寫；manual() 照 created_at 列出各段', () => {
+  const { store, memory } = manualSetup(null);
+  const profile = (over) => makeCard({ bucket: 'profile', text: 'x', layer: 'expression', scope: { level: 'all' }, source: { kind: 'manual', quote: 'x' }, ...over }, '2026-01-01T00:00:00.000Z');
+  store.writeCard(profile({ id: 'p-old', text: '不要客套' }));
+  store.writeCard(profile({ id: 'p-sec', text: '舊紅線', section: 'redline' }));
+  store.writeCard(profile({ id: 'p-sec-retired', text: '更舊的紅線', section: 'redline', status: 'retired' }));
+  assert.equal(memory.manual().intro_done, false);
+  assert.deepEqual(memory.manual().sections.map((s) => s.lines.map((l) => l.text)), [[], [], [], [], ['舊紅線']]);
+
+  assert.throws(() => memory.manualSave({ sections: [{ key: 'audience', lines: [{ text: '主管' }] }] }), (e) => e.status === 400);
+  assert.equal(store.readCard('profile', 'p-sec').status, 'active', '400 時一張都不動');
+  assert.throws(() => memory.manualSave({ sections: 'x' }), (e) => e.status === 400);
+  assert.equal(store.readSettings().memory.intro_done_at, null);
+
+  const out = memory.manualSave({ sections: [
+    { key: 'who', lines: [{ text: ' 設計公司負責人 ', round: 1 }, { text: '   ' }, { text: '看不懂程式', round: 1 }] },
+    { key: 'talk', lines: [{ text: '第一句就講結論', round: 1 }] },
+    { key: 'ask', lines: [] },
+    { key: 'show', lines: [{ text: '只看做完的成品', round: 2 }] },
+    { key: 'redline', lines: [{ text: '不准自己編數字', round: 2 }, { text: '不准動原文口吻' }] },
+  ] });
+  assert.equal(out.saved, 6);
+  assert.equal(store.readCard('profile', 'p-sec').status, 'retired', '舊說明書卡退休');
+  assert.equal(store.readCard('profile', 'p-old').status, 'active', '沒 section 的舊卡不動');
+  assert.equal(store.readCard('profile', 'p-sec-retired').status, 'retired');
+  const fresh = store.listCards('profile', { status: 'active' }).filter((c) => c.section);
+  assert.equal(fresh.length, 6);
+  assert.ok(fresh.every((c) => c.scope.level === 'all' && c.source.kind === 'intro' && c.text));
+  const byText = Object.fromEntries(fresh.map((c) => [c.text, c]));
+  assert.equal(byText['設計公司負責人'].layer, 'content');
+  assert.equal(byText['設計公司負責人'].section, 'who');
+  assert.equal(byText['設計公司負責人'].source.quote, '（說明書第 1 輪）設計公司負責人');
+  assert.equal(byText['不准自己編數字'].layer, 'expression');
+  assert.equal(byText['不准自己編數字'].section, 'redline');
+  assert.equal(byText['只看做完的成品'].source.quote, '（說明書第 2 輪）只看做完的成品');
+  assert.equal(byText['不准動原文口吻'].source.quote, '（說明書）不准動原文口吻', '沒輪次的行（他自己加的）不標輪');
+  assert.ok(store.readSettings().memory.intro_done_at);
+  assert.equal(memory.summary().intro_done, true);
+
+  const m = memory.manual();
+  assert.equal(m.intro_done, true);
+  assert.equal(m.rounds_max, 3);
+  assert.equal(m.per_round_max, 3);
+  assert.deepEqual(m.round1.map((q) => q.section), ['who', 'talk', 'ask']);
+  assert.deepEqual(m.sections.map((s) => [s.key, s.label, s.layer]), MANUAL_SECTIONS.map((s) => [s.key, s.label, s.layer]));
+  assert.deepEqual(m.sections.map((s) => s.lines.map((l) => [l.text, l.round])), [
+    [['設計公司負責人', 1], ['看不懂程式', 1]], [['第一句就講結論', 1]], [], [['只看做完的成品', 2]], [['不准自己編數字', 2], ['不准動原文口吻', null]],
+  ]);
+  assert.ok(m.sections[0].lines.every((l) => typeof l.card === 'string' && l.card.startsWith('p-')));
+  assert.deepEqual(out.sections, m.sections, 'save 回的 sections 跟 GET 同一份');
+
+  // 再存一次＝新卡取代舊卡：上一批全部退休、只剩這一批
+  memory.manualSave({ sections: [{ key: 'redline', lines: [{ text: '只留這一條', round: 3 }] }] });
+  const active = store.listCards('profile', { status: 'active' }).filter((c) => c.section);
+  assert.deepEqual(active.map((c) => c.text), ['只留這一條']);
+  assert.equal(store.listCards('profile').filter((c) => c.section && c.status === 'retired').length, 8);
+});
+
+test('contextFor：多 manual 五組（只放這一步真的帶進去、且有 section 的卡，照 created_at）與 redlines 別名；coreNotes 逐字照舊（含沒 section 的舊卡）；沒有說明書卡→五組全空', () => {
+  const { store, memory } = manualSetup(null);
+  const profile = (over, at) => makeCard({ bucket: 'profile', text: 'x', layer: 'expression', scope: { level: 'all' }, source: { kind: 'manual', quote: 'x' }, ...over }, at);
+  store.writeCard(profile({ id: 'p-1', text: '不要恭維' }, '2026-01-01T00:00:00.000Z'));
+  store.writeCard(profile({ id: 'p-2', text: '我是這家公司的負責人', layer: 'content', scope: { level: 'category', category: '旅遊' } }, '2026-01-02T00:00:00.000Z'));
+  const before = memory.contextFor({ category: '旅遊', id: 'wf-a', def: store.readWorkflow('旅遊', 'wf-a'), params: {} });
+  assert.deepEqual(before.coreNotes, ['不要恭維', '我是這家公司的負責人'], '既有期望值（runner M3a 測試同一組）');
+  assert.deepEqual(before.manual, { who: [], talk: [], ask: [], show: [], redline: [] });
+  assert.deepEqual(before.redlines, []);
+
+  store.writeCard(profile({ id: 'p-r2', text: '不准動原文口吻', section: 'redline' }, '2026-01-04T00:00:00.000Z'));
+  store.writeCard(profile({ id: 'p-r1', text: '不准自己編數字', section: 'redline' }, '2026-01-03T00:00:00.000Z'));
+  store.writeCard(profile({ id: 'p-w', text: '設計公司負責人', section: 'who', layer: 'content' }, '2026-01-05T00:00:00.000Z'));
+  store.writeCard(profile({ id: 'p-s', text: '只看做完的成品', section: 'show' }, '2026-01-06T00:00:00.000Z'));
+  store.writeCard(profile({ id: 'p-gone', text: '退休的紅線', section: 'redline', status: 'retired' }, '2026-01-07T00:00:00.000Z'));
+  store.writeCard(profile({ id: 'p-tone', text: '輕鬆', section: 'talk', field: '語氣' }, '2026-01-08T00:00:00.000Z'));
+  store.writeGroup('旅遊', { text: '語氣：正式', rules: parseGroupText('語氣：正式', store.readDict()) });
+  const after = memory.contextFor({ category: '旅遊', id: 'wf-a', def: store.readWorkflow('旅遊', 'wf-a'), params: {} });
+  const expected = selectCore({ profileCards: store.listCards('profile'), category: '旅遊', workflowId: 'wf-a' }).filter((c) => c.id !== 'p-tone').map((c) => c.text);
+  assert.deepEqual(after.coreNotes, expected, 'coreNotes 的算法一個字都沒改：仍是 selectCore 順序、被群組蓋掉的不進');
+  assert.ok(after.coreNotes.includes('不要恭維') && after.coreNotes.includes('不准自己編數字'));
+  assert.deepEqual(after.manual, { who: ['設計公司負責人'], talk: [], ask: [], show: ['只看做完的成品'], redline: ['不准自己編數字', '不准動原文口吻'] }, '照 created_at；退休的、被群組蓋掉的不進');
+  assert.deepEqual(after.redlines, after.manual.redline);
+
+  const settings = store.readSettings();
+  settings.memory.paused = true;
+  store.writeSettings(settings);
+  const paused = memory.contextFor({ category: '旅遊', id: 'wf-a', def: store.readWorkflow('旅遊', 'wf-a'), params: {}, settings });
+  assert.deepEqual(paused.coreNotes, []);
+  assert.deepEqual(paused.manual, { who: [], talk: [], ask: [], show: [], redline: [] }, '整層暫停：說明書也不帶');
 });

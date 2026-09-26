@@ -2016,19 +2016,31 @@ test('B2 ④：表達層認識卡→compose 指示含「# 關於你」與卡文�
     const p1 = prompt(1);
     assert.ok(p1.includes('# 關於你（拆的時候把這些當已知；不用問）\n- 偏好先結論再細節'), p1);
     assert.ok(p1.indexOf('# 關於你') < p1.indexOf('# 你的分類'), '關於你在你的分類之前');
-    // 暫停記憶 → 整段不印
+    assert.ok(!p1.includes('## '), '沒有說明書：ctx.manual 五段空 → 沒有 ## 小標，逐字同舊');
+    // US-115／117：存了說明書 → 拆解器 ctx 帶 manual（同一批 selectCore 的卡分五段）→ 指示裡舊卡平列在前、再五段 ## 小標（空段不印）
+    const savedManual = await api(base, 'POST', '/api/memory/manual/save', { sections: [
+      { key: 'who', lines: [{ text: '設計公司負責人', round: 1 }] },
+      { key: 'redline', lines: [{ text: '不准自己編數字', round: 2 }] },
+    ] });
+    assert.equal(savedManual.status, 200, JSON.stringify(savedManual.json));
+    const rm = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '訂餐廳' }], phase: 'draft' });
+    assert.equal(rm.status, 200, JSON.stringify(rm.json));
+    const pm = prompt(2);
+    assert.ok(pm.includes('# 關於你（拆的時候把這些當已知；不用問）\n- 偏好先結論再細節\n## 我是誰\n- 設計公司負責人\n## 紅線\n- 不准自己編數字'), pm);
+    assert.ok(!pm.includes('## 怎麼跟我講話') && !pm.includes('## 什麼時候叫我看'), '空段不印');
+    // 暫停記憶 → 整段不印（說明書也不帶）
     const paused = await api(base, 'PUT', '/api/settings', { memory: { paused: true } });
     assert.equal(paused.status, 200, JSON.stringify(paused.json));
     const r2 = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '訂餐廳' }], phase: 'draft' });
     assert.equal(r2.status, 200);
-    assert.ok(!prompt(2).includes('# 關於你') && !prompt(2).includes('偏好先結論'), prompt(2));
+    assert.ok(!prompt(3).includes('# 關於你') && !prompt(3).includes('偏好先結論') && !prompt(3).includes('## 紅線'), prompt(3));
     // 關查網 → 能耐表第一行換字
     const web = await api(base, 'PUT', '/api/settings', { exec: { web: false } });
     assert.equal(web.status, 200, JSON.stringify(web.json));
     const r3 = await api(base, 'POST', '/api/compose', { messages: [{ role: 'user', text: '訂餐廳' }], phase: 'draft' });
     assert.equal(r3.status, 200);
-    assert.ok(prompt(3).includes('- 上網查與讀網頁：不可以（設定關了；資料要做成欄位讓使用者貼）'), prompt(3));
-    assert.ok(!prompt(3).includes('：可以（設定→執行與排程'));
+    assert.ok(prompt(4).includes('- 上網查與讀網頁：不可以（設定關了；資料要做成欄位讓使用者貼）'), prompt(4));
+    assert.ok(!prompt(4).includes('：可以（設定→執行與排程'));
   } finally {
     await app.stop();
   }
@@ -4284,6 +4296,397 @@ test('server：開機自啟 .cmd——行程帶 BOJIAN_DATA_DIR／BOJIAN_PORT �
     assert.ok(!fs.existsSync(cmdFile));
   } finally {
     restore();
+    await app.stop();
+  }
+});
+
+// ---- US-115 說明書問答：四個端點的 200／400（假 adapter；出題與寫草稿走 kind='memory' 那條隊列）----
+test('server /api/memory/manual：GET 形狀；round 2／3 出題（AI 題→硬擋；AI 壞掉→備用題；round 不是 2／3→400）；draft（AI→五段；壞掉→原句退路）；save（寫卡、退休舊卡、intro_done、壞 body→400）', async () => {
+  const { app, base, adapter, dataDir } = await startApp();
+  const store = createStore(dataDir);
+  try {
+    const g0 = await api(base, 'GET', '/api/memory/manual');
+    assert.equal(g0.status, 200);
+    assert.equal(g0.json.intro_done, false);
+    assert.equal(g0.json.rounds_max, 3);
+    assert.equal(g0.json.per_round_max, 3);
+    assert.deepEqual(g0.json.round1.map((q) => q.section), ['who', 'talk', 'ask']);
+    assert.ok(g0.json.round1.every((q) => q.id && q.q));
+    assert.deepEqual(g0.json.sections.map((s) => [s.key, s.layer, s.lines]), [['who', 'content', []], ['talk', 'expression', []], ['ask', 'expression', []], ['show', 'expression', []], ['redline', 'expression', []]]);
+    assert.ok(g0.json.sections.every((s) => s.label));
+
+    const transcript = g0.json.round1.map((q, i) => ({ round: 1, q: q.q, section: q.section, a: ['設計公司負責人，看不懂程式', '報告、簡報。最煩它鋪陳', '花錢和對外的事要自己決定'][i] }));
+    // round 不是 2 或 3、transcript 不是清單 → 400
+    for (const body of [{ round: 1, transcript }, { round: 4, transcript }, { transcript }, { round: 2, transcript: 'x' }]) {
+      const bad = await api(base, 'POST', '/api/memory/manual/round', body);
+      assert.equal(bad.status, 400, JSON.stringify(body));
+      assert.ok(bad.json.error);
+    }
+    // AI 出題：已覆蓋的 who 剔掉、含禁問字的剔掉、剩下的照回；一次呼叫、kind=memory
+    adapter.setRouteResponses(['{"questions":[{"q":"你是誰？","why":"","section":"who"},{"q":"要給誰看？","why":"","section":"show"},{"q":"什麼時候叫你看？","why":"為什麼問：你剛說要自己決定","section":"show"},{"q":"有沒有絕對不准的事？","why":"為什麼問：紅線這段是空的","section":"redline"}]}']);
+    const before = adapter.completes.length;
+    const r2 = await api(base, 'POST', '/api/memory/manual/round', { round: 2, transcript });
+    assert.equal(r2.status, 200, JSON.stringify(r2.json));
+    assert.deepEqual(r2.json.questions.map((q) => [q.section, q.q, q.why]), [['show', '什麼時候叫你看？', '為什麼問：你剛說要自己決定'], ['redline', '有沒有絕對不准的事？', '為什麼問：紅線這段是空的']]);
+    assert.ok(r2.json.questions.every((q) => q.id));
+    assert.equal(adapter.completes.length - before, 1);
+    assert.equal(adapter.completes.at(-1).meta.kind, 'memory');
+    assert.equal(adapter.completes.at(-1).meta.phase, 'manual-questions');
+    // AI 壞掉 → 備用題（只取還空的段）
+    adapter.setRouteResponses([() => { throw new Error('連不上 Claude'); }]);
+    const fb = await api(base, 'POST', '/api/memory/manual/round', { round: 3, transcript });
+    assert.equal(fb.status, 200);
+    assert.deepEqual(fb.json.questions.map((q) => q.section), ['show', 'redline']);
+    assert.ok(fb.json.questions.every((q) => q.q && q.why.startsWith('為什麼問')));
+    // AI 說夠了 → done
+    adapter.setRouteResponses(['{"done":true,"why":"五段都夠了"}']);
+    assert.deepEqual((await api(base, 'POST', '/api/memory/manual/round', { round: 2, transcript })).json, { done: true, why: '五段都夠了' });
+
+    // 草稿：AI 寫 → 五段（缺的段補空）；AI 壞掉 → 原句退路；body 壞 → 400
+    const full = [...transcript, { round: 2, q: '什麼時候叫你看？', section: 'show', a: '只看做完的成品' }, { round: 2, q: '有沒有絕對不准的事？', section: 'redline', a: '不准自己編數字' }];
+    adapter.setRouteResponses(['{"sections":[{"key":"who","lines":[{"text":"設計公司負責人","round":1}]},{"key":"redline","lines":[{"text":"不准自己編數字","round":2}]}]}']);
+    const d = await api(base, 'POST', '/api/memory/manual/draft', { transcript: full });
+    assert.equal(d.status, 200, JSON.stringify(d.json));
+    assert.deepEqual(d.json.sections.map((s) => [s.key, s.lines]), [['who', [{ text: '設計公司負責人', round: 1 }]], ['talk', []], ['ask', []], ['show', []], ['redline', [{ text: '不准自己編數字', round: 2 }]]]);
+    assert.ok(d.json.sections.every((s) => s.label));
+    assert.equal(adapter.completes.at(-1).meta.phase, 'manual-draft');
+    adapter.setRouteResponses([() => { throw new Error('連不上 Claude'); }]);
+    const d2 = await api(base, 'POST', '/api/memory/manual/draft', { transcript: full });
+    assert.equal(d2.status, 200);
+    assert.deepEqual(d2.json.sections.map((s) => s.lines.map((l) => [l.text, l.round])), [[['設計公司負責人，看不懂程式', 1]], [['報告、簡報。最煩它鋪陳', 1]], [['花錢和對外的事要自己決定', 1]], [['只看做完的成品', 2]], [['不准自己編數字', 2]]]);
+    assert.equal((await api(base, 'POST', '/api/memory/manual/draft', { transcript: 'x' })).status, 400);
+
+    // 存卡：舊說明書卡退休、新卡逐行、空行不存、intro_done 變 true；GET 看得到；壞 body → 400
+    store.writeCard(makeCard({ bucket: 'profile', text: '舊紅線', layer: 'expression', section: 'redline', scope: { level: 'all' }, source: { kind: 'manual', quote: '舊紅線' } }));
+    store.writeCard(makeCard({ bucket: 'profile', text: '不要客套', layer: 'expression', scope: { level: 'all' }, source: { kind: 'manual', quote: '不要客套' } }));
+    for (const body of [{}, { sections: 'x' }, { sections: [{ key: 'audience', lines: [{ text: '主管' }] }] }]) {
+      const bad = await api(base, 'POST', '/api/memory/manual/save', body);
+      assert.equal(bad.status, 400, JSON.stringify(body));
+    }
+    assert.equal((await api(base, 'GET', '/api/memory/summary')).json.intro_done, false);
+    const saved = await api(base, 'POST', '/api/memory/manual/save', { sections: d2.json.sections.map((s) => ({ key: s.key, lines: [...s.lines, { text: '  ' }] })) });
+    assert.equal(saved.status, 200, JSON.stringify(saved.json));
+    assert.equal(saved.json.saved, 5);
+    assert.equal(saved.json.sections.length, 5);
+    const cards = store.listCards('profile');
+    assert.equal(cards.find((c) => c.text === '舊紅線').status, 'retired');
+    assert.equal(cards.find((c) => c.text === '不要客套').status, 'active');
+    const fresh = cards.filter((c) => c.status === 'active' && c.section);
+    assert.equal(fresh.length, 5);
+    assert.ok(fresh.every((c) => c.source.kind === 'intro' && c.scope.level === 'all' && /^（說明書第 [123] 輪）/.test(c.source.quote)));
+    assert.equal(fresh.find((c) => c.section === 'who').layer, 'content');
+    assert.ok(fresh.filter((c) => c.section !== 'who').every((c) => c.layer === 'expression'));
+    assert.ok(store.readSettings().memory.intro_done_at);
+    assert.equal((await api(base, 'GET', '/api/memory/summary')).json.intro_done, true);
+    const g1 = (await api(base, 'GET', '/api/memory/manual')).json;
+    assert.equal(g1.intro_done, true);
+    assert.deepEqual(g1.sections.map((s) => s.lines.map((l) => [l.text, l.round])), d2.json.sections.map((s) => s.lines.map((l) => [l.text, l.round])));
+    assert.ok(g1.sections.every((s) => s.lines.every((l) => typeof l.card === 'string')));
+    assert.deepEqual(saved.json.sections, g1.sections);
+    // 略過路徑保留：skip 也寫 intro_done_at
+    await api(base, 'PUT', '/api/settings', { memory: { intro_done_at: null } });
+    assert.equal((await api(base, 'POST', '/api/memory/intro', { skip: true })).status, 200);
+    assert.ok(store.readSettings().memory.intro_done_at);
+  } finally {
+    await app.stop();
+  }
+});
+
+// ===== US-118／119／120：本機計數、逐趟曲線、封測報告與回傳 =====
+import { readEvents as readMetricEvents } from '../src/metrics.js';
+
+// 一條兩步、第一步停點的流程，直接寫 run 檔（不走 AI），給計數與曲線用
+const METRIC_DEF = {
+  format: 1, name: '偷渡的流程名', params: [],
+  nodes: [
+    { id: 'secretnode', title: '偷渡的步驟名', executor: 'ai', stop_point: 'always', instruction: '做A', next: ['b'] },
+    { id: 'b', title: '第二步', executor: 'ai', stop_point: 'never', instruction: '做B', next: [] },
+  ],
+  check: { enabled: false }, supervisor: { enabled: false },
+};
+function writeMetricRun(store, wfId, rid, { status = 'done', startedAt, minutes = 5, steps }) {
+  const started = startedAt ?? new Date().toISOString();
+  store.writeRun('測試', wfId, rid, {
+    run_id: rid, workflow: { category: '測試', id: wfId, name: METRIC_DEF.name }, def: METRIC_DEF,
+    status, source: 'manual', params: {}, started_at: started,
+    finished_at: status === 'done' ? new Date(Date.parse(started) + minutes * 60000).toISOString() : null,
+    steps,
+  });
+}
+
+test('US-120：封測報告只含計數——JSON 全文不得出現流程名／id／run id／步驟 id／檔名／成品文字；葉子只准數字、null、布林', async () => {
+  const { app, base, dataDir, root } = await startApp();
+  try {
+    const store = createStore(dataDir);
+    const created = await api(base, 'POST', '/api/workflows', { category: '測試', def: METRIC_DEF });
+    assert.equal(created.status, 200);
+    const wfId = created.json.id;
+    const wfp = `/api/workflows/${encodeURIComponent('測試')}/${wfId}`;
+    writeMetricRun(store, wfId, 'r-secret-1', { steps: { secretnode: { status: 'done', output: '成品內容甲', edited_output: '改過的成品', edit_size: 2, file: '偷渡檔名.md' }, b: { status: 'done', output: '成品內容乙' } } });
+    writeMetricRun(store, wfId, 'r-secret-2', { steps: { secretnode: { status: 'done', output: '成品內容甲' }, b: { status: 'done', output: '成品內容乙', attempts: [{ check: { status: 'blocked' } }] } } });
+    store.writeArtifact('測試', wfId, 'r-secret-1', '偷渡檔名.md', '成品內容甲');
+    assert.equal((await fetch(`${base}${wfp}/runs/r-secret-1/files/${encodeURIComponent('偷渡檔名.md')}`)).status, 200);
+    assert.equal((await api(base, 'GET', `${wfp}/runs/r-secret-1/files/${encodeURIComponent('偷渡檔名.md')}/preview`)).status, 200);
+    assert.equal((await fetch(`${base}${wfp}/runs/r-secret-1/files/${encodeURIComponent('偷渡檔名.md')}/inline`)).status, 200);
+    const wrong = await api(base, 'POST', `${wfp}/runs/r-secret-2/steps/b/check-wrong`, {});
+    assert.equal(wrong.status, 200);
+
+    const res = await api(base, 'GET', '/api/metrics/report');
+    assert.equal(res.status, 200);
+    const report = res.json;
+    assert.equal(typeof report.version === 'string' || report.version === null, true);
+    assert.ok(!Number.isNaN(Date.parse(report.generated_at)));
+    assert.equal(report.counts.artifact_open.download, 1);
+    assert.equal(report.counts.artifact_open.preview, 1);
+    assert.equal(report.counts.artifact_open.inline, 1);
+    assert.equal(report.counts.check.wrong, 1);
+    assert.equal(report.counts.workflows.created, 1);
+    const mine = report.workflows.find((w) => w.runs === 2);
+    assert.ok(mine, '這條流程一筆：兩趟');
+    assert.deepEqual(Object.keys(mine).sort(), ['edited_avg', 'median_ms', 'rate', 'runs', 'series_len']);
+    assert.equal(mine.series_len, 2);
+    assert.equal(mine.median_ms, 5 * 60000);
+    const text = JSON.stringify(report);
+    for (const leak of [wfId, 'r-secret', 'secretnode', '偷渡', '成品內容', '改過的成品', 'quarterly-report', '範例', '測試', dataDir, root]) {
+      assert.ok(!text.includes(leak), `報告不得含「${leak}」`);
+    }
+    const walk = (v, key) => {
+      if (v === null || typeof v === 'number' || typeof v === 'boolean') return;
+      if (typeof v === 'string') { assert.ok(['version', 'generated_at'].includes(key), `字串只准在 version／generated_at，不准在 ${key}：${v}`); return; }
+      if (Array.isArray(v)) { v.forEach((x) => walk(x, key)); return; }
+      for (const [k, x] of Object.entries(v)) walk(x, k);
+    };
+    walk(report, '');
+    // 事件檔在資料根、只有 id 與數字
+    const events = readMetricEvents(root);
+    assert.ok(events.some((e) => e.event === 'workflow_create' && e.workflow === wfId));
+    assert.ok(!JSON.stringify(events).includes('偷渡'), '事件檔也不記名字');
+  } finally {
+    await app.stop();
+  }
+});
+
+test('US-120：回傳開關預設關 → send 403 report_optin_off；打開但沒端點 → 200 sent:false；開關只收開／關', async () => {
+  const { app, base } = await startApp();
+  try {
+    const settings = (await api(base, 'GET', '/api/settings')).json;
+    assert.equal(settings.report_optin, false, '預設關');
+    const off = await api(base, 'POST', '/api/metrics/send', {});
+    assert.equal(off.status, 403);
+    assert.deepEqual(off.json, { error: 'report_optin_off' });
+    const bad = await api(base, 'PUT', '/api/settings', { report_optin: 'yes' });
+    assert.equal(bad.status, 400);
+    const on = await api(base, 'PUT', '/api/settings', { report_optin: true });
+    assert.equal(on.status, 200);
+    assert.equal(on.json.report_optin, true);
+    const sent = await api(base, 'POST', '/api/metrics/send', {});
+    assert.equal(sent.status, 200);
+    assert.deepEqual(sent.json, { sent: false, reason: 'no_endpoint' });
+    await api(base, 'PUT', '/api/settings', { report_optin: false });
+    assert.equal((await api(base, 'POST', '/api/metrics/send', {})).status, 403, '關掉立刻停');
+  } finally {
+    await app.stop();
+  }
+});
+
+test('US-119 ⑦：「這條查錯了」——同一 run＋node 重複按只記一次；沒被攔過的步 400；找不到 run 404', async () => {
+  const { app, base, dataDir, root } = await startApp();
+  try {
+    const store = createStore(dataDir);
+    store.writeWorkflow('測試', 'wf-wrong', METRIC_DEF);
+    const wfp = `/api/workflows/${encodeURIComponent('測試')}/wf-wrong`;
+    writeMetricRun(store, 'wf-wrong', 'r-w1', { steps: {
+      secretnode: { status: 'done', output: 'x', attempts: [{ check: { status: 'blocked', blocks: [{ kind: 'number-mismatch', claim: '總數 13', source: '14', detail: '不合' }] } }, { check: { status: 'redone' } }] },
+      b: { status: 'done', output: 'y', attempts: [{ check: { status: 'pass' } }] },
+    } });
+    const first = await api(base, 'POST', `${wfp}/runs/r-w1/steps/secretnode/check-wrong`, {});
+    assert.equal(first.status, 200);
+    assert.deepEqual(first.json, { ok: true, recorded: true });
+    const again = await api(base, 'POST', `${wfp}/runs/r-w1/steps/secretnode/check-wrong`, {});
+    assert.equal(again.status, 200);
+    assert.deepEqual(again.json, { ok: true, recorded: false });
+    const notBlocked = await api(base, 'POST', `${wfp}/runs/r-w1/steps/b/check-wrong`, {});
+    assert.equal(notBlocked.status, 400);
+    assert.equal((await api(base, 'POST', `${wfp}/runs/r-nope/steps/secretnode/check-wrong`, {})).status, 404);
+    assert.equal((await api(base, 'POST', `${wfp}/runs/r-w1/steps/ghost/check-wrong`, {})).status, 404);
+    const wrongs = readMetricEvents(root).filter((e) => e.event === 'check_wrong');
+    assert.equal(wrongs.length, 1);
+    assert.equal(wrongs[0].run, 'r-w1');
+    assert.equal(wrongs[0].node, 'secretnode');
+    assert.ok(!('blocks' in wrongs[0]) && !JSON.stringify(wrongs[0]).includes('總數'), '只記次數，不記那條查核內容');
+    const counts = (await api(base, 'GET', '/api/metrics/report')).json.counts.check;
+    assert.equal(counts.wrong, 1);
+  } finally {
+    await app.stop();
+  }
+});
+
+test('US-119 ③：DELETE 沒跑完的 run 記 run_abandon（完成步數／總步數）；跑完的不記；讀不到的照刪不記', async () => {
+  const { app, base, dataDir, root } = await startApp();
+  try {
+    const store = createStore(dataDir);
+    store.writeWorkflow('測試', 'wf-del', METRIC_DEF);
+    const wfp = `/api/workflows/${encodeURIComponent('測試')}/wf-del`;
+    writeMetricRun(store, 'wf-del', 'r-half', { status: 'paused', steps: { secretnode: { status: 'done', output: 'x' }, b: { status: 'pending' } } });
+    writeMetricRun(store, 'wf-del', 'r-done', { status: 'done', steps: { secretnode: { status: 'done', output: 'x' }, b: { status: 'done', output: 'y' } } });
+    writeMetricRun(store, 'wf-del', 'r-zero', { status: 'failed', steps: { secretnode: { status: 'failed' }, b: { status: 'pending' } } });
+    assert.equal((await api(base, 'DELETE', `${wfp}/runs/r-half`)).status, 200);
+    assert.equal((await api(base, 'DELETE', `${wfp}/runs/r-done`)).status, 200);
+    assert.equal((await api(base, 'DELETE', `${wfp}/runs/r-zero`)).status, 200);
+    fs.mkdirSync(path.join(dataDir, 'workflows', '測試', 'wf-del', 'runs', 'r-bad'), { recursive: true });
+    fs.writeFileSync(path.join(dataDir, 'workflows', '測試', 'wf-del', 'runs', 'r-bad', 'run.yaml'), 'status: [\n', 'utf8');
+    assert.equal((await api(base, 'DELETE', `${wfp}/runs/r-bad`)).status, 200, '壞檔照刪');
+    const ab = readMetricEvents(root).filter((e) => e.event === 'run_abandon');
+    assert.deepEqual(ab.map(({ run, step_done, step_total }) => ({ run, step_done, step_total })), [
+      { run: 'r-half', step_done: 1, step_total: 2 },
+      { run: 'r-zero', step_done: 0, step_total: 2 },
+    ]);
+    const counts = (await api(base, 'GET', '/api/metrics/report')).json.counts.abandon;
+    assert.deepEqual(counts, { count: 2, by_step_done: { 0: 1, 1: 1 } });
+  } finally {
+    await app.stop();
+  }
+});
+
+test('US-118：/runs/stats 兩趟以上才回 series（按 started_at 排、六個數）；一趟＝空陣列；用量帳本按 run 加總', async () => {
+  const { app, base, dataDir } = await startApp();
+  try {
+    const store = createStore(dataDir);
+    store.writeWorkflow('測試', 'wf-series', METRIC_DEF);
+    const wfp = `/api/workflows/${encodeURIComponent('測試')}/wf-series`;
+    const t0 = Date.now() - 3 * 86400000;
+    writeMetricRun(store, 'wf-series', 'r-s2', { startedAt: new Date(t0 + 86400000).toISOString(), minutes: 2, steps: { secretnode: { status: 'done', output: 'x', edited_output: 'y' }, b: { status: 'done', output: 'y', attempts: [{ check: { status: 'blocked' } }, { check: { status: 'redone' } }] } } });
+    const one = (await api(base, 'GET', `${wfp}/runs/stats`)).json;
+    assert.deepEqual(one.series, [], '一趟不畫');
+    writeMetricRun(store, 'wf-series', 'r-s1', { startedAt: new Date(t0).toISOString(), minutes: 4, steps: { secretnode: { status: 'done', output: 'x' }, b: { status: 'done', output: 'y' } } });
+    writeMetricRun(store, 'wf-series', 'r-s3', { status: 'running', startedAt: new Date(t0 + 2 * 86400000).toISOString(), steps: { secretnode: { status: 'running' } } });
+    store.appendUsage({ at: new Date(t0).toISOString(), run: 'r-s1', node: 'secretnode', kind: 'step', input_tokens: 10, cache_read_input_tokens: 5, output_tokens: 3 });
+    store.appendUsage({ at: new Date(t0).toISOString(), run: 'r-s1', node: 'secretnode', kind: 'check', input_tokens: 1, output_tokens: 1 });
+    store.appendUsage({ at: new Date(t0).toISOString(), run: 'r-s2', node: 'b', kind: 'supervisor', input_tokens: 2, output_tokens: 2 });
+    const stats = (await api(base, 'GET', `${wfp}/runs/stats`)).json;
+    assert.equal(stats.window.runs, 3, '原本的統計照舊');
+    assert.deepEqual(stats.series, [
+      { run_id: 'r-s1', started_at: new Date(t0).toISOString(), edited: 0, duration_ms: 4 * 60000, tokens: 20, blocked: 0 },
+      { run_id: 'r-s2', started_at: new Date(t0 + 86400000).toISOString(), edited: 1, duration_ms: 2 * 60000, tokens: 4, blocked: 1 },
+    ], '進行中的第三趟略過');
+  } finally {
+    await app.stop();
+  }
+});
+
+test('US-119 ④⑧：建流程記 workflow_create；第一次開跑記 workflow_first_run 與 created_at 間隔；第二趟不再記；提議接受／拒絕各記一筆', async () => {
+  const { app, base, dataDir, root } = await startApp();
+  try {
+    const def = { ...METRIC_DEF, nodes: [{ id: 'a', title: '步驟A', executor: 'ai', stop_point: 'never', instruction: '做A', next: [] }] };
+    const created = await api(base, 'POST', '/api/workflows', { category: '測試', def });
+    const wfId = created.json.id;
+    const wfp = `/api/workflows/${encodeURIComponent('測試')}/${wfId}`;
+    assert.equal(typeof (await api(base, 'GET', wfp)).json.created_at, 'string', '新流程帶 created_at');
+    const r1 = await api(base, 'POST', `${wfp}/runs`, {});
+    assert.equal(r1.status, 200);
+    await pollRun(base, `${wfp}/runs/${r1.json.run_id}`, (r) => r.status === 'done');
+    const r2 = await api(base, 'POST', `${wfp}/runs`, {});
+    assert.equal(r2.status, 200);
+    await pollRun(base, `${wfp}/runs/${r2.json.run_id}`, (r) => r.status === 'done');
+    const store = createStore(dataDir);
+    store.writeProposals([
+      { id: 'p-a', key: 'k1', kind: 'supervisor_hint', source: 'supervisor', evidence: '', change: { node_id: 'a', field: 'constraints' }, workflow: { category: '測試', id: wfId }, status: 'pending', reject_count: 0 },
+      { id: 'p-r', key: 'k2', kind: 'supervisor_hint', source: 'supervisor', evidence: '', change: { node_id: 'a', field: 'constraints' }, workflow: { category: '測試', id: wfId }, status: 'pending', reject_count: 0 },
+    ]);
+    assert.equal((await api(base, 'POST', '/api/proposals/p-a/accept', {})).status, 200);
+    assert.equal((await api(base, 'POST', '/api/proposals/p-r/reject', {})).status, 200);
+    const events = readMetricEvents(root);
+    assert.deepEqual(events.filter((e) => e.event === 'workflow_create').map((e) => e.workflow), [wfId]);
+    const firsts = events.filter((e) => e.event === 'workflow_first_run');
+    assert.equal(firsts.length, 1, '只有第一趟記');
+    assert.equal(firsts[0].workflow, wfId);
+    assert.ok(Number.isFinite(firsts[0].interval_ms) && firsts[0].interval_ms >= 0 && firsts[0].interval_ms < 60000, `間隔是毫秒：${firsts[0].interval_ms}`);
+    assert.deepEqual(events.filter((e) => e.event === 'proposal_accept').map((e) => e.proposal), ['p-a']);
+    assert.deepEqual(events.filter((e) => e.event === 'proposal_reject').map((e) => e.proposal), ['p-r']);
+    const counts = (await api(base, 'GET', '/api/metrics/report')).json.counts;
+    assert.deepEqual(counts.workflows, { created: 1, never_run: 0, first_run_interval_median_ms: firsts[0].interval_ms });
+    assert.deepEqual(counts.proposals, { accept: 1, reject: 1, accept_rate: 0.5 });
+  } finally {
+    await app.stop();
+  }
+});
+
+test('US-120：GitHub Issue 路——開關關 403；開著回 issues/new?title= 開頭的網址，body 解碼後含 version、不含任何 run id／流程 id／流程名；程式本身不連外', async () => {
+  const { app, base, dataDir } = await startApp();
+  try {
+    const store = createStore(dataDir);
+    const created = await api(base, 'POST', '/api/workflows', { category: '測試', def: METRIC_DEF });
+    const wfId = created.json.id;
+    writeMetricRun(store, wfId, 'r-issue-1', { steps: { secretnode: { status: 'done', output: '成品內容甲' }, b: { status: 'done', output: '成品內容乙' } } });
+    const off = await api(base, 'GET', '/api/metrics/issue-url');
+    assert.equal(off.status, 403);
+    assert.deepEqual(off.json, { error: 'report_optin_off' });
+    await api(base, 'PUT', '/api/settings', { report_optin: true });
+    const res = await api(base, 'GET', '/api/metrics/issue-url');
+    assert.equal(res.status, 200);
+    const { url, title, body, too_long } = res.json;
+    assert.equal(too_long, undefined);
+    assert.ok(url.startsWith('https://github.com/ceruleanstring/bojian/issues/new?title='), url);
+    assert.ok(/^封測報告 v\S+ \d{4}-\d{2}-\d{2}$/.test(title), title);
+    const u = new URL(url);
+    assert.equal(u.searchParams.get('title'), title);
+    const decoded = u.searchParams.get('body');
+    assert.equal(decoded, body);
+    assert.ok(decoded.includes('"version"'));
+    assert.ok(decoded.startsWith('以下只有計數，由剝繭產生。'));
+    const fenced = decoded.match(/```json\n([\s\S]*)\n```$/);
+    assert.ok(fenced, 'body 用 json 圍欄');
+    const parsed = JSON.parse(fenced[1]);
+    assert.deepEqual(Object.keys(parsed).sort(), ['counts', 'generated_at', 'version', 'workflows']);
+    for (const leak of [wfId, 'r-issue', 'secretnode', '偷渡', '成品內容', '測試', dataDir]) {
+      assert.ok(!decoded.includes(leak), `Issue 內容不得含「${leak}」`);
+    }
+    const exported = (await api(base, 'GET', '/api/metrics/report')).json;
+    assert.deepEqual({ ...parsed, generated_at: null }, { ...exported, generated_at: null }, '與匯出報告同一份（除產出時刻外逐欄一致）');
+  } finally {
+    await app.stop();
+  }
+});
+
+test('US-119 ④⑧：播種的範例流程帶 seeded:true——第一次跑不記 workflow_first_run，也沒有 workflow_create；經 POST 建的流程不帶 seeded', async () => {
+  const { app, base, dataDir, root } = await startApp();
+  try {
+    const store = createStore(dataDir);
+    const seeded = store.readWorkflow('範例', 'quarterly-report');
+    assert.equal(seeded.seeded, true, '播種處補的旗標');
+    const wfP = `/api/workflows/${encodeURIComponent('範例')}/quarterly-report`;
+    const started = await api(base, 'POST', `${wfP}/runs`, { overrides: { script_length: '5 分鐘' } });
+    assert.equal(started.status, 200);
+    await pollRun(base, `${wfP}/runs/${started.json.run_id}`, (r) => r.status === 'paused');
+    const events = readMetricEvents(root);
+    assert.deepEqual(events.filter((e) => e.event === 'workflow_first_run'), [], '範例第一次跑不記');
+    assert.deepEqual(events.filter((e) => e.event === 'workflow_create'), [], '範例不算建流程');
+    // 使用者把範例整份存成新流程（POST 帶著 seeded 來）：旗標不能跟過去
+    const created = await api(base, 'POST', '/api/workflows', { category: '測試', def: seeded });
+    assert.equal(created.status, 200);
+    assert.ok(!('seeded' in store.readWorkflow('測試', created.json.id)), 'POST 建的流程不帶 seeded');
+  } finally {
+    await app.stop();
+  }
+});
+
+test('US-119 ⑥：記憶卡撤回——建卡 → POST undo → metrics.jsonl 多一筆 memory_undo（只有卡 id，沒有卡的內容）', async () => {
+  const { app, base, dataDir, root } = await startApp();
+  try {
+    const store = createStore(dataDir);
+    const card = makeCard({ bucket: 'profile', text: '偷渡的卡內容', layer: 'expression', scope: { level: 'all' }, source: { kind: 'manual', quote: '偷渡的卡內容' } });
+    store.writeCard(card);
+    assert.deepEqual(readMetricEvents(root).filter((e) => e.event === 'memory_undo'), []);
+    const undo = await api(base, 'POST', `/api/memory/notices/${encodeURIComponent(card.id)}/undo`, {});
+    assert.equal(undo.status, 200, JSON.stringify(undo.json));
+    const events = readMetricEvents(root).filter((e) => e.event === 'memory_undo');
+    assert.equal(events.length, 1);
+    assert.equal(events[0].card, card.id);
+    assert.ok(!JSON.stringify(events[0]).includes('偷渡'), '不記卡的內容');
+    assert.equal((await api(base, 'POST', `/api/memory/notices/${encodeURIComponent(card.id)}/undo`, {})).status, 404, '已撤回的卡再撤 404');
+    assert.equal(readMetricEvents(root).filter((e) => e.event === 'memory_undo').length, 1, '失敗的不記');
+    assert.equal((await api(base, 'GET', '/api/metrics/report')).json.counts.memory_undo, 1);
+  } finally {
     await app.stop();
   }
 });

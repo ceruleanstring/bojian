@@ -1,7 +1,7 @@
 // US-099 成效統計：runStats 純函式各邊界
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { runStats } from '../src/stats.js';
+import { runStats, runSeries } from '../src/stats.js';
 
 const NOW = Date.parse('2026-09-22T12:00:00.000Z');
 const DAY = 86400000;
@@ -100,4 +100,30 @@ test('US-099 ⑨：最常出事的步驟——failed+edited 由大到小、同�
 test('US-099 ⑩：快照裡找不到該節點的標題 → title 退成節點 id', () => {
   const s = runStats([{ status: 'done', started_at: at(1), finished_at: at(1, 1), steps: { ghost: { status: 'failed' } } }], NOW);
   assert.deepEqual(s.top_steps, [{ node: 'ghost', title: 'ghost', failed: 1, edited: 0 }]);
+});
+
+// ---- US-118 逐趟曲線：runSeries 純函式 ----
+
+test('US-118 ①：runSeries 按 started_at 由早到晚排，每趟六個數；進行中／壞掉的那趟略過', () => {
+  const r1 = { ...run(5, 'done', { a: { status: 'done', edited_output: 'x' }, b: { status: 'done' } }), run_id: 'r-1' };
+  const r2 = { ...run(2, 'done', { a: { status: 'done', edited_output: 'x' }, b: { status: 'done', edited_output: 'y', attempts: [{ check: { status: 'blocked' } }, { check: { status: 'redone' } }] } }, { dur: 3 }), run_id: 'r-2' };
+  const r3 = { ...run(1, 'running'), run_id: 'r-3' };
+  const usage = [
+    { at: at(5), run: 'r-1', node: 'a', kind: 'step', input_tokens: 10, cache_creation_input_tokens: 5, cache_read_input_tokens: 1, output_tokens: 4 },
+    { at: at(5), run: 'r-1', node: 'a', kind: 'check', input_tokens: 2, output_tokens: 1 },
+    { at: at(2), run: 'r-2', node: 'b', kind: 'supervisor', input_tokens: 7, output_tokens: 3 },
+    { at: at(2), run: 'r-9', node: 'b', kind: 'step', input_tokens: 100, output_tokens: 100 }, // 別趟的不算
+  ];
+  const s = runSeries([r2, null, 'x', { status: 'done' }, r3, r1], usage);
+  assert.deepEqual(s, [
+    { run_id: 'r-1', started_at: r1.started_at, edited: 1, duration_ms: 6 * 60000, tokens: 23, blocked: 0 },
+    { run_id: 'r-2', started_at: r2.started_at, edited: 2, duration_ms: 3 * 60000, tokens: 10, blocked: 1 },
+  ]);
+});
+
+test('US-118 ②：沒 finished_at（停住）的那趟 duration_ms＝null；沒帳本＝tokens 0；空輸入＝空陣列', () => {
+  const r = { ...run(3, 'paused', { a: { status: 'done' } }), run_id: 'r-p', finished_at: null };
+  assert.deepEqual(runSeries([r], undefined), [{ run_id: 'r-p', started_at: r.started_at, edited: 0, duration_ms: null, tokens: 0, blocked: 0 }]);
+  assert.deepEqual(runSeries([], []), []);
+  assert.deepEqual(runSeries(null, null), []);
 });

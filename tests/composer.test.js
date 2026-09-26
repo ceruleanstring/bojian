@@ -490,3 +490,59 @@ test('連線 ③：重拆時使用者改過的步驟（connectors_set_by=user）
   assert.deepEqual(n.sum.connectors, []);
   assert.equal(n.sum.connectors_set_by, 'user');
 });
+
+// ---- US-117 ①③：拆解器「# 關於你」照五段印；「什麼時候叫我看」→停點預設、「什麼事要問我」→岔路交代 ----
+
+const ABOUT_HEAD = '# 關於你（拆的時候把這些當已知；不用問）';
+const GUIDE_HEAD = '## 拆的時候照上面的段落做';
+const STOP_RULE = '- 停點預設照「什麼時候叫我看」那段定：他只看做完的成品→只有最後交付那一步 stop_point 設 always、其餘 never；他每一步都看→每一步都 always；他只有出問題才叫他→全部 never；那段寫不出對應的，照第 3、5 條的預設。';
+const ASK_RULE = '- 每個 AI 步驟的 instruction 末尾另起一行「遇到岔路：」，後面照抄「什麼事要問我、什麼事自己決定」那段的原句；工人遇到指示沒講清楚的地方就照那行決定停下來問還是自己定，自己定的在產出裡報備一句。';
+const aboutOf = (p) => p.slice(p.indexOf(ABOUT_HEAD), p.indexOf('# 你的分類')).trimEnd();
+const ctxWith = (coreNotes, manual) => ({ categories: [], dict: null, groupRules: [], coreNotes, ...(manual === undefined ? {} : { manual }) });
+
+test('US-117 ①③：context.manual 有內容 → 「# 關於你」先列沒 section 的舊卡、再五段「## 標題」（空段不印、順序固定）、末尾兩條規則；^# 段標題清單不變', async () => {
+  const adapter = fakeAdapter([ok('拆好了', VALID_DEF)]);
+  const manual = { who: ['我是這家公司的負責人'], talk: [], ask: ['寄信前要問我'], show: ['只看做完的成品'], redline: ['不准自己編數字', '# 不准提競品'] };
+  const coreNotes = ['偏好先結論', '我是這家公司的負責人', '寄信前要問我', '只看做完的成品', '不准自己編數字', '# 不准提競品'];
+  await compose({ adapter, messages: [{ role: 'user', text: '拆' }], context: ctxWith(coreNotes, manual) });
+  const p = adapter.calls[0];
+  assert.equal(aboutOf(p), [
+    ABOUT_HEAD,
+    '- 偏好先結論',
+    '## 我是誰', '- 我是這家公司的負責人',
+    '## 什麼事要問我、什麼事自己決定', '- 寄信前要問我',
+    '## 什麼時候叫我看', '- 只看做完的成品',
+    '## 紅線', '- 不准自己編數字', '- ## 不准提競品',
+    GUIDE_HEAD, STOP_RULE, ASK_RULE,
+  ].join('\n'));
+  assert.deepEqual(p.split('\n').filter((l) => /^# /.test(l)).slice(0, 3), [ABOUT_HEAD, '# 你的分類', '# 欄位詞典'], '五段是 ## 小標，不多出 # 段');
+});
+
+test('US-117 ①③：只有 talk／who 段 → 沒有規則小標；只有 ask → 只有岔路那條；只有 show → 只有停點那條；五段全在、沒舊卡 → 段首沒有散條', async () => {
+  const run = async (coreNotes, manual) => {
+    const adapter = fakeAdapter([ok('拆好了', VALID_DEF)]);
+    await compose({ adapter, messages: [{ role: 'user', text: '拆' }], context: ctxWith(coreNotes, manual) });
+    return aboutOf(adapter.calls[0]);
+  };
+  const empty = { who: [], talk: [], ask: [], show: [], redline: [] };
+  assert.equal(await run(['不要恭維'], { ...empty, talk: ['不要恭維'] }), `${ABOUT_HEAD}\n## 怎麼跟我講話\n- 不要恭維`);
+  assert.equal(await run(['寄信前要問我'], { ...empty, ask: ['寄信前要問我'] }), `${ABOUT_HEAD}\n## 什麼事要問我、什麼事自己決定\n- 寄信前要問我\n${GUIDE_HEAD}\n${ASK_RULE}`);
+  assert.equal(await run(['每一步都看'], { ...empty, show: ['每一步都看'] }), `${ABOUT_HEAD}\n## 什麼時候叫我看\n- 每一步都看\n${GUIDE_HEAD}\n${STOP_RULE}`);
+  const full = await run(['a', 'b', 'c', 'd', 'e'], { who: ['a'], talk: ['b'], ask: ['c'], show: ['d'], redline: ['e'] });
+  assert.equal(full, `${ABOUT_HEAD}\n## 我是誰\n- a\n## 怎麼跟我講話\n- b\n## 什麼事要問我、什麼事自己決定\n- c\n## 什麼時候叫我看\n- d\n## 紅線\n- e\n${GUIDE_HEAD}\n${STOP_RULE}\n${ASK_RULE}`);
+});
+
+test('US-117 ④：manual 缺席／五段全空／不是物件 → prompt 逐字同舊（跟 B2 ① 的期望一樣，coreNotes 平列、沒有 ## 小標、沒有規則）；coreNotes 空且 manual 全空 → 整段不印', async () => {
+  const base = fakeAdapter([ok('拆好了', VALID_DEF)]);
+  await compose({ adapter: base, messages: [{ role: 'user', text: '拆' }], context: ctxWith(['偏好先結論', '讀者是股東']) });
+  assert.ok(base.calls[0].includes(`${ABOUT_HEAD}\n- 偏好先結論\n- 讀者是股東`));
+  for (const manual of [{ who: [], talk: [], ask: [], show: [], redline: [] }, {}, null, '亂給']) {
+    const a = fakeAdapter([ok('拆好了', VALID_DEF)]);
+    await compose({ adapter: a, messages: [{ role: 'user', text: '拆' }], context: ctxWith(['偏好先結論', '讀者是股東'], manual) });
+    assert.equal(a.calls[0], base.calls[0], `manual=${JSON.stringify(manual)} 要逐字同舊`);
+    assert.ok(!a.calls[0].includes('## 我是誰') && !a.calls[0].includes(GUIDE_HEAD));
+  }
+  const none = fakeAdapter([ok('拆好了', VALID_DEF)]);
+  await compose({ adapter: none, messages: [{ role: 'user', text: '拆' }], context: ctxWith([], { who: [], talk: [], ask: [], show: [], redline: [] }) });
+  assert.equal((none.calls[0].match(/# 關於你/g) ?? []).length, 0, 'coreNotes 空＋manual 全空＝整段不印');
+});

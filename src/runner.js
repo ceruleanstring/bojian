@@ -11,6 +11,7 @@ import {
   brief as supervisorBrief, handoff as supervisorHandoff, record as supervisorRecord,
 } from './supervisor.js';
 import { scopeKey, attName } from './shared.js';
+import { editSize } from './metrics.js';
 import { toolsFor, connectedServers } from './connectors.js';
 import { overview as askOverview, buildStats as overviewStats, overviewEnabled } from './overview.js';
 
@@ -22,6 +23,33 @@ const BRANCH_FLAGS = { note: false, tier: false, tools: false };
 // {{欄位}} 引用；會代入欄位值的節點欄位（這一步引用到的欄位，其被選的習慣卡才算「這步用了」）
 const PARAM_REF = /\{\{\s*([\w-]+)\s*\}\}/g;
 const INJECTED_FIELDS = ['instruction', 'role_context', 'background', 'constraints', 'examples', 'review_focus', 'output_type', 'output_structure', 'output_length', 'output_tone', 'output_format'];
+
+// US-117：使用者說明書五段（契約：memoryCtx.manual＝{who,talk,ask,show,redline} 各為字串陣列、redlines＝manual.redline 別名；
+// 甲提供，缺席或全空＝這裡所有輸出逐字同舊）。五段標題與順序跟拆解器（composer）同一份，前端與文件對齊用這五個字串
+const MANUAL_SECTIONS = [
+  ['who', '我是誰'], ['talk', '怎麼跟我講話'], ['ask', '什麼事要問我、什麼事自己決定'], ['show', '什麼時候叫我看'], ['redline', '紅線'],
+];
+const cleanLines = (v) => (Array.isArray(v) ? v : []).map((x) => String(x ?? '').trim()).filter(Boolean);
+const manualOf = (ctx) => {
+  const raw = ctx?.manual && typeof ctx.manual === 'object' ? ctx.manual : {};
+  return Object.fromEntries(MANUAL_SECTIONS.map(([k]) => [k, cleanLines(raw[k])]));
+};
+// 工作單「關於你」段（印在 host-adapter coreSection，每條前面加「- 」）：manual 有內容→沒 section 的舊卡（coreNotes 裡不屬於任何段的）
+// 照現況平列在段首、再每段一條「標題＋縮排子條」（空段不印）；manual 缺席／全空→coreNotes 逐字照舊
+function sectionedCoreNotes(ctx) {
+  const notes = Array.isArray(ctx?.coreNotes) ? ctx.coreNotes : [];
+  const manual = manualOf(ctx);
+  const sectioned = new Set(MANUAL_SECTIONS.flatMap(([k]) => manual[k]));
+  if (!sectioned.size) return notes;
+  return [
+    ...notes.filter((x) => !sectioned.has(String(x ?? '').trim())),
+    ...MANUAL_SECTIONS.filter(([k]) => manual[k].length).map(([k, label]) => [label, ...manual[k].map((x) => `  - ${x}`)].join('\n')),
+  ];
+}
+// 查核必守第五路：redlines（別名）優先，沒有就拿 manual.redline
+const redlinesOf = (ctx) => (Array.isArray(ctx?.redlines) ? cleanLines(ctx.redlines) : manualOf(ctx).redline);
+// 監工交代的獨立欄位：使用者「什麼事要問我、什麼事自己決定」原句（不混進監工備註、不被剔限制句）
+const USER_ASK_LABEL = '使用者交代（什麼事要問我、什麼事自己決定；這是使用者說的，不是監工加的）';
 
 // 每一步的輸入＝沿路全部祖先 task 的產出，總量上限 80,000 字（只借查核員的數字，不借它的切法）
 export const UPSTREAM_CAP = 80000;
@@ -100,8 +128,13 @@ function livePreds(run, predMap = predecessors(run.def)) {
 }
 
 // memory＝createMemory 門面：開跑後判「同值連兩趟」記習慣卡。門面炸了只留一句，run 照建
-export function createRunner({ store, adapter, now = () => Date.now(), memory = null }) {
+export function createRunner({ store, adapter, now = () => Date.now(), memory = null, metrics = null }) {
   const load = (c, i, r) => store.readRun(c, i, r);
+  // 本機計數（US-119）：只記 id 與數字。沒接 metrics＝不記；記不成只進 console，永遠不擋主流程
+  const track = (event, fields) => {
+    if (!metrics || typeof metrics.record !== 'function') return;
+    try { metrics.record(event, fields); } catch (e) { console.error(`[bojian] 計數沒記成（${event}）：`, e.message); }
+  };
 
   // 產出檔名：以步驟標題為主（使用者下載時看得懂），但標題既不保證唯一也不保證合法——
   // ① schema 只驗標題非空、不驗重複，兩個同名步驟並行時會算出同一個絕對路徑，
@@ -476,10 +509,13 @@ export function createRunner({ store, adapter, now = () => Date.now(), memory = 
           params: run.params,
           paramLabels: labels,
           refTexts: briefRefTexts(category, id, def),
+          userAsk: manualOf(memoryCtx).ask, // US-117 ③：獨立欄位，監工掛掉也照存
         });
         const at = new Date().toISOString();
+        const userAsk = manualOf(memoryCtx).ask;
         run = update(category, id, runId, (r) => {
           r.brief = res.ok ? { text: res.text, at } : { text: '', at, fail_note: res.fail_note };
+          if (userAsk.length) r.brief.user_ask = userAsk; // 空＝不多鍵（舊 run 形狀不變）
         });
       }
 
@@ -516,6 +552,7 @@ export function createRunner({ store, adapter, now = () => Date.now(), memory = 
           rules: editRulesFor(started, node.id, predMap).map((rule) => rule.text),
           interjections: pending.map((x) => x.text),
           upstream: ups,
+          userAsk: manualOf(memoryCtx).ask, // US-117 ③：交接與判路都看得到使用者「什麼事要問我」
         });
         const at = new Date().toISOString();
         return update(category, id, runId, (r) => {
@@ -597,10 +634,13 @@ export function createRunner({ store, adapter, now = () => Date.now(), memory = 
                 web: settings.exec?.web === false ? false : (flags.tools ? (h.web ?? true) : true), // 設定關了查網＝一律關；否則沒勾開關查網＝照舊開著
                 supervisorNotes: [
                   started.brief?.text ? `開場：${started.brief.text}` : null,
+                  // US-117 ③：開場備註後附使用者原句，標明是使用者說的（獨立欄位 run.brief.user_ask，不是監工寫的）
+                  cleanLines(started.brief?.user_ask).length ? `${USER_ASK_LABEL}：${cleanLines(started.brief.user_ask).join('；')}` : null,
                   h.text ? `交接：${h.text}` : null,
                 ].filter(Boolean),
                 // 同心圓的核心圈與群組圈（外圈蓋內圈已算完）；被選的習慣卡不另成段——值已在 run.params 裡代進句子
-                coreNotes: memoryCtx?.coreNotes ?? [],
+                // US-117 ①：說明書五段有內容→按段印（見 sectionedCoreNotes）；沒有→逐字照舊
+                coreNotes: sectionedCoreNotes(memoryCtx),
                 groupRules: memoryCtx?.groupRules ?? [],
                 groupName: memoryCtx?.groupName ?? category,
                 // 三層共用檔：組織／分類規範（開跑快照，每步都帶）；參考檔路徑各對各層（字串＝流程層、{scope}＝共用夾）
@@ -783,6 +823,7 @@ export function createRunner({ store, adapter, now = () => Date.now(), memory = 
                     companyRules: callArgs.companyRules, // 三層共用檔：必守第四路（同一份開跑快照，不重組）
                     deptRules: callArgs.deptRules,
                     supervisorNotes: callArgs.supervisorNotes, // 開場＋交接，查核員當參考不當必守（同一份，不重組）
+                    redlines: redlinesOf(memoryCtx), // US-117 ②：說明書「紅線」段＝必守第五路（空＝查核 prompt 逐字同舊）
                     factsOff,
                   },
                   // 沒開「數字對原始資料」就整段不組——連參考檔都不讀
@@ -853,6 +894,7 @@ export function createRunner({ store, adapter, now = () => Date.now(), memory = 
               // check.status='redone'：blocks 清空（沒有人在等）、第一次攔的留在 first_blocks（執行頁三種說法由 recheck_blocks 決定；成品本身不留記號）。
               // 新趟永遠不再產生 waiting_check 與 redo-pass；checkRetry／checkAccept 留給改版前停在「查核攔下」的舊趟用
               if (check.status === 'blocked') {
+                track('check_block', { run: runId, node: node.id }); // US-119 ⑦：攔下數（誤攔率的分母）
                 const first = check;
                 const redoArgs = { ...callArgs, redo: { blocks: first.blocks, missing: first.missing }, meta: { ...callArgs.meta, attempt: 2 } };
                 try { if (adapter.renderPrompt) store.writePromptRecord(category, id, runId, `${node.id}.redo1.txt`, adapter.renderPrompt(redoArgs)); } catch { /* 卷宗寫不進不擋執行 */ }
@@ -1069,22 +1111,27 @@ export function createRunner({ store, adapter, now = () => Date.now(), memory = 
 
     // 停點核可：這步用原產出，繼續往下
     approve(category, id, runId, nodeId) {
-      return update(category, id, runId, (r) => {
+      const out = update(category, id, runId, (r) => {
         const step = r.steps[nodeId];
         if (!step || step.status !== 'waiting_review') throw new Error(`步驟「${nodeId}」不在等待過目，無法核可`);
         step.status = 'done';
         r.status = 'running';
       });
+      track('stop_pass', { run: runId, node: nodeId }); // US-119 ①：停點「就這樣過」
+      return out;
     },
 
     // 停點修改：改過的版本進下游，並記下改了什麼（供之後優化引擎讀）。查核攔下時也能直接改（等於接受這份成品）
     // 這裡不動 run 的狀態：改完還要擬「後面每步要守的規則」，那段時間 run 要繼續停著——
     // 一翻成 running，UI 每秒的 GET 就會把下游放出去，下游在規則寫進檔案前開跑＝這次改的東西沒帶到。放行由 resume() 做。
     edit(category, id, runId, nodeId, editedOutput, note = null) {
-      return update(category, id, runId, (r) => {
+      let size = null;
+      const out = update(category, id, runId, (r) => {
         const step = r.steps[nodeId];
         if (!step || !['waiting_review', 'waiting_check'].includes(step.status)) throw new Error(`步驟「${nodeId}」不在等待過目或查核攔下，無法修改`);
         if (step.status === 'waiting_check') step.check = { ...step.check, status: 'accepted' };
+        size = editSize(step.output, editedOutput); // US-119 ①：改動大小只記行數差，不存改前改後的文字
+        step.edit_size = size;
         step.edited_output = editedOutput;
         step.edit_note = note;
         step.status = 'done';
@@ -1092,6 +1139,8 @@ export function createRunner({ store, adapter, now = () => Date.now(), memory = 
         const isOffice = typeof step.file === 'string' && OUTPUT_OFFICE.some((e) => step.file.endsWith(`.${e}`));
         if (node && !isOffice) saveArtifact(category, id, runId, node, r.params, step, editedOutput, { nodes: r.def.nodes }); // 改過的版本蓋回檔案（Word／Excel 真檔不覆蓋——改的是摘要）
       });
+      track('stop_edit', { run: runId, node: nodeId, size });
+      return out;
     },
 
     // 停點處理完、該準備的都備妥了才放行：把「這步做完」跟「可以往下跑」分成兩個動作

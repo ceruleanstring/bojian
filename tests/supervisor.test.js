@@ -458,3 +458,49 @@ test('B2 ⑤：監工開場／交接／收尾 prompt 0 命中「你能派工人�
     assert.equal((p.match(/# 關於你/g) ?? []).length, 0, p);
   }
 });
+
+// ---- US-117 ③：使用者「什麼事要問我、什麼事自己決定」以獨立欄位進開場與交接（不混進監工備註、不被剔限制句） ----
+
+const ASK_TITLE = '使用者交代（什麼事要問我、什麼事自己決定）';
+const ASK_NOTE = '（使用者親口說的，當已知：哪一步會碰到要問他的事，備註裡提醒那一步先停下來問；原句工人會另外拿到，不用重抄）';
+const ASK = ['寄信前要問我', ' 價格不准自己決定 ', '', '  '];
+const ASK_LINES = '- 寄信前要問我\n- 價格不准自己決定';
+
+test('US-117 ③：userAsk → 開場 prompt 末尾多「# 使用者交代…」段（參考檔之後）、交接 prompt 在「使用者剛交代的話」之後、「上一步的成品」之前；去空白、空條剔；缺席／[]／全空白 → 兩個 prompt 逐字同舊；收尾 prompt 不帶', () => {
+  const base = buildBriefPrompt({ def: DEF, params: {}, paramLabels: {}, refTexts: {} });
+  const p = buildBriefPrompt({ def: DEF, params: {}, paramLabels: {}, refTexts: {}, userAsk: ASK });
+  assert.equal(p, `${base}\n\n# ${ASK_TITLE}\n${ASK_NOTE}\n${ASK_LINES}`);
+  for (const ask of [undefined, [], ['', '  '], '不是陣列']) {
+    assert.equal(buildBriefPrompt({ def: DEF, params: {}, paramLabels: {}, refTexts: {}, userAsk: ask }), base, `userAsk=${JSON.stringify(ask)} 開場逐字同舊`);
+  }
+  const flags = { note: true, tier: false, tools: false };
+  const hBase = buildHandoffPrompt({ node: DEF.nodes[1], flags, interjections: ['這次只要看北區'], upstream: [{ title: '看資料', text: '共 14 件' }] });
+  const h = buildHandoffPrompt({ node: DEF.nodes[1], flags, interjections: ['這次只要看北區'], upstream: [{ title: '看資料', text: '共 14 件' }], userAsk: ASK });
+  assert.equal(section(h, ASK_TITLE), `${ASK_NOTE}\n${ASK_LINES}`);
+  assert.ok(h.indexOf('# 使用者剛交代的話') < h.indexOf(`# ${ASK_TITLE}`) && h.indexOf(`# ${ASK_TITLE}`) < h.indexOf('# 上一步的成品'), h);
+  assert.equal(section(h, '使用者剛交代的話'), '- 這次只要看北區', '插話段不受影響');
+  for (const ask of [undefined, [], ['', '  ']]) {
+    assert.equal(buildHandoffPrompt({ node: DEF.nodes[1], flags, interjections: ['這次只要看北區'], upstream: [{ title: '看資料', text: '共 14 件' }], userAsk: ask }), hBase);
+  }
+  const rec = buildRecordPrompt({ def: DEF, table: [], outputs: [] });
+  assert.equal((rec.match(/使用者交代/g) ?? []).length, 0);
+});
+
+test('US-117 ③：brief() 回傳多 user_ask（原句、含限制詞也不剔、不混進 text）；handoff() 的 prompt 帶到、回傳形狀不變；userAsk 空時回傳沒有 user_ask 鍵（逐字同舊）', async () => {
+  const reply = '{"note":"先數件數；只能用上一步的數字"}';
+  const r = await brief({ adapter: fakeAdapter(reply), def: DEF, params: {}, paramLabels: {}, refTexts: {}, userAsk: ASK });
+  assert.deepEqual(r, { ok: true, text: '先數件數', dropped: ['只能用上一步的數字'], user_ask: ['寄信前要問我', '價格不准自己決定'] });
+  const r0 = await brief({ adapter: fakeAdapter(reply), def: DEF, params: {}, paramLabels: {}, refTexts: {}, userAsk: [] });
+  assert.deepEqual(r0, { ok: true, text: '先數件數', dropped: ['只能用上一步的數字'] });
+  const rNone = await brief({ adapter: fakeAdapter(reply), def: DEF, params: {}, paramLabels: {}, refTexts: {} });
+  assert.deepEqual(rNone, r0);
+  const prompts = [];
+  const pAdapter = { metas: [], async complete({ prompt }) { prompts.push(prompt); return reply; } };
+  await brief({ adapter: pAdapter, def: DEF, params: {}, paramLabels: {}, refTexts: {}, userAsk: ASK });
+  assert.ok(prompts[0].endsWith(`# ${ASK_TITLE}\n${ASK_NOTE}\n${ASK_LINES}`), '送出的開場 prompt 帶了使用者交代');
+  const h = await handoff({ ...LIMIT_ARGS('{"note":"按三類分節","tier":null,"web":null,"route":null}'), userAsk: ASK });
+  assert.deepEqual(h, { ok: true, text: '按三類分節', tier: null, web: null, route: null, dropped: [] }, '交接回傳形狀不變');
+  const hPrompts = [];
+  await handoff({ ...LIMIT_ARGS('{"note":"x"}'), adapter: { async complete({ prompt }) { hPrompts.push(prompt); return '{"note":"x"}'; } }, userAsk: ASK });
+  assert.equal(section(hPrompts[0], ASK_TITLE), `${ASK_NOTE}\n${ASK_LINES}`);
+});

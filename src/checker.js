@@ -562,6 +562,9 @@ const OPENING_LINES_MUSTS_ONLY = [
   '你不改成品、不補內容、不評論好不好——只回報要求有沒有守。本流程沒開數字對原始資料，成品裡的事實不用查出處。',
 ];
 
+// 必守第五路的小標（US-117 ②）：使用者說明書「紅線」段，逐條列在「# 必守（逐條對）」底下
+export const REDLINE_HEADING = '## 你的紅線（使用者親口定的，跟上面同等必守）';
+
 export function buildCheckPrompt({ title, requirements, sources, product }) {
   const req = requirements ?? {};
   // 必守三路＝使用者寫的：驗收重點、停點規則、群組規矩（違反歸既有 must 攔）
@@ -580,7 +583,18 @@ export function buildCheckPrompt({ title, requirements, sources, product }) {
   const demote = (text) => str(text).replace(/^(#{1,6})(?=\s)/gm, (m) => (m.length < 6 ? `#${m}` : m));
   const ruleFiles = (list, layer) => arr(list).filter((f) => f && str(f.name)).flatMap((f) => [`## ${layer}：${str(f.name)}`, demote(f.text)]);
   const sharedRules = [...ruleFiles(req.companyRules, '公司規範'), ...ruleFiles(req.deptRules, '部門規範')];
+  // 必守第五路（US-117 ②）：使用者說明書的「紅線」段——逐條列在必守底下自己的小標，違反走既有 must 攔（classify 不動、rule 抄原文）。
+  // 沒給／全空＝一字不多；其他必守全空但有紅線＝不印「（無）」，直接接小標
+  const redlines = arr(req.redlines).map((r) => str(r).trim()).filter(Boolean);
+  const mustLines = [
+    ...(musts.length ? [musts.map((m) => `- ${m}`).join('\n')] : (redlines.length ? [] : ['（無）'])),
+    ...(redlines.length ? [REDLINE_HEADING, redlines.map((r) => `- ${r}`).join('\n')] : []),
+  ];
   const judge = factsOff ? JUDGE_RULES_MUSTS_ONLY : JUDGE_RULES;
+  const judgeExtra = [
+    sharedRules.length ? '- 「公司／部門規範」段跟必守同等：違反規範歸 must_violations，rule 寫明是哪份規範的哪一條。' : null,
+    redlines.length ? '- 「你的紅線」小標下每一條跟必守同等：違反歸 must_violations，rule 抄那一條原文。' : null,
+  ].filter(Boolean);
   return [
     ...(factsOff ? OPENING_LINES_MUSTS_ONLY : OPENING_LINES),
     '全篇使用與「這一步」相同的語言。',
@@ -589,7 +603,7 @@ export function buildCheckPrompt({ title, requirements, sources, product }) {
     str(req.instruction),
     '',
     '# 必守（逐條對）',
-    musts.length ? musts.map((m) => `- ${m}`).join('\n') : '（無）',
+    ...mustLines,
     ...(sharedRules.length ? ['', '# 公司／部門規範（一定要守）', ...sharedRules] : []),
     '',
     '# 格式要求',
@@ -597,7 +611,7 @@ export function buildCheckPrompt({ title, requirements, sources, product }) {
     ...(notes.length ? ['', '# 監工備註（參考，不是必守）', notes.map((n) => `- ${n}`).join('\n')] : []),
     '',
     '# 判定規則',
-    sharedRules.length ? `${judge}\n- 「公司／部門規範」段跟必守同等：違反規範歸 must_violations，rule 寫明是哪份規範的哪一條。` : judge,
+    [judge, ...judgeExtra].join('\n'),
     '',
     '# 輸出格式',
     factsOff ? OUTPUT_EXAMPLE_MUSTS_ONLY : OUTPUT_EXAMPLE,

@@ -1248,3 +1248,46 @@ test('分類：成品自己標成推測的主張（可能／推測／估計／�
   assert.deepEqual(r.blocks.map((b) => b.claim), ['雙方約定十月交貨'], '只有沒標推測的那條進 blocks');
   assert.equal(r.status, 'blocked');
 });
+
+// ---- US-117 ②：必守第五路「你的紅線」（說明書「紅線」段，違反歸 must、攔下重做） ----
+
+const REDLINE_HEAD = '## 你的紅線（使用者親口定的，跟上面同等必守）';
+const REDLINE_JUDGE = '- 「你的紅線」小標下每一條跟必守同等：違反歸 must_violations，rule 抄那一條原文。';
+const SNAP_ARGS = { title: '寫八月月報', sources: '【欄位：月份】\n八月', product: '八月共 14 件' };
+
+test('US-117 ②：requirements.redlines → 「# 必守（逐條對）」底下獨立小標逐條列（去前後空白、空條剔掉）、在「# 格式要求」前；判定規則多一句紅線歸 must；跟公司規範那句可並存', () => {
+  const p = buildCheckPrompt({ ...SNAP_ARGS, requirements: { ...REQ, redlines: ['不准自己編數字', ' 不准提競品 ', '', '  '] } });
+  const musts = p.slice(p.indexOf('# 必守（逐條對）'), p.indexOf('# 格式要求'));
+  assert.equal(musts, `# 必守（逐條對）\n- 數字要對\n- 每段不超過三句\n- 保留 120 分鐘\n${REDLINE_HEAD}\n- 不准自己編數字\n- 不准提競品\n\n`);
+  const judge = p.slice(p.indexOf('# 判定規則'), p.indexOf('# 輸出格式'));
+  assert.ok(judge.endsWith(`6. 只輸出一個 JSON 物件，前後不要任何其他文字。\n${REDLINE_JUDGE}\n\n`), judge);
+  // 紅線＋公司規範同時有：兩句都在，規範那句在前（既有順序不動）
+  const both = buildCheckPrompt({ ...SNAP_ARGS, requirements: { ...REQ, redlines: ['不准自己編數字'], companyRules: [{ name: '手冊.md', text: '語氣要親切。' }] } });
+  const j2 = both.slice(both.indexOf('# 判定規則'), both.indexOf('# 輸出格式'));
+  assert.ok(j2.includes('- 「公司／部門規範」段跟必守同等：違反規範歸 must_violations，rule 寫明是哪份規範的哪一條。\n' + REDLINE_JUDGE), j2);
+  // factsOff 也一樣掛在必守版判定規則後
+  const off = buildCheckPrompt({ ...SNAP_ARGS, requirements: { ...REQ, factsOff: true, redlines: ['不准自己編數字'] } });
+  assert.ok(off.includes(`4. 只輸出一個 JSON 物件，前後不要任何其他文字。\n${REDLINE_JUDGE}`), off);
+  assert.ok(off.includes(`${REDLINE_HEAD}\n- 不准自己編數字`));
+});
+
+test('US-117 ②：其他必守全空、只有紅線 → 必守段不印「（無）」，直接是紅線小標；紅線缺席／[]／全空白 → prompt 逐字同舊（回歸快照）', () => {
+  const only = buildCheckPrompt({ title: '無要求', requirements: { instruction: '做', redlines: ['不准自己編數字'] }, sources: '', product: '成品' });
+  const musts = only.slice(only.indexOf('# 必守（逐條對）'), only.indexOf('# 格式要求'));
+  assert.equal(musts, `# 必守（逐條對）\n${REDLINE_HEAD}\n- 不准自己編數字\n\n`);
+  assert.equal(buildCheckPrompt({ ...SNAP_ARGS, requirements: { ...REQ, redlines: [] } }), SNAPSHOT_DEFAULT_PROMPT, '[] 逐字同舊');
+  assert.equal(buildCheckPrompt({ ...SNAP_ARGS, requirements: { ...REQ, redlines: ['', '  '] } }), SNAPSHOT_DEFAULT_PROMPT, '全空白逐字同舊');
+  assert.equal(buildCheckPrompt({ ...SNAP_ARGS, requirements: { ...REQ, redlines: '不是陣列' } }), SNAPSHOT_DEFAULT_PROMPT, '不是陣列當沒給');
+  assert.equal(buildCheckPrompt({ ...SNAP_ARGS, requirements: REQ }), SNAPSHOT_DEFAULT_PROMPT, '缺席逐字同舊');
+});
+
+test('US-117 ②：查核員回報違反紅線 → classify 歸 must 攔下（status blocked、rule 原文當 claim）；runCheck 把 redlines 原樣送進 prompt', async () => {
+  const c = classify({ items: [], must_violations: [{ rule: '不准自己編數字', where: '第二段的 37,620 元查無來源' }], flags: [] }, { editRules: ['保留 120 分鐘'] });
+  assert.equal(c.status, 'blocked');
+  assert.deepEqual(c.blocks, [{ kind: 'must', claim: '不准自己編數字', source: '', detail: '第二段的 37,620 元查無來源' }]);
+  const seen = [];
+  const args = { meta: { node: 'a' }, title: '寫八月月報', requirements: { ...REQ, redlines: ['不准自己編數字'] }, sources: '【欄位：月份】\n八月', product: '八月共 13 件' };
+  await runCheck({ adapter: fakeAdapter(RESULT_JSON), ...args, onPrompt: (p) => { seen.push(p); } });
+  assert.equal(seen[0], buildCheckPrompt({ title: args.title, requirements: args.requirements, sources: args.sources, product: args.product }));
+  assert.ok(seen[0].includes(`${REDLINE_HEAD}\n- 不准自己編數字`), '紅線真的進了送出的指示');
+});

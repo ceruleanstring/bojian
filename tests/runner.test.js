@@ -3177,3 +3177,141 @@ test('US-112：沒開「允許寫檔與執行程式」比照第一層——重�
   assert.equal(r2.steps.b.check.recheck_blocks, undefined, 'facts:false＝沒對過就不假裝對過');
   assert.equal(Object.hasOwn(r2.steps.b.attempts[1].check, 'recheck_blocks'), false);
 });
+
+// ===== US-117：說明書五段進工作單、紅線進查核、「什麼事要問我」進監工交代（memoryCtx.manual／redlines 由甲提供，這裡塞假的） =====
+
+const US117_MANUAL = { who: ['我是這家公司的負責人'], talk: ['不要恭維'], ask: ['寄信前要問我', '價格不准自己決定'], show: ['每一步都看'], redline: ['不准自己編數字'] };
+const US117_EMPTY = { who: [], talk: [], ask: [], show: [], redline: [] };
+const US117_USER_LINE = '使用者交代（什麼事要問我、什麼事自己決定；這是使用者說的，不是監工加的）：寄信前要問我；價格不准自己決定';
+// 假門面：coreNotes 逐字照舊（舊卡＋新卡都在），manual 只有有 section 的；redlines＝manual.redline 的別名
+function us117Setup(ctxExtra, def = LINEAR3) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bojian-runner-'));
+  const store = createStore(dir);
+  store.writeWorkflow('測試', 'wf', def);
+  const adapter = fakeAdapter();
+  adapter.setBriefReply('{"note":"總表 14 件"}');
+  adapter.setHandoffReply('{"note":"按三類分節","tier":null,"web":null,"route":null}');
+  adapter.setCheckResponse(CHECK_PASS);
+  const memory = { onRunStart() {}, contextFor: () => ({ coreNotes: ['用詞白話', '我是這家公司的負責人', '不要恭維', '寄信前要問我', '價格不准自己決定', '每一步都看', '不准自己編數字'], groupRules: ['不提競品'], groupName: '測試', cards: [], overridden: [], picks: {}, paused: false, ...ctxExtra }) };
+  const runner = createRunner({ store, adapter, memory });
+  return { store, adapter, runner };
+}
+const briefPromptOf = (adapter) => supCalls(adapter, 'brief')[0].prompt;
+const checkPromptOf = (adapter, nodeId) => adapter.calls.find((c) => c.checkPrompt && c.meta?.node === nodeId).checkPrompt;
+
+test('US-117 ①②③：manual 有內容 → 工人 coreNotes＝沒 section 的舊卡在段首、再五段（標題＋縮排子條，空段不印）；查核必守多「## 你的紅線」；開場與交接 prompt 帶「使用者交代」段；run.brief.user_ask 獨立欄位；工人 supervisorNotes 在開場後多一條標明是使用者說的', async () => {
+  const { store, adapter, runner } = us117Setup({ manual: US117_MANUAL, redlines: US117_MANUAL.redline });
+  const run = runner.startRun('測試', 'wf', {});
+  await runner.runUntilPause('測試', 'wf', run.run_id);
+  const a = workerCalls(adapter, 'a')[0];
+  assert.deepEqual(a.coreNotes, [
+    '用詞白話',
+    '我是誰\n  - 我是這家公司的負責人',
+    '怎麼跟我講話\n  - 不要恭維',
+    '什麼事要問我、什麼事自己決定\n  - 寄信前要問我\n  - 價格不准自己決定',
+    '什麼時候叫我看\n  - 每一步都看',
+    '紅線\n  - 不准自己編數字',
+  ]);
+  assert.deepEqual(a.groupRules, ['不提競品'], '群組規矩不受影響');
+  assert.deepEqual(workerCalls(adapter, 'b')[0].coreNotes, a.coreNotes, '每一步都帶同一份');
+  const ck = mustsOf(checkPromptOf(adapter, 'a'));
+  assert.ok(ck.includes('- 不提競品\n## 你的紅線（使用者親口定的，跟上面同等必守）\n- 不准自己編數字'), ck);
+  assert.ok(briefPromptOf(adapter).includes('# 使用者交代（什麼事要問我、什麼事自己決定）\n') && briefPromptOf(adapter).includes('- 寄信前要問我\n- 價格不准自己決定'), '開場 prompt 帶使用者交代');
+  const hp = supCalls(adapter, 'handoff', 'b')[0].prompt;
+  assert.ok(hp.includes('# 使用者交代（什麼事要問我、什麼事自己決定）\n') && hp.includes('- 寄信前要問我\n- 價格不准自己決定'), '交接 prompt 帶使用者交代');
+  const r = store.readRun('測試', 'wf', run.run_id);
+  assert.equal(r.brief.text, '總表 14 件', '監工備註本身不變');
+  assert.deepEqual(r.brief.user_ask, ['寄信前要問我', '價格不准自己決定'], '獨立欄位，不混進 text');
+  assert.deepEqual(a.supervisorNotes, ['開場：總表 14 件', US117_USER_LINE]);
+  assert.deepEqual(workerCalls(adapter, 'b')[0].supervisorNotes, ['開場：總表 14 件', US117_USER_LINE, '交接：按三類分節']);
+});
+
+test('US-117 ①③：只有 redline 段（沒 ask）→ 工作單只多「紅線」一段、沒有使用者交代那條、brief 無 user_ask；manual 缺席但 redlines 在 → 紅線照進查核、工作單不分段', async () => {
+  const s1 = us117Setup({ manual: { ...US117_EMPTY, redline: ['不准自己編數字'] }, redlines: ['不准自己編數字'] });
+  const run1 = s1.runner.startRun('測試', 'wf', {});
+  await s1.runner.runUntilPause('測試', 'wf', run1.run_id);
+  const a1 = workerCalls(s1.adapter, 'a')[0];
+  assert.deepEqual(a1.coreNotes, ['用詞白話', '我是這家公司的負責人', '不要恭維', '寄信前要問我', '價格不准自己決定', '每一步都看', '紅線\n  - 不准自己編數字']);
+  assert.deepEqual(a1.supervisorNotes, ['開場：總表 14 件']);
+  assert.equal(Object.hasOwn(s1.store.readRun('測試', 'wf', run1.run_id).brief, 'user_ask'), false);
+  assert.ok(!briefPromptOf(s1.adapter).includes('使用者交代（'));
+  const s2 = us117Setup({ redlines: ['不准自己編數字'] });
+  const run2 = s2.runner.startRun('測試', 'wf', {});
+  await s2.runner.runUntilPause('測試', 'wf', run2.run_id);
+  assert.deepEqual(workerCalls(s2.adapter, 'a')[0].coreNotes, ['用詞白話', '我是這家公司的負責人', '不要恭維', '寄信前要問我', '價格不准自己決定', '每一步都看', '不准自己編數字']);
+  assert.ok(mustsOf(checkPromptOf(s2.adapter, 'a')).includes('## 你的紅線（使用者親口定的，跟上面同等必守）\n- 不准自己編數字'));
+});
+
+test('US-117 ④：manual 缺席／五段全空（redlines 空）→ 工人 coreNotes、supervisorNotes、run.brief、開場／交接／查核 prompt 全部逐字同舊（跟沒有 manual 鍵的門面比）', async () => {
+  const base = us117Setup({});
+  const runB = base.runner.startRun('測試', 'wf', {});
+  await base.runner.runUntilPause('測試', 'wf', runB.run_id);
+  const aB = workerCalls(base.adapter, 'a')[0];
+  assert.deepEqual(aB.coreNotes, ['用詞白話', '我是這家公司的負責人', '不要恭維', '寄信前要問我', '價格不准自己決定', '每一步都看', '不准自己編數字'], '舊行為：平列');
+  assert.deepEqual(aB.supervisorNotes, ['開場：總表 14 件']);
+  for (const extra of [{ manual: US117_EMPTY, redlines: [] }, { manual: null, redlines: null }, { manual: '亂給', redlines: '亂給' }]) {
+    const s = us117Setup(extra);
+    const run = s.runner.startRun('測試', 'wf', {});
+    await s.runner.runUntilPause('測試', 'wf', run.run_id);
+    const a = workerCalls(s.adapter, 'a')[0];
+    assert.deepEqual(a.coreNotes, aB.coreNotes, JSON.stringify(extra));
+    assert.deepEqual(a.supervisorNotes, aB.supervisorNotes);
+    assert.deepEqual(workerCalls(s.adapter, 'b')[0].supervisorNotes, workerCalls(base.adapter, 'b')[0].supervisorNotes);
+    const rb = s.store.readRun('測試', 'wf', run.run_id).brief;
+    assert.deepEqual(Object.keys(rb).sort(), ['at', 'text'], '沒有 user_ask 鍵');
+    assert.equal(briefPromptOf(s.adapter), briefPromptOf(base.adapter), '開場 prompt 逐字同舊');
+    assert.equal(supCalls(s.adapter, 'handoff', 'b')[0].prompt, supCalls(base.adapter, 'handoff', 'b')[0].prompt, '交接 prompt 逐字同舊');
+    assert.equal(checkPromptOf(s.adapter, 'a'), checkPromptOf(base.adapter, 'a'), '查核 prompt 逐字同舊');
+  }
+});
+
+// ---- US-119 ①／⑦：停點「就這樣過」vs「改了」、查核攔下——runner 記事件，改了算行數差 ----
+test('停點：approve 記 stop_pass；edit 算 edit_size（行級差異）寫進 step 並記 stop_edit；記事件丟錯不擋；沒接 metrics 照常', async () => {
+  const events = [];
+  const metrics = { record: (event, fields) => events.push({ event, ...fields }) };
+  const def = structuredClone(LINEAR3);
+  def.nodes[0].stop_point = 'always';
+  def.nodes[1].stop_point = 'always';
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bojian-runner-'));
+  const store = createStore(dir);
+  store.writeWorkflow('測試', 'wf', def);
+  const adapter = fakeAdapter();
+  adapter.setOutput('a', '第一行\n第二行\n第三行');
+  const runner = createRunner({ store, adapter, metrics });
+  const run = runner.startRun('測試', 'wf', {});
+  let r = await runner.runUntilPause('測試', 'wf', run.run_id);
+  assert.equal(r.steps.a.status, 'waiting_review');
+  r = runner.edit('測試', 'wf', run.run_id, 'a', '第一行\n改過的第二行\n第三行\n多一行', null);
+  assert.equal(r.steps.a.edit_size, 3, '改一行（刪1加1）＋加一行＝3');
+  assert.deepEqual(events, [{ event: 'stop_edit', run: run.run_id, node: 'a', size: 3 }]);
+  runner.resume('測試', 'wf', run.run_id);
+  r = await runner.runUntilPause('測試', 'wf', run.run_id);
+  assert.equal(r.steps.b.status, 'waiting_review');
+  r = runner.approve('測試', 'wf', run.run_id, 'b');
+  assert.equal(r.steps.b.edit_size, undefined);
+  assert.deepEqual(events[1], { event: 'stop_pass', run: run.run_id, node: 'b' });
+  assert.equal(events.length, 2);
+
+  // 記事件丟錯不擋停點（本機計數不是主流程）
+  const boom = createRunner({ store, adapter, metrics: { record: () => { throw new Error('磁碟滿'); } } });
+  const run2 = boom.startRun('測試', 'wf', {});
+  await boom.runUntilPause('測試', 'wf', run2.run_id);
+  assert.equal(boom.approve('測試', 'wf', run2.run_id, 'a').steps.a.status, 'done');
+  // 沒接 metrics：原行為，edit_size 照算
+  const plain = createRunner({ store, adapter });
+  const run3 = plain.startRun('測試', 'wf', {});
+  await plain.runUntilPause('測試', 'wf', run3.run_id);
+  assert.equal(plain.edit('測試', 'wf', run3.run_id, 'a', '別的', null).steps.a.edit_size, 2, '「產出:a」一行換一行');
+});
+
+test('查核攔下：runner 在攔到那一刻記 check_block（run＋node），重做那份不再記', async () => {
+  const events = [];
+  const { runner: base, adapter, store } = setup();
+  void base;
+  adapter.setCheckResponse((n, meta) => (meta.node === 'a' && n === 1 ? CHECK_BLOCKED : CHECK_PASS));
+  const runner = createRunner({ store, adapter, metrics: { record: (event, fields) => events.push({ event, ...fields }) } });
+  const run = runner.startRun('測試', 'wf', {});
+  const r = await runner.runUntilPause('測試', 'wf', run.run_id);
+  assert.equal(r.steps.a.attempts[0].check.status, 'blocked', '第一份被攔');
+  assert.deepEqual(events.filter((e) => e.event === 'check_block'), [{ event: 'check_block', run: run.run_id, node: 'a' }]);
+});

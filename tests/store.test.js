@@ -17,12 +17,14 @@ const DEF = {
   params: [],
   nodes: [{ id: 'a', title: '步驟A', executor: 'ai', stop_point: 'never', instruction: '做A', next: [] }],
 };
+// US-119 ⑧：新建流程會補 created_at；比對「定義原樣」時把它拿掉
+const sans = (d) => { const { created_at: _c, ...rest } = d ?? {}; return rest; };
 
 test('workflow 寫入後讀回一致，且不殘留暫存檔', () => {
   const { store, dir } = tmpStore();
   store.writeWorkflow('範例', 'wf1', DEF);
   const back = store.readWorkflow('範例', 'wf1');
-  assert.deepEqual(back, DEF);
+  assert.deepEqual(sans(back), DEF);
   const files = fs.readdirSync(path.join(dir, 'workflows', '範例', 'wf1'));
   assert.ok(!files.some((f) => f.includes('.tmp')), `不應殘留暫存檔：${files}`);
 });
@@ -59,7 +61,7 @@ test('排版輪 L5 ⑥：listWorkflows 每筆多 steps／human_steps（只數一
   assert.deepEqual(byId.old, { category: '範例', id: 'old', name: '測試流程', steps: 1, human_steps: 0 });
   assert.deepEqual(byId.bad, { category: '範例', id: 'bad', name: 'bad', steps: null, human_steps: null }, '壞檔仍列出，步數 null');
   assert.equal(fs.readFileSync(path.join(dir, 'workflows', '範例', 'old', 'workflow.yaml'), 'utf8'), yamlBefore, '列清單不改檔');
-  assert.deepEqual(store.readWorkflow('範例', 'old'), DEF, '定義檔讀回原樣（沒被塞步數欄位）');
+  assert.deepEqual(sans(store.readWorkflow('範例', 'old')), DEF, '定義檔讀回原樣（沒被塞步數欄位）');
 });
 
 test('損壞的 workflow.yaml → StoreError CORRUPT，訊息是人話', () => {
@@ -79,7 +81,7 @@ test('首次寫入建立 history/v1 快照；restoreLatest 能救回改壞的檔
   assert.ok(fs.existsSync(v1), 'history/v1.yaml 應存在');
   fs.writeFileSync(path.join(dir, 'workflows', '範例', 'wf1', 'workflow.yaml'), '{{{壞掉', 'utf8');
   store.restoreLatest('範例', 'wf1');
-  assert.deepEqual(store.readWorkflow('範例', 'wf1'), DEF);
+  assert.deepEqual(sans(store.readWorkflow('範例', 'wf1')), DEF);
 });
 
 test('run 紀錄寫入讀回一致，listRuns 依開跑先後', () => {
@@ -108,7 +110,7 @@ test('搬移流程：履歷與 run 紀錄一起搬、原位清空', () => {
   store.writeRun('工作回報', 'wf1', rid, { run_id: rid, status: 'done' });
   store.createCategory('行銷');
   store.moveWorkflow('工作回報', 'wf1', '行銷');
-  assert.deepEqual(store.readWorkflow('行銷', 'wf1'), DEF);
+  assert.deepEqual(sans(store.readWorkflow('行銷', 'wf1')), DEF);
   assert.deepEqual(store.listRuns('行銷', 'wf1'), [rid]);
   assert.throws(() => store.readWorkflow('工作回報', 'wf1'), (e) => e.code === 'NOT_FOUND');
 });
@@ -119,14 +121,14 @@ test('版本機制：bump 記一版、rollback 以舊版為現行並再記一版
   const v2def = structuredClone(DEF);
   v2def.nodes[0].instruction = '做A（表格千分位）';
   store.bumpVersion('範例', 'wf1', v2def, '表格改千分位', 'edits');
-  assert.deepEqual(store.readWorkflow('範例', 'wf1'), v2def, '現行版=新版');
+  assert.deepEqual(sans(store.readWorkflow('範例', 'wf1')), v2def, '現行版=新版');
   let versions = store.listVersions('範例', 'wf1');
   assert.deepEqual(versions.map((v) => [v.version, v.source]), [[1, 'create'], [2, 'edits']]);
   assert.equal(versions[1].diff_note, '表格改千分位');
-  assert.deepEqual(store.readVersion('範例', 'wf1', 1).def, DEF);
+  assert.deepEqual(sans(store.readVersion('範例', 'wf1', 1).def), DEF);
   // 退回 v1
   store.rollback('範例', 'wf1', 1);
-  assert.deepEqual(store.readWorkflow('範例', 'wf1'), DEF, '退回後現行=v1 內容');
+  assert.deepEqual(sans(store.readWorkflow('範例', 'wf1')), DEF, '退回後現行=v1 內容');
   versions = store.listVersions('範例', 'wf1');
   assert.equal(versions.length, 3, '退回也記一版，歷史不刪');
   assert.equal(versions[2].source, 'rollback');
@@ -178,7 +180,7 @@ test('垃圾桶：刪→列→復原（含 runs）；撞名加尾綴；過期清
   store.writeWorkflow('工作', 'wf1', { ...DEF, name: '新的同名' });
   const restored = store.restoreTrash(key);
   assert.notEqual(restored.id, 'wf1', '撞名要換 id 不覆蓋');
-  assert.deepEqual(store.readWorkflow('工作', restored.id), DEF);
+  assert.deepEqual(sans(store.readWorkflow('工作', restored.id)), DEF);
   assert.deepEqual(store.listRuns('工作', restored.id), [rid], 'runs 一起回來');
   assert.deepEqual(store.listTrash(), []);
   // 過期清除
@@ -863,9 +865,9 @@ test('B0 修正輪：改名版之後十分鐘內的畫布編輯不併入改名�
   assert.equal(vEdit, 3, '改名版不准被併掉');
   const snapRename = store.readVersion('旅遊', 'a', 2);
   assert.equal(snapRename.diff_note, `改名：「${DEF.name}」→「新名」`);
-  assert.deepEqual(snapRename.def, renamed, '改名版的 def 還是改名當時那份');
+  assert.deepEqual(sans(snapRename.def), renamed, '改名版的 def 還是改名當時那份');
   assert.equal(store.readVersion('旅遊', 'a', 3).diff_note, '手動編輯（畫布／欄位）');
-  assert.deepEqual(store.readWorkflow('旅遊', 'a'), edited);
+  assert.deepEqual(sans(store.readWorkflow('旅遊', 'a')), edited);
   // 「手動編輯」之間照舊十分鐘合併（既有行為不變）
   const again = { ...edited, nodes: [{ ...edited.nodes[0], instruction: '做A（又改）' }] };
   assert.equal(store.saveManualEdit('旅遊', 'a', again), 3, '手動編輯之間仍合併同版');
@@ -1155,6 +1157,37 @@ test('B06：垃圾桶復原先搬再刪 meta——搬失敗 meta 還在、垃圾
   const restored = store.restoreTrash(key);
   assert.equal(restored.id, 'wf1');
   assert.ok(!fs.existsSync(path.join(dir, 'workflows', '工作', 'wf1', 'meta.yaml')), '復原後沒有 meta.yaml 殘留');
-  assert.deepEqual(store.readWorkflow('工作', 'wf1'), DEF);
+  assert.deepEqual(sans(store.readWorkflow('工作', 'wf1')), DEF);
   assert.deepEqual(store.listTrash(), []);
+});
+
+// ---- US-119 ⑧：建流程時間戳 ----
+test('writeWorkflow：新建補 created_at（ISO）；帶著來的不蓋；既有檔沒有就不回填；升版時沿用不掉', () => {
+  const { store, dir } = tmpStore();
+  const before = Date.now();
+  store.writeWorkflow('工作', 'new', DEF);
+  const back = store.readWorkflow('工作', 'new');
+  assert.equal(typeof back.created_at, 'string');
+  const t = Date.parse(back.created_at);
+  assert.ok(t >= before - 1000 && t <= Date.now() + 1000, `created_at 是現在：${back.created_at}`);
+  const { created_at: _c, ...rest } = back;
+  assert.deepEqual(rest, DEF, '其餘原樣');
+  assert.ok(!('created_at' in DEF), '不動呼叫者的物件');
+
+  // 帶著來的（匯入／複製）照存
+  store.writeWorkflow('工作', 'given', { ...DEF, created_at: '2020-01-01T00:00:00.000Z' });
+  assert.equal(store.readWorkflow('工作', 'given').created_at, '2020-01-01T00:00:00.000Z');
+
+  // 既有檔沒有 created_at：再寫一次不回填
+  store.writeWorkflow('工作', 'old', DEF);
+  const oldFile = path.join(dir, 'workflows', '工作', 'old', 'workflow.yaml');
+  fs.writeFileSync(oldFile, fs.readFileSync(oldFile, 'utf8').split('\n').filter((l) => !l.startsWith('created_at')).join('\n'), 'utf8');
+  assert.ok(!('created_at' in store.readWorkflow('工作', 'old')));
+  store.writeWorkflow('工作', 'old', { ...DEF, name: '改名' });
+  assert.ok(!('created_at' in store.readWorkflow('工作', 'old')), '既有檔沒有就維持沒有');
+
+  // 升版（前端送回的定義可能沒帶 created_at）：沿用檔上的
+  store.bumpVersion('工作', 'new', { ...DEF, name: '第二版' }, '改', 'manual');
+  assert.equal(store.readWorkflow('工作', 'new').created_at, back.created_at, '升版沿用');
+  assert.equal(store.readWorkflow('工作', 'new').name, '第二版');
 });

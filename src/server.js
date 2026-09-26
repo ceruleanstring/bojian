@@ -13,7 +13,7 @@ import { validateWorkflow, outgoing, nodeKind, applyDefaults, validateSettings }
 import { layers } from './graph.js';
 import {
   createMemory, makeCard, validateCard, matchField, ensureFields, similarFields, mergeFields, parseGroupText,
-  newId, bucketOfId, selectCore, FIELD_KINDS, SCOPE_LEVELS,
+  newId, bucketOfId, selectCore, FIELD_KINDS, SCOPE_LEVELS, MANUAL_SECTIONS,
 } from './memory.js';
 import { preflight, packInputs, usesConnectors } from './preflight.js';
 import { fetchConnectors as fetchHostConnectors, normalizeCache, connectedServers } from './connectors.js';
@@ -28,9 +28,17 @@ import { parseWhen } from './runner.js';
 import { pushNotice, resolveNotice } from './notices.js';
 import { monthView, linkedShifts, snapshotPrompt, parseSnapshot } from './calendar.js';
 import { ensureOrgLayout, writeOrgs, orgDir, newOrgId, ORGS_TRASH } from './orgs.js';
-import { runStats } from './stats.js';
+import { runStats, runSeries } from './stats.js';
+import { record as recordMetric, hasEvent as hasMetricEvent, buildReport as buildMetricsReport } from './metrics.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
+// US-120／ADR-013：「回傳使用計數」的收件位址。空字串＝沒有端點：開關就算打開也不建立任何對外連線（回 sent:false）。
+// 有位址才 POST buildReport 的 JSON（逾時 10 秒），內容與匯出檔一個位元組都不多
+export const REPORT_ENDPOINT = '';
+// 回傳的另一條路（老闆 2026-09-25 裁定）：開一條 GitHub Issue，URL 由這裡組、瀏覽器由使用者自己開——剝繭本身不連外、不需要金鑰
+export const REPORT_ISSUE_REPO = 'ceruleanstring/bojian';
+// Issue 網址的 body 上限：超過就改成請使用者複製貼上（GitHub 對 query string 有長度限制）
+const REPORT_ISSUE_BODY_MAX = 6000;
 // 字型要給對 content-type，不然瀏覽器不吃（字型改成內建之後才需要）
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
   '.woff2': 'font/woff2', '.woff': 'font/woff', '.ttf': 'font/ttf', '.svg': 'image/svg+xml' };
@@ -60,7 +68,8 @@ function seedExamples(store, examplesDir) {
   for (const f of fs.readdirSync(examplesDir).filter((f) => f.endsWith('.yaml'))) {
     const id = path.basename(f, '.yaml');
     if (existing.has(id)) continue;
-    store.writeWorkflow('範例', id, yaml.load(fs.readFileSync(path.join(examplesDir, f), 'utf8')));
+    // seeded：播種進來的不是使用者建的——計數（US-119 ④⑧）不算建流程、第一次跑也不記間隔
+    store.writeWorkflow('範例', id, { ...yaml.load(fs.readFileSync(path.join(examplesDir, f), 'utf8')), seeded: true });
   }
 }
 
@@ -295,6 +304,29 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
     ? path.join(process.env.APPDATA, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup') : null);
   const autostartFile = startupDir ? path.join(startupDir, 'bojian-autostart.cmd') : null;
   const nowIso = () => new Date(now()).toISOString();
+  // 本機計數（US-119）：事件檔在資料根 data/metrics.jsonl，只記 id 與數字。記不成只進 console，永遠不擋主流程
+  const metrics = { record: (event, fields) => recordMetric(dataDir, event, fields, { now }) };
+  const track = (event, fields) => {
+    try { metrics.record(event, fields); } catch (e) { console.error(`[bojian] 計數沒記成（${event}）：`, e.message); }
+  };
+  // 封測報告（US-120）：計數＋每條流程（全部組織）五個數；不帶流程名、id、分類。這一份就是匯出檔與回傳內容
+  function metricsReport() {
+    const workflowsStats = [];
+    for (const org of orgs.all()) {
+      let list = [];
+      try { list = org.store.listWorkflows(); } catch { continue; }
+      for (const w of list) {
+        const all = [];
+        try {
+          for (const rid of org.store.listRuns(w.category, w.id)) {
+            try { const r = org.store.readRun(w.category, w.id, rid); if (r && typeof r === 'object') all.push(r); } catch { /* 讀不到的那趟不算 */ }
+          }
+        } catch { /* 這條流程的紀錄夾讀不到就當沒跑過 */ }
+        workflowsStats.push({ ...runStats(all, now(), 30).window, series_len: runSeries(all, []).length });
+      }
+    }
+    return buildMetricsReport({ dataDir, version: PKG_VERSION, workflowsStats, now });
+  }
 
   // 多組織：一個組織一套 store／memory／runner／optimizer／scheduler，路徑全由 orgDir 推導。
   // store 帶 root＝資料根：備份備的是整根（全部組織一起備），不是單一組織夾。
@@ -308,7 +340,7 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
       executeNode: (o) => adapter.executeNode({ ...o, meta: { ...(o?.meta ?? {}), org: id } }),
     };
     const memory = createMemory({ store, adapter: orgAdapter, now }); // 四條記路的落地（M2）；runner 開跑後叫它判「同值連兩趟」
-    const runner = createRunner({ store, adapter: orgAdapter, now, memory });
+    const runner = createRunner({ store, adapter: orgAdapter, now, memory, metrics });
     const optimizer = createOptimizer({ store, adapter: orgAdapter });
     const inflight = new Set();
 
@@ -325,8 +357,10 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
     // （M1c）：拆解器的三段參考——分類清單、詞典、所在分類的群組條（只取 active）。
     // 分類依 body.category，沒有才看草稿頂層的 category；存在的分類才算「已定」。讀不到＝當沒有，不擋建流程。
     // 多 capabilities（設定組布林，字由 composer 組）與 coreNotes（表達層＋內容層認識卡文，同開跑 selectCore；暫停或讀不到＝[]）。
+    // US-115／117：多 manual（說明書五段，同一批 selectCore 的卡裡有 section 的、各段照 created_at；沒有＝五段空陣列，composer 逐字同舊）
+    const emptyManual = () => Object.fromEntries(MANUAL_SECTIONS.map((s) => [s.key, []]));
     function composeContext(body) {
-      const ctx = { categories: [], dict: null, groupRules: [], category: null, companyRules: [], deptRules: [], capabilities: null, coreNotes: [] };
+      const ctx = { categories: [], dict: null, groupRules: [], category: null, companyRules: [], deptRules: [], capabilities: null, coreNotes: [], manual: emptyManual() };
       try {
         const settings = store.readSettings();
         // connectors＝已連上的服務（連線輪：快取清單，只列 connected；讀不到＝沒有）
@@ -344,7 +378,10 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
           if (want !== '未分類') ctx.deptRules = store.readSharedRuleTexts(want);
         }
         try {
-          ctx.coreNotes = selectCore({ profileCards: store.listCards('profile'), category: ctx.category, paused: settings.memory?.paused === true }).map((c) => c.text);
+          const core = selectCore({ profileCards: store.listCards('profile'), category: ctx.category, paused: settings.memory?.paused === true });
+          ctx.coreNotes = core.map((c) => c.text);
+          const byCreated = (a, b) => String(a.created_at ?? '').localeCompare(String(b.created_at ?? ''));
+          for (const c of core.filter((x) => typeof x.section === 'string' && Object.hasOwn(ctx.manual, x.section)).sort(byCreated)) ctx.manual[c.section].push(c.text);
         } catch (e) {
           console.error('[bojian] 記憶卡讀不到，這趟拆解不帶關於你：', e.message);
         }
@@ -673,6 +710,7 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
           if (p.kind === 'supervisor_hint') {
             p.status = 'accepted';
             store.writeProposals(queue);
+            track('proposal_accept', { proposal: p.id });
             return json(200, { ok: true, open: { category: p.workflow.category, id: p.workflow.id, node_id: p.change.node_id, field: p.change.field } });
           }
           try {
@@ -684,6 +722,7 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
             const version = store.bumpVersion(p.workflow.category, p.workflow.id, def, note, p.source);
             p.status = 'accepted';
             store.writeProposals(queue);
+            track('proposal_accept', { proposal: p.id });
             return json(200, { ok: true, version });
           } catch (e) {
             // 套不上去（目標被刪／套上後定義不合法）→ 提議作廢＋人話，絕不假成功升版
@@ -696,6 +735,7 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
           p.reject_count = (p.reject_count ?? 0) + 1;
           p.status = p.reject_count >= 2 ? 'muted' : 'rejected'; // 拒 2 次靜音（ADR-003）
           store.writeProposals(queue);
+          track('proposal_reject', { proposal: p.id });
           return json(200, { ok: true, status: p.status });
         }
         return json(404, { error: '找不到這個動作' });
@@ -821,7 +861,10 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
         }
         if (sub === 'notices' && req.method === 'POST' && segs[4] === 'undo' && segs.length === 5) {
           const b = await readBody(req);
-          return json(200, memory.undo({ cardId: decodeURIComponent(segs[3]), category: b.category, id: b.id, run: b.run }));
+          const cardId = decodeURIComponent(segs[3]);
+          const undone = memory.undo({ cardId, category: b.category, id: b.id, run: b.run });
+          track('memory_undo', { card: cardId }); // US-119 ⑥：記憶卡被撤回的次數（只記卡 id）
+          return json(200, undone);
         }
         if (sub === 'clear' && req.method === 'POST' && segs.length === 3) {
           // 清空記憶＝全部卡進記憶垃圾桶（30 天內可復原）；詞典、群組圈、設定不動
@@ -834,6 +877,17 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
           if (req.method === 'POST') {
             const b = await readBody(req);
             return json(200, memory.intro({ answers: b.answers ?? {}, skip: b.skip === true }));
+          }
+        }
+        // 說明書問答（US-115）：GET 現況＋第一輪三題；round 出第 2、3 輪題；draft 寫五段草稿；save 逐行存卡並寫 intro_done。
+        // 驗證與 400 都在 memory 門面（丟 e.status=400 由下面 catch 轉），這裡只接線
+        if (sub === 'manual') {
+          if (req.method === 'GET' && segs.length === 3) return json(200, memory.manual());
+          if (req.method === 'POST' && segs.length === 4) {
+            const b = await readBody(req);
+            if (segs[3] === 'round') return json(200, await memory.manualRound({ round: b.round, transcript: b.transcript }));
+            if (segs[3] === 'draft') return json(200, await memory.manualDraft({ transcript: b.transcript }));
+            if (segs[3] === 'save') return json(200, memory.manualSave({ sections: b.sections }));
           }
         }
         if (sub === 'dict') {
@@ -1038,6 +1092,34 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
         return json(200, { ok: true, ...orgs.remove(id) });
       }
       // ===== 全域設定（設定頁六組的資料源）與備份 =====
+      // ===== 本機計數（US-119）與封測報告（US-120）：報告＝匯出檔＝回傳內容，全是計數、沒有任何名字 =====
+      if (segs[1] === 'metrics' && segs.length === 3) {
+        if (segs[2] === 'report' && req.method === 'GET') return json(200, metricsReport());
+        if (segs[2] === 'issue-url' && req.method === 'GET') {
+          if (store.readSettings().report_optin !== true) return json(403, { error: 'report_optin_off' });
+          const report = metricsReport();
+          const title = `封測報告 v${report.version ?? '未知'} ${report.generated_at.slice(0, 10)}`;
+          const body = `以下只有計數，由剝繭產生。\n\n\`\`\`json\n${JSON.stringify(report, null, 2)}\n\`\`\``;
+          const base = `https://github.com/${REPORT_ISSUE_REPO}/issues/new`;
+          if (body.length > REPORT_ISSUE_BODY_MAX) return json(200, { url: base, title, body, too_long: true });
+          return json(200, { url: `${base}?title=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}`, title, body });
+        }
+        if (segs[2] === 'send' && req.method === 'POST') {
+          if (store.readSettings().report_optin !== true) return json(403, { error: 'report_optin_off' });
+          if (!REPORT_ENDPOINT) return json(200, { sent: false, reason: 'no_endpoint' });
+          const payload = JSON.stringify(metricsReport()); // 傳的就是報告本身，一個位元組都不多
+          const ctrl = new AbortController();
+          const timer = setTimeout(() => ctrl.abort(), 10000);
+          try {
+            const r = await fetch(REPORT_ENDPOINT, { method: 'POST', headers: { 'content-type': 'application/json' }, body: payload, signal: ctrl.signal });
+            if (!r.ok) return json(502, { error: `回傳沒送成（對方回 ${r.status}）` });
+            return json(200, { sent: true, status: r.status, bytes: Buffer.byteLength(payload) });
+          } catch (e) {
+            return json(502, { error: `回傳沒送成：${e.name === 'AbortError' ? '逾時 10 秒' : '連不上收件位址'}` });
+          } finally { clearTimeout(timer); }
+        }
+        return json(404, { error: '找不到這個動作' });
+      }
       if (segs[1] === 'settings' && segs.length === 2) {
         // app_version 而不是 version：設定檔自己有一個 version 欄位（格式版本），
         // 用同一個名字會被套件版號蓋掉，讀設定的人拿到的是剝繭版本而不是格式版本
@@ -1047,6 +1129,7 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
           const { data_dir: _d, version: _v, ...b } = await readBody(req);
           const merged = deepMerge(store.readSettings(), b);
           const problems = validateSettings(merged);
+          if (merged.report_optin !== undefined && typeof merged.report_optin !== 'boolean') problems.push('回傳使用計數要是開或關');
           if (problems.length) return json(400, { error: problems.join('；') });
           store.writeSettings(merged);
           return json(200, merged);
@@ -1322,8 +1405,10 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
           const newDef = applyDefaults(body.def, { mode: 'create', defaults });
           validateWorkflow(newDef, { allowFloating: true });
           delete newDef.category; // 拆解器草稿的頂層 category 只是「放哪」：分類是路徑，不進 workflow.yaml
+          delete newDef.seeded; // 範例整份存成新流程＝使用者建的，播種旗標不跟過去
           const id = `wf-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
           store.writeWorkflow(body.category, id, newDef); // 分類名過 store 護欄，`../x` 這類直接 400
+          track('workflow_create', { workflow: id }); // US-119 ④⑧：建了幾條、之後有沒有跑
           // 詞典自己長：欄位名對不上詞典就新建一條（記從哪條流程長出來）；像同一件事的提醒一句，不擋、不寫
           let dict_similar = [];
           try {
@@ -1543,6 +1628,7 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
             return json(409, { error: `開跑前健檢：有 ${blocks.length} 處要先修，修好再按開始`, issues: [...blocks, ...pf.issues.filter((i) => i.level !== 'block')], connector_reads: pf.connector_reads });
           }
           // （M2）：開跑表單點的習慣卡、點了又改掉的、帶的身分，原樣進 run.memory（M3b 才有介面送這三欄）
+          const firstRun = store.listRuns(category, id).length === 0; // US-119 ⑧：這條流程第一次開跑
           const run = runner.startRun(category, id, overrides, {
             memoryPicks: body.memory_picks ?? {}, memoryChanged: body.memory_changed ?? [], memoryIdentity: body.memory_identity ?? null,
             ...(note.trim() ? { note } : {}),
@@ -1550,6 +1636,10 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
           }); // 讀檔＋驗定義，壞檔在這裡被擋
           for (const { token, name } of claimedTokens) store.claimUpload(token, category, id, run.run_id, name); // 檔跟著這一趟存（照開跑前算好的落盤名），暫存即刪
           kick(category, id, run.run_id);
+          if (firstRun && defForRun.seeded !== true) { // 播種的範例不算「建流程到第一次跑」
+            const created = Date.parse(defForRun.created_at ?? '');
+            track('workflow_first_run', { workflow: id, interval_ms: Number.isFinite(created) ? Math.max(0, now() - created) : null });
+          }
           return json(200, run);
         }
         // GET /runs/stats：近 30 天成效統計（US-099；履歷→執行紀錄頂端）。壞掉的 run.yaml 跳過不擋，只數讀得到的
@@ -1559,13 +1649,38 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
           for (const rid of store.listRuns(category, id)) {
             try { const r = store.readRun(category, id, rid); if (r && typeof r === 'object') all.push(r); } catch { /* 讀不到的那趟不算 */ }
           }
-          return json(200, runStats(all, Date.now(), 30));
+          const series = runSeries(all, store.readUsage()); // US-118：兩趟以上才畫
+          return json(200, { ...runStats(all, Date.now(), 30), series: series.length >= 2 ? series : [] });
         }
         const runId = decodeURIComponent(segs[5] ?? '');
         // DELETE /runs/:rid：不用跑完的執行整筆刪（含產出與卷宗），不可復原——UI 端先 confirm
         if (segs.length === 6 && req.method === 'DELETE') {
+          // US-119 ③：沒跑完就刪＝放棄，記停在第幾步（完成步數／總步數）；讀不到的壞檔照刪不記
+          let abandon = null;
+          try {
+            const r = store.readRun(category, id, runId);
+            if (r && typeof r === 'object' && r.status !== 'done') {
+              const steps = r.steps && typeof r.steps === 'object' ? Object.values(r.steps) : [];
+              const total = Array.isArray(r.def?.nodes) ? r.def.nodes.length : steps.length;
+              abandon = { run: runId, step_done: steps.filter((st) => st && st.status === 'done').length, step_total: total };
+            }
+          } catch { /* 壞檔：照刪、不記 */ }
           store.deleteRun(category, id, runId);
+          if (abandon) track('run_abandon', abandon);
           return json(200, { ok: true });
+        }
+        // POST /runs/:rid/steps/:node/check-wrong：「這條查錯了」（US-119 ⑦）。只記一次計數，不送那條查核內容；同一 run＋node 重複按不再記
+        if (req.method === 'POST' && segs[6] === 'steps' && segs[8] === 'check-wrong' && segs.length === 9) {
+          const node = decodeURIComponent(segs[7]);
+          const r = store.readRun(category, id, runId); // 不存在 → 404
+          const step = r.steps && typeof r.steps === 'object' ? r.steps[node] : null;
+          if (!step || typeof step !== 'object') return json(404, { error: `找不到步驟「${node}」` });
+          const wasBlocked = (Array.isArray(step.attempts) && step.attempts.some((a) => a?.check?.status === 'blocked'))
+            || step.check?.status === 'blocked' || (Array.isArray(step.check?.first_blocks) && step.check.first_blocks.length > 0);
+          if (!wasBlocked) return json(400, { error: '這一步沒被查核攔下過，沒有「查錯了」可以按' });
+          if (hasMetricEvent(dataDir, 'check_wrong', { run: runId, node })) return json(200, { ok: true, recorded: false });
+          track('check_wrong', { run: runId, node });
+          return json(200, { ok: true, recorded: true });
         }
         // GET /runs/:rid 狀態。卡在 running（如伺服器重啟殘留）就順手接回續跑——UI 每秒輪詢，等於自癒
         if (segs.length === 6 && req.method === 'GET') {
@@ -1578,6 +1693,7 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
         if (req.method === 'GET' && segs[6] === 'files' && segs.length === 9) {
           const fname = decodeURIComponent(segs[7]);
           const buf = store.readArtifact(category, id, runId, fname);
+          if (segs[8] === 'inline' || segs[8] === 'preview') track('artifact_open', { run: runId, mode: segs[8] }); // US-119 ②：成品被開啟的次數
           if (segs[8] === 'inline') {
             const ext = fname.split('.').pop().toLowerCase();
             const type = { pdf: 'application/pdf', html: 'text/html; charset=utf-8', json: 'application/json; charset=utf-8' }[ext] ?? 'text/plain; charset=utf-8';
@@ -1596,6 +1712,7 @@ export function createApp({ dataDir, adapter, uiDir = path.join(HERE, '..', 'ui'
           if (segs.length === 8) {
             const fname = decodeURIComponent(segs[7]);
             const buf = store.readArtifact(category, id, runId, fname);
+            track('artifact_open', { run: runId, mode: 'download' }); // US-119 ②：成品被下載的次數
             res.writeHead(200, {
               'content-type': 'application/octet-stream',
               'content-disposition': `attachment; filename*=UTF-8''${encodeURIComponent(fname)}`,

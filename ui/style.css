@@ -183,6 +183,10 @@ aside.right.chatside>.panel{position:static;max-height:none;overflow:visible;mar
   display:flex;align-items:center;justify-content:center;font:600 11px var(--mono);flex:none;color:var(--ink-500)}
 .step .n i{font-size:12px}
 .pillslot{margin-left:auto;flex:none;display:flex;gap:4px;align-items:center}
+/* US-119 ⑦ 查核攔過的步：「這條查錯了」小鈕（按過＝「已回報」灰掉不可再按） */
+.pillslot .ckwrong{color:var(--ink-500)}
+.pillslot .ckwrong:hover:not([disabled]){color:var(--accent-text);border-color:var(--accent)}
+.pillslot .ckwrong.done,.pillslot .ckwrong[disabled]{cursor:default;color:var(--ink-400);background:var(--paper-rail);border-color:transparent}
 /* 清單大卡（樣稿 list()；<article class="step">，執行頁的 div.step 列不受影響）；選中＝淡藍底＋藍邊（上桌 */
 article.step{display:block;background:#fff;border:1px solid #dce2ee;border-radius:13px;padding:12px 16px;margin-bottom:8px;font-size:14px;color:var(--ink-900)}
 article.step::before{top:12px;bottom:12px;left:5px}
@@ -744,17 +748,85 @@ details.artifact summary .filechip{margin-left:4px}
 .grules li>i{color:var(--ink-400);font-size:14px;flex:none}
 .grules .gfield{flex:none;color:var(--ink);font-weight:700}
 .grules .gval{font-weight:600;color:var(--ink-900)}
-/* ===== 首次三題介紹：蓋在儀表板前的一頁，三個問句＋「會記成」＋兩顆鈕 ===== */
-.intro{max-width:640px;margin:0 auto}
-.intro h3{font-size:19px;font-weight:800;margin:0 0 4px}
-.intro .q{margin-top:var(--s4)}
-.intro .q .flabel{font-size:13px;margin:0}
-.intro .q .ex{font-size:11.5px;color:var(--ink-400);margin:2px 0 6px}
-.intro .q input{width:100%;font-family:var(--font);font-size:13px;font-weight:600;border:.5px solid var(--hairline);border-radius:9px;padding:9px 12px;background:var(--fill-inner);color:var(--ink-900)}
-.intro .q input:focus{outline:2px solid rgb(var(--accent-rgb) / .35)}
-.intro .willbe{margin-top:var(--s4);padding:9px 12px;border:.5px dashed var(--hairline);border-radius:9px;background:var(--fill-soft);font-size:12px}
-.intro .willbe ul{padding-left:0;list-style:none;margin:4px 0 0}
-.intro .willbe li{display:flex;align-items:center;gap:6px;margin:3px 0}
+/* ===== 初次體驗輪：第一次打開的三步引導卡（連線 › 你的說明書 › 帶你走一次），蓋在儀表板前；版面照 PROTO 初次體驗輪-三步引導-草稿 .wiz ===== */
+.intro{max-width:640px;margin:6px auto 0;background:var(--m3-bg);border:.5px solid var(--hairline);border-radius:14px;padding:18px 22px;box-shadow:var(--e2)}
+.intro h3{font-size:18px;font-weight:800;margin:0 0 4px}
+.intro .sub{margin:0 0 12px;color:var(--ink-500);font-size:12.5px}
+.intro .prog{display:flex;gap:8px;align-items:center;font-size:11.5px;color:var(--ink-400);margin-bottom:12px}
+.intro .prog span{display:inline-flex;align-items:center;gap:5px}
+.intro .prog .b{width:18px;height:18px;border-radius:50%;background:var(--paper-rail);color:var(--ink-400);font-size:11px;display:inline-flex;align-items:center;justify-content:center;font-weight:700;font-style:normal}
+.intro .prog .on{color:var(--ink-900);font-weight:600}
+.intro .prog .on .b{background:var(--accent);color:#fff}
+.intro .prog .done .b{background:var(--accent-soft);color:var(--accent-text)}
+.intro .prog .sep{font-style:normal}
+.intro .okbox{display:flex;gap:10px;align-items:center;padding:12px 14px;border-radius:10px;background:var(--accent-soft);color:var(--accent-text);font-size:13px}
+.intro .okbox>i{font-size:22px;flex:none}
+.intro .okbox .note{margin:0;color:var(--accent-text)}
+.intro .badbox{padding:12px 14px;border-radius:10px;background:rgb(var(--red-rgb) / .10);color:var(--red-text);font-size:13px}
+.intro .badbox b{display:block;margin-bottom:4px}
+.intro .steps{margin:10px 0 0;padding:0;list-style:none}
+.intro .steps li{display:flex;gap:10px;padding:7px 0;border-top:.5px solid var(--hairline);font-size:12.5px}
+.intro .steps li .n{width:20px;height:20px;border-radius:50%;background:var(--paper-rail);color:var(--ink-500);font-size:11px;display:inline-flex;align-items:center;justify-content:center;flex:none;font-weight:700}
+.intro .steps li small{display:block;color:var(--ink-400);font-size:11.5px}
+.intro .q{margin:0 0 10px}
+.intro .q .lab{font-size:12.5px;font-weight:600;margin-bottom:4px}
+.intro .q .lab small{display:block;font-weight:400;color:var(--ink-400);font-size:11px}
+.intro .q textarea{margin-top:0;min-height:44px;resize:vertical}
+.intro .acts{align-items:center;margin-top:14px}
+.intro .acts .note{margin:0}
+.intro .acts .note.err{color:var(--red-text)}
+.intro .acts .note.waiting{display:inline-flex;align-items:center;gap:5px;color:var(--ink-700)}
+.intro .acts .spin{animation:introspin 1s linear infinite}
+@keyframes introspin{to{transform:rotate(360deg)}}
+.intro .doc{border:.5px solid var(--hairline);border-radius:10px;background:var(--m3-bg);font-size:12.5px;overflow:hidden}
+.intro .doc .h{display:flex;justify-content:space-between;align-items:center;padding:7px 12px;background:var(--fill-soft);border-top:.5px solid var(--hairline);border-bottom:.5px solid var(--hairline);font-weight:700;font-size:12.5px}
+.intro .doc .h:first-child{border-top:0}
+.intro .doc .ln{display:flex;align-items:center;gap:8px;padding:5px 12px 5px 22px;border-bottom:.5px solid var(--hairline);position:relative;color:var(--ink-900)}
+.intro .doc .ln::before{content:"–";position:absolute;left:10px;color:var(--ink-400)}
+.intro .doc .ln input{flex:1;margin:0;font-size:12.5px;padding:5px 9px}
+.intro .doc .ln .chip{flex:none}
+.intro .doc .ln.ph{color:var(--ink-400)}
+.intro .doc .ln.add{border-bottom:0;padding-top:6px;padding-bottom:6px}
+.intro .doc .ln.add::before{content:""}
+/* 儀表板頂端的提醒行（略過的第 2、3 步）：琥珀，照 .memnotice */
+.introremind{display:flex;align-items:center;gap:8px;font-size:12.5px;color:#815820;padding:7px 12px;border-radius:9px;background:#fff3db;border:.5px solid #ead1a2;margin:-8px 0 14px}
+.introremind>i{font-size:16px;flex:none}
+.introremind span{flex:1}
+.introremind+.introremind{margin-top:-6px}
+/* 設定 › 個人與記憶 › 關於你：你的說明書五段 */
+.mansec{margin:6px 0 10px}
+.mansec .manh{display:flex;align-items:center;gap:8px;font-size:12.5px;font-weight:700;padding:4px 0}
+.mansec .manln .c{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.mansec .manln.editing{display:flex;align-items:center;gap:8px}
+.mansec .manln.editing input{margin:0;flex:1}
+.mansec .manadd{padding:2px 0 0}
+/* ===== 初次體驗輪 丁（US-116）：模擬導覽——頂端深色導覽列、右上「模擬」標籤、亮點框、開跑表單、右欄查核、守句膠囊、換你的事 ===== */
+.coach{position:sticky;top:0;z-index:6;display:flex;align-items:center;gap:12px;padding:10px 84px 10px 14px;border-radius:12px;background:#1f2a3c;color:#fff;font-size:13px;line-height:1.5;margin:0 0 18px;box-shadow:var(--e2)} /* 右側留給釘在視窗右上的「模擬」標籤 */
+.coach .k{flex:none;font-weight:800;font-size:11.5px;letter-spacing:.5px;padding:3px 8px;border-radius:6px;background:rgb(255 255 255 / .14);white-space:nowrap}
+.coach .grow{flex:1;min-width:0}
+.coach .btn{flex:none;background:transparent;border-color:rgb(255 255 255 / .35);color:#fff;box-shadow:none;padding:6px 11px;font-size:12px}
+.coach .btn:hover{background:rgb(255 255 255 / .12);transform:none}
+.coach .btn.go{background:#fff;color:#1f2a3c;border-color:#fff}
+.coach .btn.go:hover{background:#eef1f8}
+.simtag{position:fixed;top:12px;right:18px;z-index:7;font-size:11px;font-weight:800;letter-spacing:.5px;padding:4px 11px;border-radius:999px;background:#fff;color:var(--violet-text);border:1px solid rgb(var(--violet-rgb) / .6);box-shadow:var(--e1);pointer-events:none} /* 全程釘在視窗右上，捲動也在 */
+.simchip{vertical-align:middle;margin-left:4px}
+.coach-hl{outline:2px solid var(--accent);outline-offset:3px;border-radius:10px;animation:coachpulse 1.6s ease-in-out infinite}
+@keyframes coachpulse{50%{outline-color:rgb(var(--accent-rgb) / .3)}}
+.demo .runstep.coach-hl{outline-offset:0}
+.demoform{max-width:640px;display:flex;flex-direction:column;gap:14px}
+.demoform .row{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:9px 0;border-bottom:.5px solid var(--hairline);font-size:13px}
+.demoform .row strong{font-weight:650}
+.demoform .row:last-of-type{border-bottom:0}
+.democheck{margin:0 0 var(--s3);padding:9px 11px;border-radius:9px;background:var(--fill-soft);border:.5px solid var(--hairline);font-size:12.5px;line-height:1.6}
+.democheck b{display:flex;align-items:center;gap:5px;font-size:12px;margin-bottom:3px}
+.democheck p{margin:0}
+.coachguard{margin-left:auto;font-size:11px}
+.demoart{margin:10px 0}
+.demoart .row{display:flex;align-items:center;gap:8px;padding:7px 0;border-top:.5px solid var(--hairline);font-size:13px}
+.demoart .row .nm{font-weight:600}
+.demoart .row .sum{flex:1;color:var(--ink-400);font-size:12px}
+.demoturn{margin-top:10px}
+.demoturn .btns{flex-wrap:wrap}
 /* ===== 一行通知：run 頁頂、聊天氣泡下——「記下來了：… 不要記」；撤了或沒記成＝灰字無鈕 ===== */
 .memnotices{display:flex;flex-direction:column;gap:3px;margin:0 0 var(--s4)}
 .memnotice{display:flex;align-items:center;gap:6px;font-size:12px;color:#815820;padding:5px 10px;border-radius:9px;background:#fff3db;border:.5px solid #ead1a2;flex-wrap:wrap} /* 照 DEMO .notice 琥珀 */
@@ -921,6 +993,12 @@ details.artifact summary .filechip{margin-left:4px}
 .addrow .notein{flex:1}
 /* 設定頁後四組：資料夾路徑、一句結果／錯誤 */
 .setbody .path{font-family:var(--mono);font-size:11.5px;color:var(--ink-700);overflow-wrap:anywhere}
+/* US-120 設定 › 資料管理 › 使用計數：「送到 GitHub」前的全文預覽框（傳前看得到每一個數字） */
+.reportprev{margin:10px 0 4px;border:1px solid var(--hairline);border-radius:9px;padding:10px 12px;background:var(--wp)}
+.reportprev h5{margin:0 0 6px;font-size:12px;font-weight:700;color:var(--ink-700)}
+.reportprev .reportbody{margin:0;max-height:260px;overflow:auto;font:12px/1.5 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere;background:#fff;border:1px solid var(--hairline);border-radius:6px;padding:8px 10px}
+.reportprev .btns{margin-top:8px;display:flex;gap:8px;flex-wrap:wrap}
+.reportprev .note{margin:0 0 6px}
 .setmsg{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--green-text);padding:6px 0 8px}
 .setmsg.err{color:var(--red-text)}
 .setmsg i{font-size:14px;flex:none}
@@ -985,7 +1063,7 @@ details.artifact summary .filechip{margin-left:4px}
 .histpanel .histnote{margin:0 0 12px}
 .runstats{margin:0 0 14px}
 .runstats .kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
-.runstats .kpi{background:var(--wp);border-radius:9px;padding:8px 9px;min-width:0}
+.runstats .kpi{display:block;background:var(--wp);border-radius:9px;padding:8px 9px;min-width:0} /* display:block：閱讀輪總覽的通用 .kpi 是 flex，會把這裡的數字與標籤擠成一行；草稿是上下疊 */
 .runstats .kpi b{display:block;font-size:19px;font-weight:600;font-variant-numeric:tabular-nums;color:var(--ink)}
 .runstats .kpi span{font-size:11.5px;color:var(--ink-500)}
 .runstats .kpi .d{font-size:11px;color:var(--ink-500)}
@@ -998,6 +1076,21 @@ details.artifact summary .filechip{margin-left:4px}
 .runstats .rank .chip{flex:none}
 .runstats .note{margin:4px 0 0}
 @media(max-width:700px){.runstats .kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
+/* US-118 逐趟曲線（A 案四格小折線；尺寸與草稿同：每格 border 9 圓角、SVG 160×60、軸標 10.5px） */
+.runstats .sub small{font-weight:400;color:var(--ink-500);font-size:11.5px;margin-left:8px}
+.runstats .spark4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+@media(max-width:560px){.runstats .spark4{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.runstats .sp{border:1px solid var(--hairline);border-radius:9px;padding:8px 9px 6px;min-width:0}
+.runstats .sp .h{display:flex;justify-content:space-between;align-items:baseline;gap:4px;font-size:11.5px;color:var(--ink-500)}
+.runstats .sp .h b{font-size:15px;color:var(--ink);font-variant-numeric:tabular-nums;white-space:nowrap}
+.runstats .sp .h em{font-style:normal;font-size:11px;display:block;text-align:right;white-space:nowrap}
+.runstats .sp .h em.up{color:var(--green-text)}
+.runstats .sp .h em.dn{color:var(--red-text)}
+.runstats .sp svg{display:block;width:100%;height:auto;margin-top:4px}
+.runstats .sp polyline{stroke:var(--accent)}
+.runstats .sp .pt{fill:var(--accent)}
+.runstats .sp .pt.dn{fill:var(--red-text)}
+.runstats .sp .ax{display:flex;justify-content:space-between;font-size:10.5px;color:var(--ink-400);margin-top:2px}
 .flowsetbtn{font-size:12px;gap:5px}
 .flowmemline{display:flex;align-items:center;gap:8px;margin:var(--s3) 0 0;padding:7px 12px;border:.5px solid var(--hairline);border-radius:11px;background:var(--fill-inner);font-size:12.5px;color:var(--ink-700)}
 .flowmemline>i{color:var(--ink-400);font-size:14px;flex:none}

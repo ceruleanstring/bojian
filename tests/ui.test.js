@@ -443,8 +443,8 @@ test('T6 ⑤：抽屜／流程頁／零碎：AI 執行／人工、停點、輸�
   assert.ok(src.includes('setRow(`錯過時${hint('), '設定→執行與排程 列標題「錯過時」（說明文案輪：說明搬進標題旁的問號）');
   assert.ok(src.includes('data-v="false" tabindex="0" role="button">先詢問</span>') && src.includes('data-v="true" tabindex="0" role="button">自動補</span>'), '設定 seg 先詢問／自動補（無障礙輪補了 tabindex／role）');
   assert.ok(src.includes('記憶待整理 ${ex.total} 條'), '儀表板記憶列');
-  assert.ok(src.includes("it.saving ? '記著⋯' : '儲存'"), '介紹頁 記住這三條→儲存');
-  assert.ok(src.includes('data-act="intro-skip" ${it.saving ? \'disabled\' : \'\'}>先略過</button>'), '介紹頁 先跳過→先略過');
+  // 初次體驗輪：舊三題介紹頁換成三步引導卡——「先略過」字樣沿用（每一步都能先略過）
+  assert.ok(src.includes('data-act="intro-skip"') && src.includes('>先略過</button>'), '引導卡 先略過');
   assert.equal(count(src, 'data-act="clear-draft">清空</button>'), 2, '清掉重來→清空 兩處');
   assert.ok(src.includes('data-act="confirm-save-draft">儲存</button>'), '存進去→儲存');
   assert.ok(src.includes("accepted: ['quiet', 'ph ph-check', '你說放行']"), 'CHECK_CHIP accepted 膠囊跟著「放行」（契約 B 未列行號，依全域約束膠囊要改）');
@@ -518,7 +518,7 @@ test('T8 ①：SET_TABS 三組改名；「地圖與例外」「連接器與保�
   assert.equal(count(src, "素材庫: ['角色情境', '常用片段']"), 0, '素材庫組退場');
   assert.ok(src.includes("openSettings('個人與記憶', '記憶總覽')"), '儀表板「去看」');
   assert.ok(src.includes("(k === '身分' ? setIdentitiesHtml(d) : k === '記憶總覽' ? setMapHtml(d) : k === '欄位詞典' ? setDictHtml(d) : setKnowHtml(d))"), '個人與記憶分派');
-  assert.ok(src.includes("act === 'intro-open'"), '關於你頁「介紹你自己」鈕的事件');
+  assert.ok(src.includes("act === 'intro-open'"), '關於你頁「重新問答」鈕的事件（初次體驗輪：開引導卡第 2 步）');
 });
 
 const t8DefCtx = (tab) => ({ state: { settings: { tab: {}, busy: null }, claude: true }, setTab: () => tab });
@@ -539,16 +539,18 @@ test('T8 ②：新流程的預設——監工總開關與三勾搬到「權限�
   assert.ok(stop.includes('哪幾步要停下來等你，在每個步驟自己的設定裡改，不在這一頁。'), '停點指路句');
 });
 
-test('T8 ③：關於你——頂部介紹三列各附「修改」、敏感四類改四個開關（health 開）、身分段收在 details；沒介紹過→灰字＋「介紹你自己」鈕', () => {
+test('T8 ③：關於你——頂部是五段說明書（初次體驗輪取代舊介紹三列）、敏感四類改四個開關（health 開）、身分段收在 details；還沒寫→一句＋「用問的寫」鈕', () => {
   const at = '2026-09-01T00:00:00.000Z';
   const card = (id, layer, text, kind) => ({ id, bucket: 'profile', status: 'active', layer, text, scope: { level: 'all' }, source: { kind }, created_at: at });
   const cards = [card('i1', 'content', '小公司負責人', 'intro'), card('i2', 'content', '給主管看', 'intro'), card('i3', 'expression', '受不了術語', 'intro'), card('p1', 'expression', '不要恭維', 'chat')];
-  const ctx = { state: { settings: { idEdit: null, tab: {} }, categories: ['旅遊'] } };
-  const html = uiFn('setKnowHtml', ctx)({ cfg: { memory: { sensitive: { health: true } } }, cards, identities: [] });
-  const intro = html.slice(html.indexOf('data-intro'), html.indexOf('<div class="group">'));
-  for (const t of ['你是誰、做什麼', '小公司負責人', '你做出來的東西通常給誰看', '給主管看', '你最受不了什麼', '受不了術語']) assert.ok(intro.includes(t), `介紹列缺「${t}」`);
-  assert.equal(count(intro, '>修改</button>'), 3, '三列各一顆修改');
-  assert.equal(count(intro, 'data-act="mem-card"'), 3, '修改＝開那張卡');
+  const ctx = { state: { settings: { idEdit: null, tab: {}, manualEdit: null, busy: null }, categories: ['旅遊'], keep: {}, run: null } };
+  const secs = (fill) => [{ key: 'who', label: '我是誰', layer: 'content' }, { key: 'talk', label: '怎麼跟我講話', layer: 'expression' }, { key: 'ask', label: '什麼事要問我、什麼事自己決定', layer: 'expression' }, { key: 'show', label: '什麼時候叫我看', layer: 'expression' }, { key: 'redline', label: '紅線', layer: 'expression' }].map((s) => ({ ...s, lines: fill?.[s.key] ?? [] }));
+  const manual = { intro_done: true, sections: secs({ who: [{ card: 'i1', text: '小公司負責人', round: 1 }], talk: [{ card: 'i3', text: '受不了術語', round: 1 }] }) };
+  const html = uiFn('setKnowHtml', ctx)({ cfg: { memory: { sensitive: { health: true } } }, cards, identities: [], manual });
+  const man = html.slice(html.indexOf('data-manual'), html.indexOf('<div class="group">'));
+  for (const t of ['我是誰', '小公司負責人', '怎麼跟我講話', '受不了術語', '什麼時候叫我看', '紅線']) assert.ok(man.includes(t), `說明書缺「${t}」`);
+  assert.equal(count(man, 'data-act="set-man-edit"'), 2, '兩行各一顆改');
+  assert.equal(count(html, 'data-intro'), 0, '舊介紹三列退場');
   // （09-19 裁示：「記敏感資訊的可以合成一欄」）：四列各印一次同樣的小字→合成一列，說明只講一次
   assert.equal(count(html, 'data-act="set-sens"'), 4, '四類還是四個可點項');
   assert.equal(count(html, '記敏感資訊'), 1, '合成一列');
@@ -563,9 +565,9 @@ test('T8 ③：關於你——頂部介紹三列各附「修改」、敏感四�
   const idTab = uiFn('setMemoryHtml', { ...ctx, state: { ...ctx.state, settings: { idEdit: null, detail: true, tab: { 個人與記憶: '身分' } } } })(memD);
   assert.ok(idTab.includes('身分') && idTab.includes('data-act="id-add"'), '身分分頁有身分段與新增');
   assert.ok(idTab.indexOf('data-act="set-tab"') < idTab.indexOf('data-act="id-add"'), '身分段在分頁鈕之後');
-  const none = uiFn('setKnowHtml', ctx)({ cfg: { memory: {} }, cards: [cards[3]], identities: [] });
-  assert.ok(none.includes('data-act="intro-open"') && none.includes('還沒介紹過'), '沒介紹過');
-  assert.equal(count(none, '>修改</button>'), 0);
+  const none = uiFn('setKnowHtml', ctx)({ cfg: { memory: {} }, cards: [cards[3]], identities: [], manual: { intro_done: true, sections: secs() } });
+  assert.ok(none.includes('data-act="intro-open"') && none.includes('還沒寫') && none.includes('用問的寫'), '還沒寫');
+  assert.equal(count(none, 'data-act="set-man-edit"'), 0);
 });
 
 test('T8 ④：執行與排程→排程：「錯過時」二鍵「先詢問／自動補」，無「自動補跑」', () => {
@@ -1057,7 +1059,7 @@ test('U3 ②：「清理」「關於」分段 0 命中「公司名稱」與 set-
     assert.equal(count(html, 'set-company-name'), 0, `${tab} 不印輸入框`);
     assert.equal(count(html, '規範上限'), 0, `${tab} 不印規範上限`);
   }
-  const order = ['組織', '位置與備份', '清理', '關於'].map((s) => all.indexOf(SEC_AT(s)));
+  const order = ['組織', '位置與備份', '清理', '使用計數', '關於'].map((s) => all.indexOf(SEC_AT(s)));
   assert.ok(order.every((x, i) => x >= 0 && (i === 0 || x > order[i - 1])), `資料管理四段依序（原三分頁內容不少）：${order}`);
 });
 
@@ -1372,7 +1374,8 @@ test('U5 ③：usageModalHtml——usageOpen 才印 .modalback＋seg 按流程�
   const closedCtx = u5Ctx();
   assert.equal(uiFn('usageModalHtml', closedCtx)(closedCtx.state.dash), '', 'usageOpen false→空');
   const src = uiSrc();
-  assert.equal(count(src, "state.dash = { data: null, usageView: 'flow', open: {}, promptView: null, usageOpen: false, showAll: false, calendar: null };"), 2, '兩處初值同步');
+  assert.equal(count(src, 'state.dash = freshDash();'), 3, '三處初值同一個 freshDash()（開站、側欄儀表板、引導卡底下鋪的）');
+  assert.ok(src.includes("const freshDash = () => ({ data: null, usageView: 'flow', open: {}, promptView: null, usageOpen: false, showAll: false, calendar: null });"), '初值只寫一次');
   assert.ok(src.includes("api('GET', `/api/calendar?month=${ymOf(new Date())}`).catch(() => null)"), 'loadDash 多抓 calendar（失敗＝null）');
   for (const a of ["act === 'dash-usage-open'", "act === 'dash-usage-close'", "act === 'dash-show-all'"]) assert.ok(src.includes(a), `事件 ${a}`);
   assert.ok(src.includes("if (e.key === 'Escape' && state.dash?.usageOpen) { state.dash.usageOpen = false; render(); return; }"), 'Esc 關用量浮窗');
@@ -2520,7 +2523,7 @@ test('L1 ⑤：vm——沒切頁＝現況：第一趟出卡（分類空→第一
 const l2Visible = (src) => src.split('\n').map((ln) => (/^\s*\/\//.test(ln) ? '' : ln.replace(/\s\/\/\s.*$/, '').replaceAll("'未分類'", '')));
 // 例外表：命中行必含這些字面之一（表上字面不存在也紅）
 const L2_SCAN_ALLOW = {
-  公司: ['例：小公司負責人', '讀者、公司、進行中的事', "'公司規範': '組織規範'"], // 前二＝使用者自己的真實公司（例句），不是組織層；末項 BASIS_TXT 鍵（素材庫舊輸入框「例：公司一句話簡介」隨共用素材頁退場）
+  公司: ['讀者、公司、進行中的事', "'公司規範': '組織規範'"], // 首項＝使用者自己的真實公司（例句），不是組織層（初次體驗輪：舊三題例句「例：小公司負責人」隨介紹頁退場）；末項 BASIS_TXT 鍵（素材庫舊輸入框「例：公司一句話簡介」隨共用素材頁退場）
   部門: [], // 中間層改回「分類」，畫面上不該再有「分類」；拆解器回的 basis 資料值「分類守則」現在與畫面同字，不必換字、也不進例外表
 };
 test('L2 ①：換字掃描——app.js／canvas.js 去註解後「流程」「公司」「部門」0 命中（資料值 \'未分類\' 與例外表除外；例外表逐行核）', () => {
@@ -3030,7 +3033,7 @@ test('L6 ⑤：Workflow 預設、執行與排程、資料管理、連線各切�
   const ex = uiFn('setExecHtml', { state: { settings: { busy: null }, calendar: null } })({ cfg: { exec: {} }, autostart: { enabled: true, supported: true } });
   const da = uiFn('setDataHtml', { state: { settings: { busy: null, msg: null } }, memAt: () => '' })({ cfg: { data_dir: 'x' }, backups: [], trash: { wf: [], cards: [] } });
   const co = uiFn('setConnHtml', { state: { settings: { busy: null, msg: null }, claude: true, connectors: { checked_at: null, servers: [] } }, memAt: () => '' })({ snapshot: null });
-  for (const [name, h, secs] of [['Workflow 預設', df, ['權限與查核', 'AI 步驟', '停點']], ['執行與排程', ex, ['常駐', '排程', 'AI 工人']], ['資料管理', da, ['組織', '位置與備份', '清理', '關於']], ['連線', co, ['Claude', 'Google 行事曆', '外部服務']]]) {
+  for (const [name, h, secs] of [['Workflow 預設', df, ['權限與查核', 'AI 步驟', '停點']], ['執行與排程', ex, ['常駐', '排程', 'AI 工人']], ['資料管理', da, ['組織', '位置與備份', '清理', '使用計數', '關於']], ['連線', co, ['Claude', 'Google 行事曆', '外部服務']]]) {
     const idx = secs.map((s) => h.indexOf(SEC_AT(s)));
     assert.ok(idx.every((x, i) => x >= 0 && (i === 0 || x > idx[i - 1])), `${name} 分段依序：${idx}`);
     assert.equal(noTabs(h), 0, `${name} 的卡由 settingsHtml 統一出，各組函式自己不出鈕`);
@@ -5592,18 +5595,19 @@ test('C3：說明鈕就地開合——不進 state、不重繪，點別處與 Es
 test('C4：個人與記憶整頁——畫面上零說明小字，說明全在問號裡', () => {
   const at = '2026-09-01T00:00:00.000Z';
   const card = (id, layer, text, kind) => ({ id, bucket: 'profile', status: 'active', layer, text, scope: { level: 'all' }, source: { kind }, created_at: at });
-  const ctx = { state: { settings: { idEdit: null, tab: {} }, categories: ['旅遊'] } };
-  const html = uiFn('setKnowHtml', ctx)({ cfg: { memory: { sensitive: { health: true } } }, cards: [card('i1', 'content', '小公司負責人', 'intro'), card('p1', 'expression', '不要恭維', 'chat')], identities: [] });
+  const ctx = { state: { settings: { idEdit: null, tab: {}, manualEdit: null, busy: null }, categories: ['旅遊'], keep: {}, run: null } };
+  const manual = { intro_done: true, sections: [{ key: 'who', label: '我是誰', layer: 'content', lines: [{ card: 'i1', text: '小公司負責人', round: 1 }] }, { key: 'talk', label: '怎麼跟我講話', layer: 'expression', lines: [] }, { key: 'ask', label: '什麼事要問我、什麼事自己決定', layer: 'expression', lines: [] }, { key: 'show', label: '什麼時候叫我看', layer: 'expression', lines: [] }, { key: 'redline', label: '紅線', layer: 'expression', lines: [] }] };
+  const html = uiFn('setKnowHtml', ctx)({ cfg: { memory: { sensitive: { health: true } } }, cards: [card('i1', 'content', '小公司負責人', 'intro'), card('p1', 'expression', '不要恭維', 'chat')], identities: [], manual });
   assert.equal(count(html, 'class="sub"'), 0, '這頁不再有說明小字');
-  // 介紹三題的 .d 放的是你答過的內容（不是說明），所以只看介紹段之後
+  // 說明書段的行是你寫的內容（不是說明），所以只看說明書段之後
   const afterIntro = html.slice(html.indexOf('<div class="group">'));
   assert.equal(count(afterIntro, '<div class="d">'), 0, '開關列的說明欄也空了');
   assert.ok(count(html, 'class="hint"') >= 5, `說明改掛在問號上：${count(html, 'class="hint"')} 顆`);
   for (const dead of ['三題各是一張認識卡', '每步帶的每一步都帶', '預設不記。打開＝只記你親口說的。', '不含身分限縮；綁了身分的分類實際附的會更少']) {
     assert.ok(!html.includes(dead), `舊小字「${dead.slice(0, 12)}…」該從畫面上退場`);
   }
-  // 退場不等於丟掉：這些話要在問號裡找得到
-  for (const kept of ['三題各存一張卡', '卡片留著', '四類預設不記', '語氣、長度、格式、禁忌', '身分限縮']) {
+  // 退場不等於丟掉：這些話要在問號裡找得到（初次體驗輪：「三題各存一張卡」換成「每行都是一張認識卡」）
+  for (const kept of ['每行都是一張認識卡', '卡片留著', '四類預設不記', '語氣、長度、格式、禁忌', '身分限縮']) {
     assert.ok(html.includes(kept), `說明「${kept}」該收進問號，不是刪掉`);
   }
 });
@@ -5992,7 +5996,7 @@ test('M2（方案 B）：點卡整頁換成那一項——返回鈕、標題＝�
 test('M2b（方案 B）：卡面現值有使用者自己打的字——組織名稱打成「a-->b|c」也不會把整組設定切壞', () => {
   const da = uiFn('setDataHtml', { state: { settings: { busy: null, msg: null } }, memAt: () => '' })({ cfg: { data_dir: 'x', company_name: 'a-->b|c' }, backups: [], trash: { wf: [], cards: [] } });
   const ov = uiFn('settingsHtml', setPageCtx({ group: '資料管理' }, da))();
-  for (const s of ['組織', '位置與備份', '清理', '關於']) assert.ok(ov.includes(`<b>${s}</b>`), `四張卡都在：缺 ${s}`);
+  for (const s of ['組織', '位置與備份', '清理', '使用計數', '關於']) assert.ok(ov.includes(`<b>${s}</b>`), `五張卡都在：缺 ${s}`);
   // 覆核員變異法抓到：只查卡都在，拿掉 secSafe 照樣綠——卡面會被截成「a」、畫面露出殘字「b|c-->」
   assert.ok(ov.includes('<p>a→b｜c</p>'), `卡面現值要完整（換字後）：${/<b>組織<\/b><p>[^<]*<\/p>/.exec(ov)?.[0]}`);
   const det = uiFn('settingsHtml', setPageCtx({ group: '資料管理', detail: true, tab: { 資料管理: '組織' } }, da))();
@@ -7352,4 +7356,577 @@ test('F5（Codex 09-25）：打字中流程停下——輸入與焦點保留，�
   const fp = /function flushPollDirty\(\) \{[\s\S]*?\n\}\n/.exec(src)?.[0] ?? '';
   assert.equal(count(fp, 'api('), 0, '補畫不打 API');
   assert.equal(count(fp, 'schedulePoll'), 0, '補畫不重啟輪詢');
+});
+
+// ---------- 初次體驗輪（US-114／US-115）丙：三步引導殼、第 1 步三態、第 2 步問答→草稿→存檔、第 3 步佔位、儀表板提醒行、設定關於你五段 ----------
+const introCtx = (intro, extra = {}) => ({ state: { intro, claude: null, keep: {}, run: null, introManual: null, ...extra }, setTimeout: () => 7 });
+const manualMeta = [
+  { key: 'who', label: '我是誰', layer: 'content' }, { key: 'talk', label: '怎麼跟我講話', layer: 'expression' },
+  { key: 'ask', label: '什麼事要問我、什麼事自己決定', layer: 'expression' }, { key: 'show', label: '什麼時候叫我看', layer: 'expression' }, { key: 'redline', label: '紅線', layer: 'expression' },
+];
+const round1 = [
+  { id: 'r1-who', q: '你是誰、平常在做什麼？哪些東西你看不懂、或不想自己碰？', section: 'who' },
+  { id: 'r1-talk', q: '你最常想請 AI 幫你做哪類事？它做出來的東西，通常哪裡讓你不滿意？', section: 'talk' },
+  { id: 'r1-ask', q: '做事的時候，哪些事你一定要自己決定？哪些你希望它自己定、事後跟你講一聲就好？', section: 'ask' },
+];
+const step2 = (over = {}) => ({ step: 2, phase: 'ask', round: 1, roundsMax: 3, perRoundMax: 3, questions: round1, transcript: [], rounds: {}, draft: null, meta: manualMeta, err: null, inflight: false, ...over });
+
+test('初次體驗輪 丙①：三步殼——進度列三段（連線 › 你的說明書 › 帶你走一次）、data-step 跟著當前步；舊三題畫面與 answers 路徑退場', () => {
+  const html = uiFn('introHtml', introCtx({ step: 1 }))();
+  for (const t of ['連線', '你的說明書', '帶你走一次']) assert.ok(html.includes(t), `進度列缺「${t}」`);
+  assert.ok(html.includes('data-step="1"'), '第 1 步');
+  assert.ok(/class="prog"/.test(html), '進度列');
+  const s3 = uiFn('introHtml', introCtx({ step: 3 }))();
+  assert.ok(s3.includes('data-step="3"') && count(s3, 'class="done"') === 2, '第 3 步時前兩步打勾');
+  const src = uiSrc();
+  assert.equal(count(src, 'INTRO_QUESTIONS'), 0, '舊三題常數退場');
+  assert.equal(count(src, 'answers: introAnswers()'), 0, 'POST /api/memory/intro 的 answers 路徑前端不再用');
+  assert.equal(count(src, '介紹你自己'), 0, '「介紹你自己」字樣退場');
+  assert.ok(/if \(!\(await api\('GET', '\/api\/memory\/summary'\)\)\.intro_done\) state\.intro = \{ step: 1 \}/.test(src), 'init：intro_done 為否→state.intro={step:1}');
+});
+
+test('初次體驗輪 丙②：第 1 步三態——連上：找到了＋一秒後自動進第 2 步（排一次 timer）；沒連上：三件事＋重新檢查＋先略過；還在查：骨架沒有鈕', () => {
+  let timers = 0;
+  const okCtx = introCtx({ step: 1 }, { claude: true });
+  okCtx.setTimeout = () => { timers += 1; return 9; };
+  const ok = uiFn('introHtml', okCtx)();
+  assert.ok(ok.includes('找到了') && ok.includes('一秒後自動進下一步'), '連上：找到了');
+  assert.ok(ok.includes('剝繭掛在你自己的 Claude 上跑') && ok.includes('不另外付 AI 的錢'), '連上也講為什麼要它');
+  assert.equal(count(ok, 'data-act="intro-recheck"'), 0, '連上不出重新檢查');
+  assert.equal(timers, 1, '排一次一秒 timer');
+  const again = uiFn('introHtml', okCtx)();
+  assert.equal(timers, 1, `重繪不再排 timer（${again.length}）`);
+  const bad = uiFn('introHtml', introCtx({ step: 1 }, { claude: false }))();
+  assert.ok(bad.includes('找不到 Claude Code'), '沒連上：紅條');
+  for (const t of ['裝 Claude Code', '登入你的 Claude 帳號', '回到這裡按「重新檢查」', '剝繭掛在你自己的 Claude 上跑', '不另外付 AI 的錢']) assert.ok(bad.includes(t), `沒連上缺「${t}」`);
+  assert.ok(bad.includes('data-act="intro-recheck"') && bad.includes('重新檢查</button>'), '重新檢查鈕');
+  assert.ok(bad.includes('data-act="intro-skip"') && bad.includes('先略過（第 3 步是模擬的，照樣能走）'), '先略過＋講明第 3 步模擬');
+  const wait = uiFn('introHtml', introCtx({ step: 1 }, { claude: null }))();
+  assert.ok(wait.includes('class="skel"'), '還在查：骨架');
+  assert.equal(count(wait, 'data-act="intro-recheck"') + count(wait, 'data-act="intro-skip"'), 0, '還在查：沒有鈕');
+  // 重新檢查＝先回到「還在查」再打 /api/health（沿用 refreshHealth）
+  const src = uiSrc();
+  assert.ok(/act === 'intro-recheck'\) \{[^\n]*state\.claude = null;[^\n]*await refreshHealth\(\)/.test(src), '重新檢查：清狀態→refreshHealth');
+});
+
+test('初次體驗輪 丙③：第 2 步四個端點都有被呼叫、略過走 intro skip；round 只打一次（in-flight 旗標＋已出過的輪存 state 不重打）', () => {
+  const src = uiSrc();
+  for (const p of ["api('GET', '/api/memory/manual')", "api('POST', '/api/memory/manual/round'", "api('POST', '/api/memory/manual/draft'", "api('POST', '/api/memory/manual/save'"]) assert.ok(src.includes(p), `缺呼叫 ${p}`);
+  assert.ok(src.includes("api('POST', '/api/memory/intro', { skip: true })"), '先略過＝POST intro skip');
+  const fn = /async function introNextRound\(\) \{[\s\S]*?\n\}\n/.exec(src)?.[0] ?? '';
+  assert.ok(fn.includes('if (it.inflight) return;'), '等回覆期間連點無效（in-flight 旗標）');
+  assert.ok(fn.includes('it.rounds[next]'), '已出過的輪存在 state.intro.rounds，重繪／重進不重打');
+  assert.ok(/const cached = it\.rounds\[next\];\s*if \(cached\)/.test(fn), '有快取就不 fetch');
+  assert.ok(fn.includes('it.inflight = true;') && fn.includes('it.inflight = false;'), 'in-flight 開關');
+});
+
+test('初次體驗輪 丙④：第 2 步問答畫面——第一輪三題（每題 data-keep 多行框）、輪數文案、三顆鈕；第二輪附「為什麼問」與「這輪題目是它出的」；第三輪沒有「下一輪」；出題等待時鈕停用＋「它在想下一輪要問什麼⋯」；失敗一行可重試', () => {
+  const r1 = uiFn('introHtml', introCtx(step2()))();
+  for (const q of round1) assert.ok(r1.includes(q.q), `缺第一輪題「${q.q.slice(0, 8)}」`);
+  assert.equal(count(r1, 'data-keep'), 3, '三題各一個 data-keep 框（輪詢重繪不洗掉字）');
+  assert.ok(r1.includes('id="intro-a-r1-who"'), '框 id 跟題目 id');
+  assert.ok(r1.includes('讓它認識你：最多三輪，每輪三題'), '標題照參考物');
+  assert.ok(r1.includes('第 1 輪／最多 3 輪'), '輪數文案');
+  assert.ok(r1.includes('data-act="intro-next"') && r1.includes('下一輪'), '下一輪鈕');
+  assert.ok(r1.includes('data-act="intro-draft"') && r1.includes('夠了，先寫草稿'), '夠了先寫草稿');
+  assert.ok(r1.includes('data-act="intro-skip"') && r1.includes('>先略過</button>'), '先略過');
+  assert.equal(count(r1, '為什麼問'), 0, '第一輪沒有為什麼問');
+  const r2 = uiFn('introHtml', introCtx(step2({ round: 2, questions: [{ id: 'r2-1', q: '它做到一半，什麼時候你想被叫來看？', why: '為什麼問：「什麼時候叫我看」這段是空的', section: 'show' }] })))();
+  assert.ok(r2.includes('為什麼問：「什麼時候叫我看」這段是空的'), '第二輪每題附為什麼問');
+  assert.ok(r2.includes('第 2 輪／最多 3 輪・這輪題目是它出的'), '第二輪輪數文案');
+  assert.ok(r2.includes('再問一題，把還沒講清楚的補上'), '第二輪標題照實際題數印（這裡 1 題）');
+  const r2b = uiFn('introHtml', introCtx(step2({ round: 2, questions: round1.slice(0, 2).map((q) => ({ ...q, why: '為什麼問：補' })) })))();
+  assert.ok(r2b.includes('再問兩題，把還沒講清楚的補上') && count(r2b, '再問三題') === 0, '2 題印「兩」（它常只出 2 題，不寫死三）');
+  const r2c = uiFn('introHtml', introCtx(step2({ round: 2, questions: round1.map((q) => ({ ...q, why: '為什麼問：補' })) })))();
+  assert.ok(r2c.includes('再問三題，把還沒講清楚的補上'), '3 題印「三」');
+  const r3 = uiFn('introHtml', introCtx(step2({ round: 3, questions: round1.slice(0, 1) })))();
+  assert.equal(count(r3, 'data-act="intro-next"'), 0, '第三輪沒有下一輪');
+  assert.ok(r3.includes('data-act="intro-draft"') && r3.includes('答完了，寫草稿'), '第三輪答完＝寫草稿');
+  const thinking = uiFn('introHtml', introCtx(step2({ phase: 'thinking', inflight: true })))();
+  assert.ok(thinking.includes('它在想下一輪要問什麼⋯'), '等待文案');
+  assert.ok(/data-act="intro-next"[^>]*disabled/.test(thinking) && /data-act="intro-draft"[^>]*disabled/.test(thinking), '等待時鈕停用');
+  const drafting = uiFn('introHtml', introCtx(step2({ phase: 'drafting', inflight: true })))();
+  assert.ok(drafting.includes('它在把你的答案寫成說明書⋯'), '寫草稿等待文案');
+  const failed = uiFn('introHtml', introCtx(step2({ err: '它出不了下一輪的題：Claude 連不上' })))();
+  assert.ok(failed.includes('它出不了下一輪的題：Claude 連不上') && failed.includes('data-act="intro-next"'), '失敗一行＋鈕還在（可重試）');
+  const loading = uiFn('introHtml', introCtx(step2({ phase: 'load', questions: [] })))();
+  assert.ok(loading.includes('class="skel"'), '題目還沒讀到：骨架');
+  const loadfail = uiFn('introHtml', introCtx(step2({ phase: 'loadfail', questions: [], err: '題目讀不到：500' })))();
+  assert.ok(loadfail.includes('題目讀不到：500') && loadfail.includes('data-act="intro-reload"'), '題目讀不到：一行＋重讀');
+});
+
+test('初次體驗輪 丙⑤：草稿編輯器——五段各標帶法、每行一個 data-keep 框標「第 N 輪」可刪、每段可加一行、存成我的說明書；存檔失敗一行可重試', () => {
+  const draft = [
+    { key: 'who', label: '我是誰', layer: 'content', lines: [{ lid: 1, text: '設計公司負責人', round: 1 }, { lid: 2, text: '看不懂程式與財報細節，技術的事要用比喻講', round: 1 }] },
+    { key: 'talk', label: '怎麼跟我講話', layer: 'expression', lines: [{ lid: 3, text: '第一句就講結論，不要鋪陳', round: 1 }] },
+    { key: 'ask', label: '什麼事要問我、什麼事自己決定', layer: 'expression', lines: [{ lid: 4, text: '措辭、排版、等值二選一自己定，一句話報備', round: 2 }] },
+    { key: 'show', label: '什麼時候叫我看', layer: 'expression', lines: [] },
+    { key: 'redline', label: '紅線', layer: 'expression', lines: [{ lid: 5, text: '不准自己編數字', round: null }] },
+  ];
+  const html = uiFn('introHtml', introCtx(step2({ phase: 'draft', round: 2, questions: [], draft })))();
+  for (const s of draft) assert.ok(html.includes(s.label), `缺段「${s.label}」`);
+  assert.ok(html.includes('照你的回答寫成的。哪行不對點進去改，整行刪也可以；之後在設定 › 記憶隨時改。'), '說明句照參考物');
+  assert.equal(count(html, '按場合帶'), 1, '我是誰＝按場合帶');
+  assert.equal(count(html, '每步帶'), 4, '其餘四段每步帶');
+  assert.equal(count(html, 'data-keep'), 5, '五行各一個 data-keep 框');
+  assert.equal(count(html, 'maxlength="200"'), 5, '每行 200 字上限（跟設定頁 set-man-text 一致，不只靠後端 400）');
+  assert.ok(html.includes('id="intro-ln-1"') && html.includes('value="設計公司負責人"'), '行的框帶原文');
+  assert.equal(count(html, '第 1 輪'), 3, '三行標第 1 輪');
+  assert.equal(count(html, '第 2 輪'), 1, '一行標第 2 輪');
+  assert.equal(count(html, 'data-act="intro-ln-del"'), 5, '每行可刪');
+  assert.equal(count(html, 'data-act="intro-ln-add"'), 5, '每段可加一行');
+  assert.ok(html.includes('data-act="intro-save"') && html.includes('存成我的說明書，下一步'), '存檔鈕');
+  assert.ok(html.includes('data-act="intro-next"') && html.includes('再問我一輪'), '還沒到第三輪：可再問一輪');
+  assert.ok(html.includes('健康、政治、宗教、財務不記'), '四類不記');
+  assert.ok(html.includes('還沒有內容，可以加一行'), '空段講一句');
+  const r3 = uiFn('introHtml', introCtx(step2({ phase: 'draft', round: 3, questions: [], draft })))();
+  assert.equal(count(r3, '再問我一輪'), 0, '第三輪後不能再問');
+  const saving = uiFn('introHtml', introCtx(step2({ phase: 'saving', round: 3, questions: [], draft, inflight: true })))();
+  assert.ok(/data-act="intro-save"[^>]*disabled/.test(saving) && saving.includes('存著⋯'), '存檔中鈕停用');
+  const failed = uiFn('introHtml', introCtx(step2({ phase: 'draft', round: 3, questions: [], draft, err: '沒存成：有一行超過 200 字' })))();
+  assert.ok(failed.includes('沒存成：有一行超過 200 字') && !/data-act="intro-save"[^>]*disabled/.test(failed), '存檔失敗：一行原因、鈕可再按');
+  // 打到一半的字由 state.keep 放回（輪詢重繪不洗掉）
+  const kept = uiFn('introHtml', introCtx(step2({ phase: 'draft', round: 3, questions: [], draft }), { keep: { '-:intro-ln-1': '改過的字' } }))();
+  assert.ok(kept.includes('value="改過的字"'), '重繪放回打到一半的字');
+});
+
+test('初次體驗輪 丙⑥：第 3 步入口——標題「帶你走一次」＋「開始」「先略過」；「開始」開模擬導覽（丁）、「先略過」結束引導', () => {
+  const html = uiFn('introHtml', introCtx({ step: 3 }))();
+  assert.ok(html.includes('帶你走一次') && html.includes('data-act="intro-tour-start"') && html.includes('>開始</button>'), '開始鈕');
+  assert.ok(html.includes('data-act="intro-skip"') && html.includes('>先略過</button>'), '先略過');
+  assert.equal(count(html, '模擬 1／6'), 0, '入口卡本身還不是導覽列（導覽列由 demoHtml 畫）');
+  const src = uiSrc();
+  assert.ok(/act === 'intro-tour-start'\) \{?[^\n]*demoStart\(\)/.test(src), '開始＝開模擬導覽（丁換上）');
+  assert.equal(count(src, "act === 'intro-tour-start') { await introFinish(); }"), 0, '丙的佔位接法退場');
+  const fin = /async function introFinish\(\) \{[\s\S]*?\n\}\n/.exec(src)?.[0] ?? '';
+  assert.ok(fin.includes("api('POST', '/api/memory/intro', { skip: true })"), '結束時還沒寫過 intro_done 就補寫');
+  assert.ok(fin.includes('state.intro = null;'), '結束＝state.intro=null 回儀表板');
+});
+
+test('初次體驗輪 丙⑦：儀表板提醒行——說明書全空→「說明書還沒寫」附「去寫」；本機沒記導覽走過→「還沒走過一次」附「走一次」；都做完＝空', () => {
+  const empty = { intro_done: true, sections: manualMeta.map((s) => ({ ...s, lines: [] })) };
+  const filled = { intro_done: true, sections: manualMeta.map((s) => ({ ...s, lines: s.key === 'who' ? [{ card: 'c1', text: '負責人', round: 1 }] : [] })) };
+  const both = uiFn('introRemindHtml', { state: { introManual: empty } })();
+  assert.ok(both.includes('說明書還沒寫') && both.includes('data-act="intro-open" data-step="2"') && both.includes('>去寫</button>'), '說明書提醒＋入口');
+  assert.ok(both.includes('還沒走過一次') && both.includes('data-act="intro-open" data-step="3"') && both.includes('>走一次</button>'), '導覽提醒＋入口');
+  const onlyTour = uiFn('introRemindHtml', { state: { introManual: filled } })();
+  assert.equal(count(onlyTour, '說明書還沒寫'), 0, '說明書有內容就不提醒');
+  assert.ok(onlyTour.includes('還沒走過一次'));
+  const none = uiFn('introRemindHtml', { state: { introManual: filled }, tourDone: () => true })();
+  assert.equal(none, '', '都做完＝消失');
+  const unknown = uiFn('introRemindHtml', { state: { introManual: null }, tourDone: () => true })();
+  assert.equal(unknown, '', '說明書讀不到就不亂提醒');
+  const src = uiSrc();
+  assert.ok(/function dashHtml\(\) \{[\s\S]*?\$\{introRemindHtml\(\)\}/.test(src), '儀表板頂端印提醒行');
+  assert.ok(/async function loadDash\(\) \{[\s\S]*?api\('GET', '\/api\/memory\/manual'\)\.catch\(\(\) => null\)/.test(src), '儀表板讀說明書現況判提醒');
+  assert.ok(src.includes("localStorage.getItem(TOUR_DONE_KEY)") && /const tourDone = \(\) => \{ try \{/.test(src), '導覽走過沒＝本機記、try/catch 包');
+});
+
+test('初次體驗輪 丙⑧：設定 › 個人與記憶 › 關於你——五段說明書（每段列行、就地改／刪／加）＋「重新問答」；還沒寫→一句＋「用問的寫」', () => {
+  const at = '2026-09-01T00:00:00.000Z';
+  const card = (id, layer, text, kind) => ({ id, bucket: 'profile', status: 'active', layer, text, scope: { level: 'all' }, source: { kind }, created_at: at });
+  const ctx = { state: { settings: { idEdit: null, tab: {}, manualEdit: null, busy: null }, categories: ['旅遊'], keep: {}, run: null } };
+  const manual = { intro_done: true, sections: manualMeta.map((s) => ({ ...s, lines: s.key === 'who' ? [{ card: 'c1', text: '設計公司負責人', round: 1 }] : s.key === 'redline' ? [{ card: 'c2', text: '不准自己編數字', round: 2 }] : [] })) };
+  const html = uiFn('setKnowHtml', ctx)({ cfg: { memory: {} }, cards: [card('c1', 'content', '設計公司負責人', 'intro')], identities: [], manual });
+  const man = html.slice(html.indexOf('data-manual'), html.indexOf('<div class="group">'));
+  for (const s of manualMeta) assert.ok(man.includes(s.label), `缺段「${s.label}」`);
+  assert.ok(man.includes('設計公司負責人') && man.includes('不准自己編數字'), '列出每行');
+  assert.equal(count(man, '第 1 輪') + count(man, '第 2 輪'), 2, '每行標輪次');
+  assert.equal(count(man, 'data-act="set-man-edit"'), 2, '每行可改');
+  assert.equal(count(man, 'data-act="set-man-del"'), 2, '每行可刪');
+  assert.equal(count(man, 'data-act="set-man-add"'), 5, '每段可加一行');
+  assert.ok(man.includes('data-act="intro-open" data-step="2"') && man.includes('重新問答'), '重新問答');
+  assert.equal(count(html, 'data-intro'), 0, '舊介紹三列退場');
+  // 就地改：那一行變輸入框（data-keep）＋存／取消
+  const edit = uiFn('setKnowHtml', { ...ctx, state: { ...ctx.state, settings: { ...ctx.state.settings, manualEdit: { key: 'who', idx: 0 } } } })({ cfg: { memory: {} }, cards: [], identities: [], manual });
+  assert.ok(edit.includes('id="set-man-text"') && edit.includes('data-keep') && edit.includes('value="設計公司負責人"'), '改＝原地變框帶原文');
+  assert.ok(edit.includes('data-act="set-man-save"') && edit.includes('data-act="set-man-cancel"'), '存／取消');
+  const add = uiFn('setKnowHtml', { ...ctx, state: { ...ctx.state, settings: { ...ctx.state.settings, manualEdit: { key: 'show', idx: -1 } } } })({ cfg: { memory: {} }, cards: [], identities: [], manual });
+  assert.ok(add.includes('id="set-man-text"') && add.includes('placeholder="一句可以直接照做的話"'), '加一行＝空框');
+  const none = uiFn('setKnowHtml', ctx)({ cfg: { memory: {} }, cards: [], identities: [], manual: { intro_done: true, sections: manualMeta.map((s) => ({ ...s, lines: [] })) } });
+  assert.ok(none.includes('還沒寫') && none.includes('用問的寫'), '還沒寫');
+  const unread = uiFn('setKnowHtml', ctx)({ cfg: { memory: {} }, cards: [], identities: [] });
+  assert.ok(unread.includes('說明書讀不到'), '讀不到講一句，不炸');
+  const src = uiSrc();
+  assert.ok(/async function loadSettings\(\) \{[\s\S]*?api\('GET', '\/api\/memory\/manual'\)\.catch\(\(\) => null\)/.test(src), '設定頁讀說明書');
+  const save = /async function setManualSave\([^)]*\) \{[\s\S]*?\n\}\n/.exec(src)?.[0] ?? '';
+  assert.ok(save.includes("api('POST', '/api/memory/manual/save', { sections })"), '就地改＝整份重存');
+});
+
+test('初次體驗輪 丙⑨：CSS——.intro 進度列、連上／沒連上兩色框、三件事清單、草稿編輯器、儀表板提醒行、設定五段各有規則；連上框不用綠（US-113 綠只給清單卡）', () => {
+  for (const sel of ['.intro .prog', '.intro .okbox', '.intro .badbox', '.intro .steps li', '.intro .doc', '.intro .doc .ln', '.introremind', '.mansec']) assert.ok(cssRule(sel) != null, `缺 CSS 規則 ${sel}`);
+  assert.ok(!/#1f6b3f|#e4f5ea|var\(--green/.test(cssRule('.intro .okbox')), '連上框用主色，不用綠');
+  assert.equal(count(cssSrc(), '.intro .willbe'), 0, '舊「會記成」區塊樣式退場');
+});
+
+// ---------- 初次體驗輪（US-116）丁：模擬導覽六張卡、示範資料檔 demo-run.js、demo 模式零 API ----------
+const demoSrc = () => fs.readFileSync(path.join(UI, 'demo-run.js'), 'utf8');
+const loadDemo = () => { const w = {}; vm.runInNewContext(demoSrc(), { window: w }); return w.BJDemo; };
+// demo 模式的假環境：api／fetch 都記次數（該是 0）、render／introFinish／dashPoll 換成計數假物、localStorage 假的
+function demoCtx(extra = {}) {
+  const w = {}; vm.runInNewContext(demoSrc(), { window: w });
+  const store = {};
+  const ctx = {
+    window: { ...w, scrollTo() {} },
+    localStorage: { getItem: (k) => (k in store ? store[k] : null), setItem: (k, v) => { store[k] = String(v); }, removeItem: (k) => { delete store[k]; } },
+    document: { getElementById: () => null, querySelector: () => null, querySelectorAll: () => [], body: {}, activeElement: null },
+    api: async (m, p) => { ctx.calls.push(`${m} ${p}`); return {}; },
+    fetch: async (u) => { ctx.calls.push(`fetch ${u}`); return {}; },
+    render: () => { ctx.renders += 1; },
+    introFinish: async () => { ctx.finished += 1; ctx.state.intro = null; },
+    dashPoll: () => { ctx.polls += 1; },
+    toast: () => {},
+    setTimeout: () => 1, clearTimeout: () => {},
+    state: { intro: { step: 3, doneWritten: true }, demo: null, run: null, dash: {}, dashPollTimer: 9, pollTimer: null, keep: {}, rendered: {}, rawView: new Set(), memOpen: {}, supOpen: {}, sideOpen: { sup: true, data: true, focus: false, attempts: false }, runInspect: null, runInspectLive: null, reader: null, editingNode: null, proposals: { pending: [], more: 0 }, feedbackSent: false, chat: { draft: null }, wf: null, companyName: '', claude: true, memUndoing: {}, preview: null, promptView: null, mode: 'chat', ...extra },
+    renders: 0, finished: 0, polls: 0, calls: [], store,
+  };
+  return ctx;
+}
+
+test('初次體驗輪 丁①：示範趟檔 demo-run.js——vm 載得起、跟 examples/quarterly-report.yaml 同 5 步同 3 欄；形狀照真趟 run（每步 output／check／attempts；第 4 步 attempts=2 攔到→重做、check.status=redone）；成品兩檔名；index.html 在 app.js 之前引入', () => {
+  const d = loadDemo();
+  assert.ok(d && d.run && d.run.def, 'window.BJDemo.run.def');
+  const ex = yaml.load(fs.readFileSync(path.join(UI, '..', 'examples', 'quarterly-report.yaml'), 'utf8'));
+  assert.equal(d.run.def.name, ex.name, '流程名跟範例一樣');
+  assert.deepEqual([...d.run.def.nodes.map((n) => n.id)], ex.nodes.map((n) => n.id), '五步 id 對得上範例'); // vm 的陣列先展開成本地陣列，deepEqual 才不比原型
+  assert.deepEqual([...d.run.def.params.map((p) => p.key)], ex.params.map((p) => p.key), '三欄 key 對得上範例');
+  for (const p of ex.params) assert.equal(d.run.params[p.key], p.default, `欄位 ${p.key} 用範例預設值`);
+  const r = d.run;
+  for (const k of ['run_id', 'workflow', 'def', 'status', 'params', 'started_at', 'steps']) assert.ok(k in r, `run 缺 ${k}`);
+  assert.equal(r.workflow.category, '範例');
+  for (const n of ex.nodes) {
+    const s = r.steps[n.id];
+    assert.ok(s && s.status === 'done' && typeof s.output === 'string' && s.output.length > 20, `${n.id} 該是做完、有產出`);
+    if (n.executor === 'ai') {
+      assert.ok(s.check && Array.isArray(s.check.items) && Array.isArray(s.check.blocks) && Array.isArray(s.check.flags), `${n.id} check 四欄`);
+      assert.ok(Array.isArray(s.attempts) && s.attempts.length >= 1 && s.attempts[0].check && s.attempts[0].at, `${n.id} attempts 形狀`);
+    }
+  }
+  const f = r.steps['fetch-data'];
+  assert.equal(f.check.status, 'pass');
+  assert.equal(f.check.items.length, 12, '第 1 步查核 12 項');
+  assert.ok(f.check.items.every((i) => i.verdict === 'ok' && i.claim && i.source), '12 項全 ok、各有主張與原文');
+  assert.ok(f.output.includes('示範資料'), '產出標示示範資料');
+  const c = r.steps.compose;
+  assert.equal(c.attempts.length, 2, '第 4 步交兩次卷');
+  assert.equal(c.attempts[0].reason, 'first');
+  assert.equal(c.attempts[0].check.status, 'blocked');
+  assert.ok(c.attempts[0].check.blocks.length >= 1 && c.attempts[0].check.blocks[0].claim.includes('1,456,798') && c.attempts[0].check.blocks[0].source.includes('1,456,789'), '第一次攔到 9 月營收寫錯');
+  assert.equal(c.attempts[1].reason, 'redo');
+  assert.equal(c.check.status, 'redone');
+  assert.deepEqual([...c.check.recheck_blocks], [], '重做後程式再對一次全對上');
+  assert.ok(Array.isArray(c.check.first_blocks) && c.check.first_blocks.length === 1, 'first_blocks 留第一次攔的');
+  assert.ok(c.file, '第 4 步有產出檔');
+  assert.deepEqual([...d.artifacts.map((a) => a.name)], ['季度業績報告.docx', '講稿.md'], '成品兩檔名');
+  assert.equal(r.steps.present.status, 'done');
+  assert.ok(r.record && r.record.usage.total.input === 0 && r.record.usage.total.output === 0, '紀錄用量 0（沒用額度）');
+  assert.ok(r.overview && r.overview.stats.steps_total === 5 && r.overview.stats.check_blocked === 1, '總覽頁尾：5 步、攔 1 次');
+  assert.ok(!r.overview.stats.duration_ms, '不硬掰時長');
+  const index = fs.readFileSync(path.join(UI, 'index.html'), 'utf8');
+  assert.ok(index.indexOf('src="/demo-run.js"') > 0 && index.indexOf('src="/demo-run.js"') < index.indexOf('src="/app.js"'), 'index.html 在 app.js 之前引 demo-run.js');
+});
+
+test('初次體驗輪 丁②：六張卡順序與文案——1 開跑表單（亮三欄位、不用額度）→2 第 1 步做完＋查核 12／12→3 停點打一句（打完再下一張）→4 守：他打的那句→5 攔到→重做 1 次→過→6 成品＋換你的事；每張「模擬 N／6」、1～5 有跳過、6 只有結束；右上全程模擬標籤；全程零 API', () => {
+  const ctx = demoCtx();
+  const { context } = uiCtx(ctx);
+  const cards = vm.runInContext('DEMO_CARDS', context);
+  assert.equal(cards.length, 6, '六張');
+  assert.deepEqual([...cards.map((c) => c.n)], [1, 2, 3, 4, 5, 6]);
+  const demoStart = vm.runInContext('demoStart', context);
+  const demoNext = vm.runInContext('demoNext', context);
+  const demoHtml = vm.runInContext('demoHtml', context);
+  const st = ctx.state;
+  demoStart();
+  assert.equal(st.demo.card, 1);
+  assert.ok(ctx.renders >= 1, '開始就畫');
+  const h1 = demoHtml();
+  assert.ok(h1.includes('模擬 1／6') && h1.includes('data-act="coach-next"') && h1.includes('data-act="coach-skip"'), '第 1 張導覽列');
+  assert.ok(h1.includes('不用你的額度') && h1.includes('這是一條現成的 Workflow'), '第 1 張文案照參考物（「流程」依 L2 換字改講 Workflow）');
+  for (const t of ['講稿長度', '3 分鐘', '資料範圍', '本季', '報告頁數', '5 頁內']) assert.ok(h1.includes(t), `開跑表單缺「${t}」`);
+  assert.ok(h1.includes('data-coach="params"') && h1.includes('5 個步驟・2 個停點') && h1.includes('開始（模擬）'), '三欄位亮點＋步數停點＋開始（模擬）');
+  assert.ok(h1.includes('class="simtag"') && h1.includes('>模擬</span>'), '右上模擬標籤');
+  st.demo.at = 0; demoNext();
+  assert.equal(st.demo.card, 2);
+  const h2 = demoHtml();
+  assert.ok(h2.includes('模擬 2／6') && h2.includes('class="simtag"'), '第 2 張');
+  assert.ok(h2.includes('data-steprow="fetch-data"') && h2.includes('已覆核'), '第 1 步做完＋已覆核');
+  assert.ok(h2.includes('data-coach="check"') && h2.includes('12／12'), '右欄查核 12／12');
+  assert.ok(st.run && st.run.status === 'running' && st.run.steps.organize.status === 'pending', '第 2 張：只做完第 1 步');
+  st.demo.at = 0; demoNext();
+  assert.equal(st.demo.card, 3);
+  const h3 = demoHtml();
+  assert.ok(h3.includes('模擬 3／6') && h3.includes('打完再下一張'), '第 3 張導覽列');
+  assert.ok(h3.includes('id="demo-say"') && h3.includes('data-keep') && h3.includes('照這句往下') && h3.includes('不改，直接過'), '停點真的讓他打一句＋兩顆鈕');
+  assert.ok(h3.includes('停點') && st.run.status === 'paused' && st.run.steps.organize.status === 'waiting_review', '第 2 步停著等他');
+  assert.equal(count(h3, 'data-act="approve"') + count(h3, 'data-act="start-edit"') + count(h3, 'data-act="interject"'), 0, '真停點卡的三顆鈕不出現（不可能誤觸真跑）');
+  // 打一句（框裡的字由 data-keep 進 state.keep，鍵照 keepKey＝run_id:元素 id）
+  ctx.state.keep[vm.runInContext('keepKey', context)('demo-say')] = '金額加千分位';
+  st.demo.at = 0; demoNext();
+  assert.equal(st.demo.card, 4);
+  assert.equal(st.demo.guard, '金額加千分位');
+  const h4 = demoHtml();
+  assert.ok(h4.includes('模擬 4／6') && h4.includes('守：金額加千分位'), '第 4 張：卡標「守：他打的那句」');
+  assert.ok(h4.includes('你打的「金額加千分位」變成後面每步的規矩了'), '第 4 張文案');
+  assert.ok(st.run.steps.organize.edit_rules?.[0]?.text === '金額加千分位', '那句進第 2 步的「後面每步會守」');
+  st.demo.at = 0; demoNext();
+  assert.equal(st.demo.card, 5);
+  const h5 = demoHtml();
+  assert.ok(h5.includes('模擬 5／6') && h5.includes('攔到') && h5.includes('重做'), '第 5 張文案：攔到→重做');
+  assert.ok(h5.includes('重寫一次、已覆核') && h5.includes('第 2 次交卷') && h5.includes('守：金額加千分位'), '第 4 步：重寫一次、已覆核＋第 2 次交卷＋守這句');
+  assert.ok(ctx.state.sideOpen.attempts === true && h5.includes('查核攔下'), '右欄「每次交卷」打開，看得到第一次被攔');
+  st.demo.at = 0; demoNext();
+  assert.equal(st.demo.card, 6);
+  const h6 = demoHtml();
+  assert.ok(h6.includes('模擬 6／6') && h6.includes('data-act="coach-finish"') && h6.includes('>結束</button>'), '第 6 張：結束');
+  assert.equal(count(h6, 'data-act="coach-skip"'), 0, '最後一張沒有跳過');
+  assert.ok(h6.includes('這趟沒用你的額度') && h6.includes('真跑會等幾分鐘、內容會不同') && h6.includes('停點') && h6.includes('查核'), '最後一張文案照 US-116');
+  assert.ok(h6.includes('季度業績報告.docx') && h6.includes('講稿.md'), '成品兩檔名');
+  assert.ok(h6.includes('data-act="demo-new-flow"') && h6.includes('用講的建立我的第一條 Workflow') && h6.includes('data-act="demo-real-run"') && h6.includes('真的跑一次這條範例（會用額度）'), '換你的事兩鈕');
+  assert.ok(h6.includes('5 步全過') && h6.includes('查核攔下 1 次已自動重寫'), '總覽頁尾');
+  assert.equal(count(h6, 'data-act="send-run-feedback"'), 0, '真的回饋框不出現');
+  assert.equal(count(h6, 'class="artifacts"'), 0, 'demo 只列「成品（示範）」一份，不再印原生成品清單（覆核 2）');
+  assert.equal(count(h6, 'class="card demoart"'), 1, '成品（示範）卡剛好一張');
+  // 覆核 1：閱讀面板在 demo 不印原生下載連結（沒有 data-act，護欄擋不到、點了會打 /api 404）
+  st.reader = { node: 'compose', run: null, from: null };
+  const rd = vm.runInContext('readerHtml', context)();
+  assert.ok(rd.includes('做成報告＋講稿') && rd.includes('data-act="reader-close"'), '面板開得起來');
+  assert.equal(count(rd, 'href="/api/') + count(rd, 'download='), 0, 'demo 閱讀面板沒有下載連結');
+  st.reader = null;
+  assert.deepEqual(ctx.calls, [], `六張卡全程零 API（${ctx.calls.join('、')}）`);
+});
+
+test('初次體驗輪 丁③：邊界——停點空著也能過（標「守：（你沒打）」）、「不改，直接過」清掉那句、連點「下一張」不跳兩張、跳過不記導覽走過、結束＝本機記走過＋introFinish＋儀表板輪詢恢復；開始時儀表板輪詢先停', async () => {
+  const ctx = demoCtx();
+  const { context } = uiCtx(ctx);
+  const [demoStart, demoNext, demoHtml, demoEnd] = ['demoStart', 'demoNext', 'demoHtml', 'demoEnd'].map((n) => vm.runInContext(n, context));
+  const st = ctx.state;
+  demoStart();
+  assert.equal(st.dashPollTimer, null, '開始：儀表板輪詢清掉（導覽期間零 API）');
+  // 連點：同一瞬間第二下無效
+  st.demo.at = 0; demoNext(); demoNext();
+  assert.equal(st.demo.card, 2, '連點只走一張');
+  st.demo.at = 0; demoNext();
+  assert.equal(st.demo.card, 3);
+  st.demo.at = 0; demoNext(); // 空著
+  assert.equal(st.demo.card, 4);
+  assert.equal(st.demo.guard, '');
+  const h4 = demoHtml();
+  assert.ok(h4.includes('守：（你沒打）'), '空著也放行，卡標「守：（你沒打）」');
+  assert.ok(h4.includes('你沒打，也能過'), '第 4 張文案改講「你沒打也能過」');
+  assert.equal(st.run.steps.organize.edit_rules, undefined, '沒打就不硬造規則');
+  // 「不改，直接過」：框裡有字也清掉
+  const ctx2 = demoCtx();
+  const c2 = uiCtx(ctx2).context;
+  const [s2, n2] = ['demoStart', 'demoNext'].map((n) => vm.runInContext(n, c2));
+  s2(); ctx2.state.demo.at = 0; n2(); ctx2.state.demo.at = 0; n2();
+  ctx2.state.keep[vm.runInContext('keepKey', c2)('demo-say')] = '要刪的';
+  ctx2.state.demo.at = 0; n2({ pass: true });
+  assert.equal(ctx2.state.demo.card, 4);
+  assert.equal(ctx2.state.demo.guard, '', '不改，直接過＝不帶那句');
+  // 跳過：不記走過、仍走 introFinish
+  await demoEnd(false);
+  assert.equal(ctx.store['bojian.tourDone'], undefined, '跳過不記導覽走過（儀表板提醒行留著）');
+  assert.equal(ctx.finished, 1, '跳過也結束引導（回儀表板）');
+  assert.equal(st.demo, null); assert.equal(st.run, null);
+  assert.equal(ctx.polls, 1, '儀表板輪詢恢復');
+  await demoEnd(false);
+  assert.equal(ctx.finished, 1, '沒在導覽時 demoEnd 不做事');
+  const ctx3 = demoCtx();
+  const c3 = uiCtx(ctx3).context;
+  vm.runInContext('demoStart', c3)();
+  await vm.runInContext('demoEnd', c3)(true);
+  assert.equal(ctx3.store['bojian.tourDone'], '1', '走完＝本機記導覽走過');
+  assert.equal(ctx3.finished, 1);
+  assert.deepEqual(ctx.calls.concat(ctx2.calls, ctx3.calls), [], '零 API');
+});
+
+test('初次體驗輪 丁④：demo 模式的護欄——點擊分派先擋非導覽動作（approve／start／interject／check-retry／preview-file／back 都不放行）；mdBlock 不打 /api/render；右欄來源不打健檢；render 先畫 demoHtml；停點卡在 demo 換成示範卡；intro-open 第 3 步入口照舊', () => {
+  const src = uiSrc();
+  assert.ok(/const act = el\.dataset\.act;\n\s*if \(state\.demo && !DEMO_ACTS\.has\(act\)\)/.test(src), '取到 act 後第一件事：demo 模式擋非導覽動作');
+  const acts = /const DEMO_ACTS = new Set\(\[([\s\S]*?)\]\);/.exec(src)?.[1] ?? '';
+  for (const a of ['coach-next', 'coach-pass', 'coach-skip', 'coach-finish', 'demo-new-flow', 'demo-real-run', 'run-inspect', 'run-current', 'side-toggle', 'md-toggle', 'open-reader', 'reader-close', 'reader-back', 'reader-prev', 'reader-next', 'ov-cite']) assert.ok(acts.includes(`'${a}'`), `放行名單缺 ${a}`);
+  for (const a of ['approve', 'start', 'start-edit', 'edit', 'interject', 'check-retry', 'check-accept', 'preview-file', 'back', 'send-run-feedback', 'human-done', 'run-prompt', 'edit-rules-save', 'open-dash', 'new-flow']) assert.ok(!acts.includes(`'${a}'`), `放行名單不該有 ${a}`);
+  assert.ok(/function mdBlock\(text, key, cls = 'output'\) \{[\s\S]*?if \(html === undefined && !mdDown && !mdPending\.has\(h\) && !state\.demo\)/.test(src), 'mdBlock：demo 不打 /api/render');
+  assert.ok(/function sideSourceHtml\(run, node\) \{\n\s*if \(state\.demo\) return/.test(src), '右欄來源：demo 不打健檢');
+  assert.ok(/function render\(\) \{[\s\S]*?if \(state\.demo\) inner = demoHtml\(\);[\s\S]*?else if \(state\.intro\) inner = introHtml\(\);/.test(src), 'render：demo 先於 intro');
+  assert.ok(src.includes("case 'waiting_review': return state.demo ? demoStopCardHtml(node, step) : stopCardHtml(node, step);"), '停點卡：demo 在 stepCardHtml 換成示範卡（stopCardHtml 原文釘住不動）');
+  assert.ok(/function demoStart\(\) \{[\s\S]*?clearTimeout\(state\.dashPollTimer\);[\s\S]*?state\.dashPollTimer = null;/.test(src), '開始：停儀表板輪詢');
+  assert.ok(/function dashPoll\(\) \{\n\s*clearTimeout\(state\.dashPollTimer\);\n\s*if \(!state\.dash \|\| state\.demo\) return;/.test(src), '正在等回應的那一輪回來也不再排（demo 期間 dashPoll 直接退）');
+  assert.equal(count(src, 'scrollIntoView?.({ block: \'start\' }); // 換卡'), 0, '換卡不用 scrollIntoView（sticky 導覽列會壓住標題）');
+  const fin = /async function demoEnd\(done\) \{[\s\S]*?\n\}\n/.exec(src)?.[0] ?? '';
+  assert.ok(fin.includes("localStorage.setItem(TOUR_DONE_KEY, '1')") && fin.includes('await introFinish()') && fin.includes('dashPoll()'), '結束：記走過→introFinish→輪詢恢復');
+  assert.ok(/act === 'coach-next'\) demoNext\(\)/.test(src) && /act === 'coach-skip'\) await demoEnd\(false\)/.test(src) && /act === 'coach-finish'\) await demoEnd\(true\)/.test(src), '導覽列三顆鈕接線');
+  assert.ok(/act === 'demo-real-run'\) \{[\s\S]*?await demoEnd\(true\);[\s\S]*?await demoOpenExample\(\);/.test(src), '真的跑一次＝結束導覽→開範例');
+  assert.ok(/async function demoOpenExample\(\) \{[\s\S]*?openWorkflow\('範例', 'quarterly-report'\)[\s\S]*?state\.flowTab = 'data';/.test(src), '開範例＝openWorkflow 範例／quarterly-report→本次資料分頁');
+  assert.equal(count(src, 'window.scrollTo'), 0, '換卡不捲整頁（M5 規矩）');
+  assert.ok(/act === 'demo-new-flow'\) \{[\s\S]*?await demoEnd\(true\);[\s\S]*?\[data-act="new-flow"\]/.test(src), '建第一條＝結束導覽→走側欄「建立新 Workflow」');
+  assert.ok(src.includes('data-act="intro-open" data-step="3"'), '儀表板「走一次」入口不動');
+  assert.ok(/function render\(\) \{[\s\S]*?if \(state\.demo\) demoHighlight\(app\);/.test(src), '畫完把亮點框上');
+});
+
+test('初次體驗輪 丁⑤：CSS——深色導覽列 .coach（k／grow／go）、右上 .simtag、亮點 .coach-hl、開跑表單 .demoform、右欄查核 .democheck、守句膠囊 .coachguard 各有規則；不動 .intro 區塊', () => {
+  for (const sel of ['.coach', '.coach .k', '.coach .grow', '.coach .btn.go', '.simtag', '.coach-hl', '.demoform .row', '.democheck', '.coachguard', '.demoturn']) assert.ok(cssRule(sel) != null, `缺 CSS 規則 ${sel}`);
+  assert.ok(/background:#1f2a3c/.test(cssRule('.coach')), '導覽列深色');
+  assert.ok(/position:sticky/.test(cssRule('.coach')), '導覽列跟著走');
+  assert.ok(/position:absolute|position:fixed/.test(cssRule('.simtag')) && /right:/.test(cssRule('.simtag')), '模擬標籤釘右上');
+  assert.ok(cssRule('.intro') != null && cssRule('.intro .prog') != null, '.intro 區塊還在');
+});
+
+// ---------- 追蹤使用數據輪（US-118／US-119⑦／US-120；參考物 PROTO/追蹤使用數據輪-逐趟曲線-三案草稿.html 老闆挑 A 案） ----------
+const u118Series = [
+  { run_id: 'r1', started_at: '2026-09-01T09:00:00+08:00', edited: 7, duration_ms: 9 * 60000, tokens: 48000, blocked: 4 },
+  { run_id: 'r2', started_at: '2026-09-08T09:00:00+08:00', edited: 5, duration_ms: 8 * 60000, tokens: 44000, blocked: 3 },
+  { run_id: 'r3', started_at: '2026-09-15T09:00:00+08:00', edited: 1, duration_ms: 4 * 60000, tokens: 46000, blocked: 0 },
+];
+test('US-118 UI ①：series 兩趟以上→四個 KPI 底下 A 案四格小折線（改幾處／花多久／用量／查核攔幾次）：每格右上最新一趟的數＋比上趟箭頭（往下綠 up、往上紅 dn）、純內嵌 SVG polyline 一趟一點、軸標第 1 趟／第 N 趟；在排行之前', () => {
+  const h = uiFn('historyModeHtml', u099Ctx({ wfStats: { ...u099Stats, series: u118Series } }))();
+  const sp = /<div class="spark4">([\s\S]*?)<\/div>\s*<p class="note">/.exec(h)?.[1];
+  assert.ok(sp, `該有 .spark4：${h.slice(0, 900)}`);
+  assert.ok(h.indexOf('class="spark4"') > h.indexOf('class="kpis"') && h.indexOf('class="spark4"') < h.indexOf('最常出事的步驟'), '四格在 KPI 之下、排行之上');
+  assert.ok(h.includes('一趟比一趟') && h.includes('3 趟・往下＝變好'), '小標＋趟數');
+  const cells = [...h.matchAll(/<div class="sp"><div class="h"><span>([^<]*)<\/span><span><b>([^<]*)<\/b><em class="([^"]*)">([^<]*)<\/em><\/span><\/div>/g)].map((m) => [m[1], m[2], m[3], m[4]]);
+  assert.deepEqual(cells, [
+    ['改幾處', '1 處', 'up', '↓ 比上趟少 4'],
+    ['花多久', '4 分', 'up', '↓ 比上趟少 4 分'],
+    ['用量', '46 千 token', 'dn', '↑ 比上趟多 2 千'],
+    ['查核攔幾次', '0 次', 'up', '↓ 比上趟少 3'],
+  ], `四格標題／最新值／箭頭：${JSON.stringify(cells)}`);
+  assert.equal(count(h, '<svg viewBox="0 0 160 60"'), 4, '四張內嵌 SVG（草稿同尺寸）');
+  const polys = [...h.matchAll(/<polyline [^>]*points="([^"]*)"/g)].map((m) => m[1].trim().split(/\s+/));
+  assert.equal(polys.length, 4);
+  assert.ok(polys.every((p) => p.length === 3), `一趟一點：${polys.map((p) => p.length)}`);
+  assert.ok(polys.every((p) => p[0].startsWith('6,') && p[2].startsWith('153,')), '橫軸 6→153（草稿同）');
+  // 改幾處 7→5→1：愈低愈好、往下畫；第一點最高（y=10）、最後一點最低（y=46）
+  assert.deepEqual(polys[0].map((x) => x.split(',')[1]), ['10', '22', '46'], `改幾處的高低（7→5→1，線性內插）：${polys[0]}`);
+  assert.equal(count(h, '<div class="ax"><span>第 1 趟</span><span>第 3 趟</span></div>'), 4, '每格軸標');
+  assert.equal(count(h, 'class="pt dn"'), 1, '只有用量那格最後一點標紅（比上趟多）');
+  assert.ok(h.includes('四個數字都是「愈低愈好」'), '說明句');
+  const src = uiSrc();
+  assert.equal(count(src, 'Chart(') + count(src, 'chart.js') + count(src, 'd3.'), 0, '不加任何圖表庫');
+});
+
+test('US-118 UI ②：一趟以下不畫（series 缺、空、只有一筆）；四個 KPI 與排行照舊；duration_ms 為 null 的趟在「花多久」那格跳過、同值持平印「跟上趟一樣」；樣式在 style.css', () => {
+  for (const series of [undefined, [], [u118Series[0]]]) {
+    const h = uiFn('historyModeHtml', u099Ctx({ wfStats: { ...u099Stats, series } }))();
+    assert.ok(!h.includes('spark4') && !h.includes('一趟比一趟'), `series=${JSON.stringify(series)} 不畫`);
+    assert.ok(h.includes('class="kpis"') && h.includes('最常出事的步驟'), 'KPI 與排行照舊');
+  }
+  const s2 = [{ ...u118Series[0], duration_ms: null }, { ...u118Series[1], blocked: 3 }, { ...u118Series[2], blocked: 3 }];
+  const h = uiFn('historyModeHtml', u099Ctx({ wfStats: { ...u099Stats, series: s2 } }))();
+  const polys = [...h.matchAll(/<polyline [^>]*points="([^"]*)"/g)].map((m) => m[1].trim().split(/\s+/));
+  assert.equal(polys[1].length, 2, `花多久：null 那趟跳過，只剩兩點：${polys[1]}`);
+  assert.ok(h.includes('<span>查核攔幾次</span><span><b>3 次</b><em class="">跟上趟一樣</em>'), '持平');
+  for (const sel of ['.runstats .spark4', '.runstats .sp', '.runstats .sp .h', '.runstats .sp svg', '.runstats .sp .ax']) assert.ok(cssSrc().includes(`${sel}{`), `缺樣式 ${sel}`);
+  assert.ok(/@media\(max-width:560px\)\{\.runstats \.spark4\{grid-template-columns:repeat\(2,minmax\(0,1fr\)\)\}\}/.test(cssSrc()), '窄版兩欄（草稿同）');
+});
+
+test('US-118 UI ③：最新一趟某指標缺值（例：最新趟 paused、duration_ms=null）→那格頭部印「—」＋「這趟還沒有這個數」、不畫箭頭，不拿更早一趟的數冒充最新；折線照舊只畫有值的點；其他格不受影響', () => {
+  const s3 = [{ ...u118Series[0], duration_ms: 9 * 60000 }, { ...u118Series[1], duration_ms: 8 * 60000 }, { ...u118Series[2], duration_ms: null }];
+  const h = uiFn('historyModeHtml', u099Ctx({ wfStats: { ...u099Stats, series: s3 } }))();
+  const cell = /<div class="sp"><div class="h"><span>花多久<\/span><span>([\s\S]*?)<\/span><\/div>([\s\S]*?)<div class="ax">/.exec(h);
+  assert.ok(cell, '有花多久那格');
+  assert.ok(!cell[1].includes('8 分'), `不拿上一趟的 8 分當最新值：${cell[1]}`);
+  assert.ok(cell[1].includes('<b>—</b>') && cell[1].includes('這趟還沒有這個數'), `印 — 與一句：${cell[1]}`);
+  assert.ok(!cell[1].includes('↓') && !cell[1].includes('↑') && !/class="(up|dn)"/.test(cell[1]), '不畫箭頭');
+  const pts = /points="([^"]*)"/.exec(cell[2])?.[1].trim().split(/\s+/) ?? [];
+  assert.equal(pts.length, 2, `折線只畫有值的兩點：${pts}`);
+  assert.ok(h.includes('<span>改幾處</span><span><b>1 處</b><em class="up">↓ 比上趟少 4</em>'), '別格照舊');
+});
+
+// ---------- US-120：設定 › 資料管理 › 使用計數（匯出封測報告／回傳開關／送到 GitHub 預覽） ----------
+const u120Data = (optin) => ({ cfg: { data_dir: 'x', app_version: '0.9.0', report_optin: optin }, backups: [], trash: { wf: [], cards: [] } });
+const u120Ctx = (report = null, msg = null) => ({ state: { settings: { tab: {}, busy: null, msg, report } }, setTab: () => '使用計數', memAt: () => '' });
+test('US-120 UI ①：資料管理多一段「使用計數」（清理之後、關於之前；SET_TABS 同步）：一句「預設不回傳；你打開才傳，且只傳計數」、「匯出封測報告」鈕、「回傳使用計數」開關；關著沒有「送到 GitHub」、開著才有', () => {
+  const off = uiFn('setDataHtml', u120Ctx())(u120Data(false));
+  const order = ['組織', '位置與備份', '清理', '使用計數', '關於'].map((s) => off.indexOf(SEC_AT(s)));
+  assert.ok(order.every((x, i) => x >= 0 && (i === 0 || x > order[i - 1])), `五段依序：${order}`);
+  assert.deepEqual(J(sandboxTabs().資料管理), J(['組織', '位置與備份', '清理', '使用計數', '關於']), 'SET_TABS 跟著加');
+  const sec = secOf(off, '使用計數');
+  assert.ok(sec.includes('預設不回傳；你打開才傳，且只傳計數'), '承諾字句（ADR-013）');
+  assert.ok(sec.includes('data-act="set-report-export"') && sec.includes('匯出封測報告'), '匯出鈕');
+  assert.ok(/<span class="sw " data-act="set-report-optin"[^>]*aria-checked="false"/.test(sec), '開關關著');
+  assert.equal(count(sec, 'data-act="set-report-issue"'), 0, '關著不出「送到 GitHub」');
+  assert.ok(off.includes('<!--sec:使用計數|預設不回傳-->'), '卡面現值：關著＝預設不回傳');
+  const on = secOf(uiFn('setDataHtml', u120Ctx())(u120Data(true)), '使用計數');
+  assert.ok(/<span class="sw on" data-act="set-report-optin"[^>]*aria-checked="true"/.test(on), '開關開著');
+  assert.ok(on.includes('data-act="set-report-issue"') && on.includes('送到 GitHub'), '開著才有「送到 GitHub」');
+  assert.equal(count(on, 'data-reportprev'), 0, '還沒按就沒有預覽框');
+  const legacy = secOf(uiFn('setDataHtml', u120Ctx())({ ...u120Data(false), cfg: { data_dir: 'x' } }), '使用計數');
+  assert.ok(/aria-checked="false"/.test(legacy) && count(legacy, 'undefined') === 0, '舊設定沒 report_optin 鍵＝關');
+});
+
+test('US-120 UI ②：按「送到 GitHub」後的預覽框：body 全文在可捲的 <pre>、底下「打開 GitHub 送出」；too_long 改成「複製內容」＋「打開 GitHub」與一句原因；關著時不印預覽；msg key report 印在這段', () => {
+  const rep = { url: 'https://github.com/x/y/issues/new?title=a&body=b', title: '封測報告 v0.9.0 2026-09-26', body: '以下只有計數\n```json\n{"a":1}\n```' };
+  const h = secOf(uiFn('setDataHtml', u120Ctx(rep))(u120Data(true)), '使用計數');
+  const prev = /<div class="reportprev" data-reportprev>([\s\S]*?)<\/div>\s*<\/div>/.exec(h)?.[1];
+  assert.ok(prev, `該有預覽框：${h}`);
+  assert.ok(prev.includes('封測報告 v0.9.0 2026-09-26'), '標題');
+  assert.ok(/<pre class="reportbody">以下只有計數\n```json\n\{"a":1\}\n```<\/pre>/.test(prev), `全文照印：${prev}`);
+  assert.ok(prev.includes('data-act="set-report-open"') && prev.includes('打開 GitHub 送出'), '送出鈕');
+  assert.equal(count(prev, 'set-report-copy'), 0, '不太長就不用複製');
+  const long = secOf(uiFn('setDataHtml', u120Ctx({ ...rep, url: 'https://github.com/x/y/issues/new', too_long: true }))(u120Data(true)), '使用計數');
+  assert.ok(long.includes('data-act="set-report-copy"') && long.includes('複製內容') && long.includes('data-act="set-report-open"') && long.includes('打開 GitHub') && !long.includes('打開 GitHub 送出'), 'too_long 兩顆鈕');
+  assert.ok(long.includes('太長'), '講原因');
+  assert.equal(count(secOf(uiFn('setDataHtml', u120Ctx(rep))(u120Data(false)), '使用計數'), 'data-reportprev'), 0, '關著不印預覽');
+  const withMsg = secOf(uiFn('setDataHtml', u120Ctx(null, { key: 'report', text: '已匯出' }))(u120Data(false)), '使用計數');
+  assert.ok(withMsg.includes('data-setmsg="report"') && withMsg.includes('已匯出'), '結果一句在這段');
+  for (const sel of ['.reportprev', '.reportprev .reportbody']) assert.ok(cssSrc().includes(`${sel}{`), `缺樣式 ${sel}`);
+  assert.ok(/max-height:[^;]+;overflow:auto|overflow:auto;[^}]*max-height/.test(cssRule('.reportprev .reportbody') ?? ''), '預覽框可捲');
+});
+
+test('US-120 UI ③：事件——匯出＝GET /api/metrics/report 存成 bojian-report-<版本>-<日期>.json（前端 Blob 下載）；開關＝PUT settings.report_optin 反轉；送到 GitHub＝GET /api/metrics/issue-url 進 state.settings.report；打開＝window.open；複製＝clipboard', () => {
+  const src = uiSrc();
+  const ex = l6Br('set-report-export');
+  assert.ok(ex.includes("api('GET', '/api/metrics/report')") && ex.includes('downloadJson('), `匯出分支：${ex}`);
+  assert.ok(/function downloadJson\(name, obj\) \{[\s\S]*?new Blob\(\[JSON\.stringify\(obj, null, 2\)\][\s\S]*?URL\.createObjectURL[\s\S]*?a\.download = name;[\s\S]*?URL\.revokeObjectURL/.test(src), 'downloadJson：Blob→a[download]→收回網址');
+  assert.ok(/function reportFileName\(report\) \{[\s\S]*?bojian-report-\$\{[\s\S]*?\}\.json/.test(src), '檔名 bojian-report-<版本>-<日期>.json');
+  const fn = uiFn('reportFileName');
+  assert.equal(fn({ version: '0.9.0', generated_at: '2026-09-26T01:02:03.000Z' }), 'bojian-report-0.9.0-2026-09-26.json');
+  assert.ok(/^bojian-report-未知-\d{4}-\d{2}-\d{2}\.json$/.test(fn({})), `缺欄位不印 undefined：${fn({})}`);
+  const sw = l6Br('set-report-optin');
+  assert.ok(sw.includes('setPut({ report_optin:') && sw.includes('report_optin === true') && sw.includes('report = null'), `開關分支反轉並清預覽：${sw}`);
+  const iss = l6Br('set-report-issue');
+  assert.ok(iss.includes("api('GET', '/api/metrics/issue-url')") && iss.includes('s.report = ') && iss.includes("key: 'report'"), `送到 GitHub 分支：${iss}`);
+  assert.ok(/act === 'set-report-open'\) \{[\s\S]*?window\.open\(state\.settings\.report\.url, '_blank', 'noopener'\)/.test(src), '打開 GitHub＝window.open 帶 noopener');
+  assert.ok(/act === 'set-report-copy'\) \{[\s\S]*?navigator\.clipboard\.writeText\(state\.settings\.report\.body\)/.test(src), '複製＝clipboard 寫 body');
+  assert.ok(/act === 'set-report-close'\) \{[\s\S]*?report = null/.test(src), '關閉預覽');
+  assert.ok(/act === 'set-back'\) \{[^\n]*report = null/.test(src) && /act === 'set-group'\) \{[^\n]*report = null/.test(src), '返回／換組清掉預覽');
+});
+
+// ---------- US-119 ⑦：執行頁步驟列「這條查錯了」 ----------
+const u119Run = { run_id: 'r9', status: 'done', workflow: { category: 'a', id: 'x' }, usage_by_node: {} };
+const u119Node = { id: 's1', title: '寫摘要', executor: 'ai', instruction: 'i', next: [] };
+const u119Ctx = (extra = {}) => ({ state: { checkWrong: new Set(), demo: null, ...extra }, fileChipHtml: () => '' });
+test('US-119 ⑦ UI ①：taskRowHtml——該步曾被查核攔（attempts 任一 check.status blocked／最終 redone／現在 blocked）才出「這條查錯了」小鈕（data-act check-wrong、data-node）；沒攔過不出；已回報→「已回報」disabled；模擬導覽不出', () => {
+  const row = uiFn('taskRowHtml', u119Ctx());
+  const blockedAttempt = { status: 'done', attempts: [{ at: 't', reason: 'first', check: { status: 'blocked', blocks: [{}] } }, { at: 't', reason: 'retry', check: { status: 'ok' } }], check: { status: 'ok' } };
+  const h1 = row(u119Run, u119Node, blockedAttempt, 1);
+  assert.ok(/<button type="button" class="mini ckwrong" data-act="check-wrong" data-node="s1"[^>]*>這條查錯了<\/button>/.test(h1), `attempts 有 blocked：${h1}`);
+  assert.ok(h1.indexOf('check-wrong') > h1.indexOf('class="pillslot"'), '鈕在查核結果那一格（pillslot）');
+  const h2 = row(u119Run, u119Node, { status: 'done', check: { status: 'redone', first_blocks: [{}], recheck_blocks: [] }, attempts: [] }, 1);
+  assert.ok(h2.includes('data-act="check-wrong"'), 'redone 也算攔過');
+  const h3 = row(u119Run, u119Node, { status: 'waiting_check', check: { status: 'blocked', blocks: [{}] }, attempts: [{ at: 't', reason: 'first', check: { status: 'blocked' } }] }, 1);
+  assert.ok(h3.includes('data-act="check-wrong"'), '正被攔著也可以按');
+  const h4 = row(u119Run, u119Node, { status: 'done', check: { status: 'ok' }, attempts: [{ at: 't', reason: 'first', check: { status: 'ok' } }] }, 1);
+  assert.equal(count(h4, 'check-wrong') + count(h4, '這條查錯了'), 0, '沒攔過不出');
+  assert.equal(count(row(u119Run, u119Node, { status: 'done' }, 1), '查錯了'), 0, '沒查核資料不出');
+  const done = uiFn('taskRowHtml', u119Ctx({ checkWrong: new Set(['r9:s1']) }))(u119Run, u119Node, blockedAttempt, 1);
+  assert.ok(/<button type="button" class="mini ckwrong done" data-act="check-wrong" data-node="s1" disabled>已回報<\/button>/.test(done), `已回報：${done}`);
+  assert.equal(count(done, '這條查錯了'), 0);
+  const other = uiFn('taskRowHtml', u119Ctx({ checkWrong: new Set(['r8:s1']) }))(u119Run, u119Node, blockedAttempt, 1);
+  assert.ok(other.includes('這條查錯了'), '旗標按 run＋步驟記，別趟的不算');
+  const demo = uiFn('taskRowHtml', u119Ctx({ demo: { card: 5 } }))(u119Run, u119Node, blockedAttempt, 1);
+  assert.equal(count(demo, 'check-wrong'), 0, '模擬導覽零 API，不出鈕');
+  assert.ok(cssSrc().includes('.pillslot .ckwrong{'), '樣式');
+});
+
+test('US-119 ⑦ UI ②：事件——POST …/runs/:rid/steps/:node/check-wrong，成功後記進 state.checkWrong（run:node）再重繪；失敗 toast；state 初值 checkWrong 是 Set；換 run 不清（後端重複按只記一次）', () => {
+  const src = uiSrc();
+  const br = l6Br('check-wrong');
+  assert.ok(br.includes('/steps/${encodeURIComponent(node)}/check-wrong') && br.includes("api('POST'"), `POST 路徑：${br}`);
+  assert.ok(br.includes('state.checkWrong.add(`${state.run.run_id}:${node}`)') && br.includes('render()'), '成功記旗標並重繪');
+  assert.ok(br.includes("toast(err.message, 'bad')"), '失敗 toast');
+  assert.ok(/^\s*checkWrong: new Set\(\),/m.test(src), 'state 初值');
+  const cw = uiCtx().sandbox.state.checkWrong;
+  assert.ok(cw && typeof cw.add === 'function' && typeof cw.has === 'function' && cw.size === 0, 'vm 裡也是空的 Set（跨 realm 不用 instanceof）');
 });

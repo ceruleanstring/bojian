@@ -4,12 +4,12 @@
 
 **把你常做的事，變成愈用愈聰明的流程。**
 
-本地網頁介面 · 掛在你自己的 Claude Code 上跑 · 資料全在你電腦
+本地網頁介面 · 掛在你自己的 Claude Code 上跑 · 資料全在你電腦，預設不回傳任何東西
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/ceruleanstring/bojian?label=release)](https://github.com/ceruleanstring/bojian/releases)
 [![Node ≥ 20](https://img.shields.io/badge/node-%E2%89%A5%2020-brightgreen.svg)](https://nodejs.org)
-[![Tests](https://img.shields.io/badge/tests-1129%20passing-brightgreen.svg)](#參與開發)
+[![Tests](https://img.shields.io/badge/tests-1169%20passing-brightgreen.svg)](#參與開發)
 [![Runs on Claude Code](https://img.shields.io/badge/runs%20on-Claude%20Code-d97757.svg)](https://claude.com/claude-code)
 
 [快速開始](#快速開始) · [它怎麼運作](#三十秒看懂) · [交貨先查](#交貨先查) · [常見問題](#常見問題) · [路線圖](#路線圖)
@@ -133,7 +133,9 @@ node src/server.js
 
 ## 你的資料
 
-全部在一個資料夾裡（一句話安裝＝`%LOCALAPPDATA%\bojian\data`；從原始碼跑＝`data/`），人可讀的 YAML 檔案樹：流程、每次執行的每一步、產出檔、參考檔、用量帳本。沒有伺服器、沒有帳號、沒有任何使用追蹤；搬資料夾＝搬家，備份＝複製資料夾。AI 呼叫走你本機的 Claude，額度用你自己的。
+全部在一個資料夾裡（一句話安裝＝`%LOCALAPPDATA%\bojian\data`；從原始碼跑＝`data/`），人可讀的 YAML 檔案樹：流程、每次執行的每一步、產出檔、參考檔、用量帳本。沒有伺服器、沒有帳號；搬資料夾＝搬家，備份＝複製資料夾。AI 呼叫走你本機的 Claude，額度用你自己的。
+
+**使用計數：預設不回傳；你打開才傳，且只傳計數。** 剝繭在本機記幾種次數（停點放行或改了幾次、成品開了幾次、放棄停在第幾步、建了幾條流程、提議接受幾次、記憶撤回幾次、查核攔下與「這條查錯了」幾次、建流程到第一次跑隔多久），存在 `data/metrics.jsonl`，只有數字，沒有任何成品、欄位值、流程名、檔名或句子。要交給作者有兩條路：設定頁「匯出封測報告」存成一個純文字檔，你自己看過再寄；或打開「回傳使用計數」開關，傳的內容與匯出檔完全相同、傳前看得到全文、關掉立刻停。開關預設關，關著時剝繭不建立任何對外連線。
 
 ## 常見問題
 

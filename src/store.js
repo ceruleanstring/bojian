@@ -84,6 +84,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
   exec: { auto_makeup: false, remind_leads: [], web: true, overview_enabled: true },
   company_name: '', // 三層共用檔：側欄最上層節點的名字，空＝「公司」
   compose: { confirm_shape: true }, // 一句話進來先出成品卡再拆；關掉＝伺服器連跑兩趟直接出草稿
+  report_optin: false, // US-120／ADR-013：「回傳使用計數」開關，預設關；關著程式不建立任何對外連線
 });
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -213,7 +214,12 @@ export function createStore(dataDir, { root: backupRoot = dataDir } = {}) {
       return readYaml(wfFile(category, id), `Workflow「${id}」`);
     },
 
-    writeWorkflow(category, id, def) {
+    // 新建（檔還不在）補 created_at（US-119 ⑧：建流程到第一次跑的間隔要有起點）；帶著來的（匯入／複製）照存；
+    // 既有檔沒有就維持沒有，不回填。不動呼叫者的物件
+    writeWorkflow(category, id, defIn) {
+      const isNew = !fs.existsSync(wfFile(category, id));
+      const def = isNew && defIn && typeof defIn === 'object' && !Array.isArray(defIn) && defIn.created_at === undefined
+        ? { ...defIn, created_at: new Date().toISOString() } : defIn;
       atomicWrite(wfFile(category, id), yaml.dump(def, { lineWidth: -1 }));
       if (listHistoryVersions(category, id).length === 0) {
         const snapshot = { diff_note: '建立', source: 'create', def };
@@ -380,9 +386,17 @@ export function createStore(dataDir, { root: backupRoot = dataDir } = {}) {
     },
 
     // 核可提議／退回時升版：現行檔與快照一起寫
-    bumpVersion(category, id, def, diffNote, source) {
+    bumpVersion(category, id, defIn, diffNote, source) {
       const versions = listHistoryVersions(category, id);
       const n = (versions.at(-1) ?? 0) + 1;
+      // 升版沿用建立時間：前端送回的定義（或退回的舊快照）可能沒帶 created_at，檔上有就補回；檔上本來沒有就不回填
+      let def = defIn;
+      if (def && typeof def === 'object' && !Array.isArray(def) && def.created_at === undefined) {
+        try {
+          const cur = readYaml(wfFile(category, id), `Workflow「${id}」`);
+          if (typeof cur?.created_at === 'string') def = { ...def, created_at: cur.created_at };
+        } catch { /* 現行檔讀不到就照原樣寫 */ }
+      }
       atomicWrite(path.join(historyDir(category, id), `v${n}.yaml`),
         yaml.dump({ diff_note: diffNote, source, at: new Date().toISOString(), def }, { lineWidth: -1 }));
       atomicWrite(wfFile(category, id), yaml.dump(def, { lineWidth: -1 }));

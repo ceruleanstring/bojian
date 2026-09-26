@@ -55,6 +55,16 @@ export function supervisorFlags(node) {
 
 // ---- prompt 組裝 ----
 
+// US-117 ③：使用者說明書「什麼事要問我、什麼事自己決定」段——以獨立欄位 userAsk 進開場與交接，
+// 不混進監工備註（stripLimits 只剔監工寫的句子，使用者這段原句照傳）。空／缺席＝兩份 prompt 逐字同舊。
+const ASK_TITLE = '# 使用者交代（什麼事要問我、什麼事自己決定）';
+const ASK_NOTE = '（使用者親口說的，當已知：哪一步會碰到要問他的事，備註裡提醒那一步先停下來問；原句工人會另外拿到，不用重抄）';
+const askLines = (v) => arr(v).map((x) => str(x).trim()).filter(Boolean);
+const askSection = (userAsk) => {
+  const ask = askLines(userAsk);
+  return ask.length ? ['', ASK_TITLE, ASK_NOTE, ask.map((x) => `- ${x}`).join('\n')] : [];
+};
+
 // 參考檔一行：名稱、掛在哪幾步、行數、（表格檔才有）欄位＝第一行。不附任何內文節錄——
 // L068：監工看到截了 500 字的節錄，以為資料只有那些，就寫出「只能用上一步的數字」把工人綁死
 // 表格＝副檔名 csv／tsv 或第一行含 tab；第一行只是含逗號的散文（.md 的一句話）不算，不然那句散文會被印成「欄位」
@@ -73,7 +83,7 @@ function refLine(name, text, titles) {
 
 // 開場備註：通盤看一次全部設定＋這次的欄位值＋參考檔清單（只列名稱／掛在哪步／行數／欄位）
 // refTexts＝{ 檔名: 全文 }；檔名清單取自全部節點 attachments 的聯集，讀不出文字的只列名字
-export function buildBriefPrompt({ def, params, paramLabels, refTexts } = {}) {
+export function buildBriefPrompt({ def, params, paramLabels, refTexts, userAsk } = {}) {
   const d = isObj(def) ? def : {};
   const nodes = arr(d.nodes);
   // 步驟行不給 id：開場備註是寫給工人與使用者看的，id 是給不了資訊的 slug（收尾另有「可用的步驟 id」段）
@@ -105,12 +115,13 @@ export function buildBriefPrompt({ def, params, paramLabels, refTexts } = {}) {
     '',
     '# 參考檔',
     refs.length ? refs.join('\n\n') : NONE,
+    ...askSection(userAsk),
   ].join('\n');
 }
 
 // 交接：上一步剛做完、下一步要開始時給下一步工人的話
 // flags 決定「允許你調的」列什麼——沒列出來的欄位，監工就算寫了值也會被 handoff() 強制回 null
-export function buildHandoffPrompt({ node, flags, routeOptions, brief, priorHandoffs, rules, interjections, upstream } = {}) {
+export function buildHandoffPrompt({ node, flags, routeOptions, brief, priorHandoffs, rules, interjections, upstream, userAsk } = {}) {
   const n = isObj(node) ? node : {};
   const f = flags ?? supervisorFlags(n);
   // 附現值：不講現在的檔位，監工會每次都回 balanced，把設 deep 的工人一路降級（真 AI 前後對照實測）
@@ -153,6 +164,7 @@ export function buildHandoffPrompt({ node, flags, routeOptions, brief, priorHand
     '', '# 開場備註', str(brief).trim() || NONE,
     '', '# 之前的交接', priors.length ? priors.join('\n') : NONE,
     '', '# 使用者剛交代的話', lines(interjections),
+    ...askSection(userAsk),
     '', '# 上一步的成品', ups.length ? ups.join('\n\n') : NONE,
   );
   return out.join('\n');
@@ -272,20 +284,22 @@ async function ask({ adapter, meta, onPrompt, onReply, prompt }) {
   return raw;
 }
 
-export async function brief({ adapter, meta, onPrompt, onReply, def, params, paramLabels, refTexts }) {
+// US-117 ③：userAsk 有內容 → 回傳多 user_ask（使用者原句，不經 stripLimits、不併進 text）；空＝回傳形狀逐字同舊
+export async function brief({ adapter, meta, onPrompt, onReply, def, params, paramLabels, refTexts, userAsk }) {
   try {
-    const prompt = buildBriefPrompt({ def, params, paramLabels, refTexts });
+    const prompt = buildBriefPrompt({ def, params, paramLabels, refTexts, userAsk });
     const { note: text, dropped } = stripLimits(parseBrief(await ask({ adapter, meta, onPrompt, onReply, prompt })).note);
-    return { ok: true, text, dropped };
+    const user_ask = askLines(userAsk);
+    return { ok: true, text, dropped, ...(user_ask.length ? { user_ask } : {}) };
   } catch (e) {
     return failed(e);
   }
 }
 
-export async function handoff({ adapter, meta, onPrompt, onReply, node, flags, routeOptions, brief: briefText, priorHandoffs, rules, interjections, upstream }) {
+export async function handoff({ adapter, meta, onPrompt, onReply, node, flags, routeOptions, brief: briefText, priorHandoffs, rules, interjections, upstream, userAsk }) {
   const f = flags ?? supervisorFlags(node);
   try {
-    const prompt = buildHandoffPrompt({ node, flags: f, routeOptions, brief: briefText, priorHandoffs, rules, interjections, upstream });
+    const prompt = buildHandoffPrompt({ node, flags: f, routeOptions, brief: briefText, priorHandoffs, rules, interjections, upstream, userAsk });
     const v = parseHandoff(await ask({ adapter, meta, onPrompt, onReply, prompt }));
     // 沒勾的欄位程式強制清空：勾是「監工可以動」的授權，監工自己寫了值不算數（route 例外——判路永遠跑）
     const s = f.note ? stripLimits(v.note) : { note: '', dropped: [] };

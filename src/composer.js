@@ -57,6 +57,36 @@ function capabilityLines(cap) {
   ];
 }
 
+// US-117 ①③：使用者說明書五段（契約：context.manual＝{who,talk,ask,show,redline}，各為字串陣列；缺席或全空＝逐字同舊）。
+// 五段標題與順序跟工作單（runner）同一份，前端與文件對齊用這五個字串
+const MANUAL_SECTIONS = [
+  ['who', '我是誰'], ['talk', '怎麼跟我講話'], ['ask', '什麼事要問我、什麼事自己決定'], ['show', '什麼時候叫我看'], ['redline', '紅線'],
+];
+const manualOf = (raw) => Object.fromEntries(MANUAL_SECTIONS.map(([k]) => [k,
+  (raw && typeof raw === 'object' && Array.isArray(raw[k]) ? raw[k] : []).map((x) => String(x ?? '').trim()).filter(Boolean)]));
+const ABOUT_HEADING = '# 關於你（拆的時候把這些當已知；不用問）';
+// 五段對系統怎麼用（US-117 ③）：「什麼時候叫我看」定停點預設、「什麼事要問我」照抄進每個 AI 步驟末尾一行「遇到岔路：」
+const GUIDE_HEADING = '## 拆的時候照上面的段落做';
+const STOP_GUIDE = '- 停點預設照「什麼時候叫我看」那段定：他只看做完的成品→只有最後交付那一步 stop_point 設 always、其餘 never；他每一步都看→每一步都 always；他只有出問題才叫他→全部 never；那段寫不出對應的，照第 3、5 條的預設。';
+const ASK_GUIDE = '- 每個 AI 步驟的 instruction 末尾另起一行「遇到岔路：」，後面照抄「什麼事要問我、什麼事自己決定」那段的原句；工人遇到指示沒講清楚的地方就照那行決定停下來問還是自己定，自己定的在產出裡報備一句。';
+
+// 「# 關於你」段：manual 有內容→沒 section 的舊卡（coreNotes 裡不屬於任何段的）先平列在段首、再五段 ## 小標（空段不印）、末尾兩條規則；
+// manual 缺席／全空→coreNotes 平列（逐字同舊）；兩邊都空→整段不印
+function aboutSection(ctx, demote) {
+  const notes = Array.isArray(ctx.coreNotes) ? ctx.coreNotes : [];
+  const manual = manualOf(ctx.manual);
+  const sectioned = new Set(MANUAL_SECTIONS.flatMap(([k]) => manual[k]));
+  if (!sectioned.size) return notes.length ? ['', ABOUT_HEADING, ...notes.map((x) => `- ${demote(x)}`)] : [];
+  const legacy = notes.filter((x) => !sectioned.has(String(x ?? '').trim()));
+  const guides = [...(manual.show.length ? [STOP_GUIDE] : []), ...(manual.ask.length ? [ASK_GUIDE] : [])];
+  return [
+    '', ABOUT_HEADING,
+    ...legacy.map((x) => `- ${demote(x)}`),
+    ...MANUAL_SECTIONS.flatMap(([k, label]) => (manual[k].length ? [`## ${label}`, ...manual[k].map((x) => `- ${demote(x)}`)] : [])),
+    ...(guides.length ? [GUIDE_HEADING, ...guides] : []),
+  ];
+}
+
 // （M1c）：三段參考——你的分類、欄位詞典、分類守則。沒給 context（舊呼叫端）就一段都不多；給了但空的寫「（無）」。
 // context.category＝已定的分類（伺服器確認存在才給）：明講「已經放在」，免得第 12 條在已存流程上又問一次。
 // 最前多「# 關於你」（coreNotes 空或暫停＝整段不印，它是人不是參考資料表）、分類守則後多「# 你能派工人做什麼」（capabilities 沒給＝不印）。
@@ -65,7 +95,7 @@ function contextSections(ctx) {
   const list = (arr) => (arr.length ? arr.map((x) => `- ${x}`) : ['（無）']);
   // 規範內文與卡文行首 # 降一級、###### 封頂（同 host-adapter，手冊標題不與段標題同級）；卡文多行時第二行起同樣降級
   const demote = (text) => String(text ?? '').replace(/^(#{1,6})(?=\s)/gm, (m) => (m.length < 6 ? `#${m}` : m));
-  const about = ctx.coreNotes?.length ? ['', '# 關於你（拆的時候把這些當已知；不用問）', ...ctx.coreNotes.map((x) => `- ${demote(x)}`)] : [];
+  const about = aboutSection(ctx, demote);
   const can = ctx.capabilities ? ['', '# 你能派工人做什麼（拆步驟時照這張表安排誰做）', ...capabilityLines(ctx.capabilities)] : [];
   const dictLines = (ctx.dict?.fields ?? []).map((f) => {
     const syn = f.synonyms?.length ? `；同義：${f.synonyms.join('、')}` : '';

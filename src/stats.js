@@ -74,3 +74,32 @@ export function runStats(runs, nowMs = Date.now(), days = 30) {
     top_steps: top,
   };
 }
+
+// ---- US-118 逐趟曲線：同一條流程按 started_at 由早到晚，每趟四個數（改幾處／花多久／用量／被攔幾次）----
+// 純函式：吃已讀出的 run 陣列與用量帳本列。進行中（running）、讀不到、缺 run_id 或 started_at 的那趟略過。
+// tokens＝帳本裡 run===run_id 的輸入（含快取建立／快取讀取）＋輸出加總，公式與 supervisor.addUsage／server.tokenInput 同一套。
+// blocked＝各步 attempts 裡 check.status==='blocked' 的次數。duration_ms＝finished_at−started_at，沒 finished_at 就 null。
+const tokensOf = (u) => (u?.input_tokens ?? 0) + (u?.cache_creation_input_tokens ?? 0) + (u?.cache_read_input_tokens ?? 0) + (u?.output_tokens ?? 0);
+
+export function runSeries(runs, usageRows) {
+  const byRun = new Map();
+  for (const u of Array.isArray(usageRows) ? usageRows : []) {
+    if (!u || typeof u !== 'object' || typeof u.run !== 'string') continue;
+    byRun.set(u.run, (byRun.get(u.run) ?? 0) + tokensOf(u));
+  }
+  return (Array.isArray(runs) ? runs : [])
+    .filter((r) => r && typeof r === 'object' && !Array.isArray(r) && typeof r.run_id === 'string' && r.status !== 'running' && Number.isFinite(ms(r.started_at)))
+    .sort((a, b) => ms(a.started_at) - ms(b.started_at) || (a.run_id < b.run_id ? -1 : a.run_id > b.run_id ? 1 : 0))
+    .map((r) => {
+      const steps = Object.values(stepsOf(r));
+      const dur = ms(r.finished_at) - ms(r.started_at);
+      return {
+        run_id: r.run_id,
+        started_at: r.started_at,
+        edited: steps.filter(isEdited).length,
+        duration_ms: Number.isFinite(dur) && dur >= 0 ? dur : null,
+        tokens: byRun.get(r.run_id) ?? 0,
+        blocked: steps.reduce((n, s) => n + (Array.isArray(s?.attempts) ? s.attempts.filter((a) => a?.check?.status === 'blocked').length : 0), 0),
+      };
+    });
+}

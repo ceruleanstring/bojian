@@ -101,7 +101,9 @@ const state = {
   flowSettingsOpen: false, // 「流程設定」浮窗（產出檔案／交貨查核／監工三開關）
   flowMemOpen: false,  // 記憶一行「查看」浮窗（兩格）
   // ---- （M2）----
-  intro: null,         // 首次三題介紹（開站蓋在儀表板前）：{saving, err}；null＝答過或跳過了
+  intro: null,         // 初次體驗輪：三步引導卡（開站蓋在儀表板前）：{step:1|2|3, ...}；null＝走完或略過了
+  demo: null,          // 初次體驗輪（US-116）：模擬導覽進行中 {card:1..6, guard:停點打的那句, at:上次換卡時刻, at0:開跑時刻}；null＝沒在導覽。全程不打 API
+  introManual: null,   // 說明書現況（GET /api/memory/manual，儀表板順手讀）：頂端提醒行「說明書還沒寫」判這個；null＝還沒讀到／不提醒
   memUndoing: {},      // 通知「不要記」按下去到回來之間（卡 id→true），輪詢重繪不會把按鈕復活
   // ---- （M3b）：開跑表單的習慣選項、點了即核可、身分 ----
   wfMemory: null,      // GET /api/memory/for-workflow 的回應（options＝每個欄位旁的習慣選項）；讀不到＝null：沒有 chip，流程照開
@@ -135,6 +137,7 @@ const state = {
   runInspect: null,    // 左軌點了哪一步＝歷史視圖（U6c；null＝看目前這步）。開跑／打開別的 run／節點消失重設，輪詢不碰，不進 keep
   runInspectLive: null, // ／L12b：左軌點進來看的等你支線是哪一步（還看著它、它處理完就回目前這步）
   promptView: null,    // 執行頁「當時指示」卷宗浮窗 {title, text}（U6b 接；與儀表板的 promptModalHtml 共用）
+  checkWrong: new Set(), // US-119 ⑦：這次開頁按過「這條查錯了」的 `${run_id}:${node}`；重繪照它印「已回報」（後端重複按只記一次，這裡只擋畫面）
   // ---- 三層改名浮窗（組織／分類／流程）——狀態在這，輪詢重繪讀回；null＝沒開 ----
   rename: null,        // {type:'company'|'category'|'flow', cat, id, value, err, busy}
   inspectorTab: 'step', // 右欄檢視器分頁 step｜data（Workflow 資料）
@@ -778,7 +781,7 @@ function memScopeText(s) {
   if (s.level === 'category') return `${s.category ?? ''}這個分類`;
   return `只有「${s.workflow && s.category ? wfNameOf(s.category, s.workflow) : (s.workflow ?? '')}」`;
 }
-const MEM_SOURCE_TXT = { intro: '介紹你自己時說的', chat: '聊天裡說的', 'stop-note': '停點的註記', 'run-params': '開跑表單連兩趟填同一個值', 'stop-edit': '停點連兩趟往同方向改', feedback: '跑完丟的一句結果', 'group-box': '分類守則框', manual: '你在記憶頁加的', replace: '取代舊卡時寫的' };
+const MEM_SOURCE_TXT = { intro: '你的說明書裡寫的', chat: '聊天裡說的', 'stop-note': '停點的註記', 'run-params': '開跑表單連兩趟填同一個值', 'stop-edit': '停點連兩趟往同方向改', feedback: '跑完丟的一句結果', 'group-box': '分類守則框', manual: '你在記憶頁加的', replace: '取代舊卡時寫的' };
 const MEM_STATUS_TXT = { active: '活躍', dormant: '休眠', retired: '退休', replaced: '被取代' };
 const memAt = (x) => (x ? new Date(x).toLocaleString('zh-TW', { hour12: false }) : '—');
 // 條目：點了開卡片浮窗（群組條沒有卡 API，text 與分類直接帶在 dataset 上）
@@ -2866,7 +2869,47 @@ function runStatsHtml() {
     }).join('')
     : `<p class="note">近 ${days} 天沒有步驟出事。</p>`;
   return `<div class="runstats" data-runstats><div class="kpis">${kpi(String(w.runs), `近 ${days} 天跑了幾趟`)}${kpi(w.rate == null ? dash : `${Math.round(w.rate * 100)}%`, '一路跑完', cmp)}${kpi(w.median_ms == null ? dash : fmtDur(w.median_ms), '一趟通常多久（含等你）')}${kpi(w.edited_avg == null ? dash : `${fmtAvg(w.edited_avg)} 處`, '平均每趟被你改幾處')}</div>
+    ${runSeriesHtml(st.series)}
     <div class="ranks"><h6 class="sub">最常出事的步驟</h6>${rank}</div></div>`;
+}
+// US-118 逐趟曲線（參考物 PROTO/追蹤使用數據輪-逐趟曲線-三案草稿.html，老闆挑 A 案：四格小折線並排）。
+// series＝後端 GET …/runs/stats 的 series（按趟數排；兩趟以上才有，否則空陣列）；一趟以下整塊不畫。
+// 四個數都是「愈低愈好」：比上趟少＝綠往下、多＝紅往上。純內嵌 SVG，不引圖表庫；單位照草稿（分、千 token）。
+const SERIES_METRICS = [
+  { key: 'edited', label: '改幾處', unit: '處', num: (v) => String(v), delta: (d) => String(d) },
+  { key: 'duration_ms', label: '花多久', unit: '分', num: (v) => fmtAvg(v / 60000), delta: (d) => `${fmtAvg(d / 60000)} 分` },
+  { key: 'tokens', label: '用量', unit: '千 token', num: (v) => fmtAvg(v / 1000), delta: (d) => `${fmtAvg(d / 1000)} 千` },
+  { key: 'blocked', label: '查核攔幾次', unit: '次', num: (v) => String(v), delta: (d) => String(d) },
+];
+function runSeriesHtml(series) {
+  if (!Array.isArray(series) || series.length < 2) return '';
+  const n = series.length;
+  const X0 = 6, X1 = 153, Y0 = 10, Y1 = 46; // 草稿的座標：橫軸 6→153、最高點 y=10、最低點 y=46（viewBox 160×60）
+  const xAt = (i) => (n === 1 ? X0 : Math.round((X0 + (X1 - X0) * i / (n - 1)) * 10) / 10);
+  const cell = (m) => {
+    const pts = series.map((r, i) => ({ i, v: r?.[m.key] })).filter((p) => typeof p.v === 'number' && Number.isFinite(p.v));
+    const last = pts.at(-1), prev = pts.at(-2);
+    // 頭部只認「最新一趟」自己的數：最新趟缺值（paused、duration_ms=null）就印「—」，不拿更早一趟的數冒充、不畫箭頭；折線照舊只畫有值的點
+    const latestHas = last && last.i === n - 1;
+    let head = `<span>${m.label}</span><span><b>—</b><em class="">這趟還沒有這個數</em></span>`;
+    if (latestHas) {
+      const d = prev ? last.v - prev.v : 0;
+      const em = !prev ? '<em class="">只有這一趟有數</em>' : d < 0 ? `<em class="up">↓ 比上趟少 ${m.delta(-d)}</em>` : d > 0 ? `<em class="dn">↑ 比上趟多 ${m.delta(d)}</em>` : '<em class="">跟上趟一樣</em>';
+      head = `<span>${m.label}</span><span><b>${m.num(last.v)} ${m.unit}</b>${em}</span>`;
+    }
+    let svg = '';
+    if (pts.length >= 2) {
+      const lo = Math.min(...pts.map((p) => p.v)), hi = Math.max(...pts.map((p) => p.v));
+      const yAt = (v) => (hi === lo ? (Y0 + Y1) / 2 : Math.round((Y1 - (Y1 - Y0) * (v - lo) / (hi - lo)) * 10) / 10);
+      const points = pts.map((p) => `${xAt(p.i)},${yAt(p.v)}`).join(' ');
+      const worse = prev && last.v > prev.v;
+      svg = `<svg viewBox="0 0 160 60" aria-hidden="true"><polyline fill="none" stroke-width="1.8" stroke-linejoin="round" points="${points}"/><circle class="pt${worse ? ' dn' : ''}" cx="${xAt(last.i)}" cy="${yAt(last.v)}" r="3"/></svg>`;
+    }
+    return `<div class="sp"><div class="h">${head}</div>${svg}<div class="ax"><span>第 1 趟</span><span>第 ${n} 趟</span></div></div>`;
+  };
+  return `<div class="series" data-runseries><h6 class="sub">一趟比一趟 <small>${n} 趟・往下＝變好</small></h6>
+    <div class="spark4">${SERIES_METRICS.map(cell).join('')}</div>
+    <p class="note">四個數字都是「愈低愈好」，所以往下的箭頭是綠、往上的是紅。等你的時間也算進「花多久」。</p></div>`;
 }
 function historyModeHtml() {
   if (!state.wf || subjectIsDraft()) {
@@ -3017,7 +3060,7 @@ function mdBlock(text, key, cls = 'output') {
   const h = mdHash(t);
   mdTextByKey.set(key, t);
   const html = state.rendered[h];
-  if (html === undefined && !mdDown && !mdPending.has(h)) {
+  if (html === undefined && !mdDown && !mdPending.has(h) && !state.demo) { // 模擬導覽不打 /api/render（零 API），示範產出直接顯示原文
     mdPending.add(h);
     api('POST', '/api/render', { text: t })
       .then((r) => { state.rendered[h] = r.html; patchRendered(h); })
@@ -3410,7 +3453,8 @@ function runHtml() {
     : run.status === 'paused' ? '<span class="chip wait"><i class="ph-fill ph-hourglass-medium"></i>停著等你</span>'
       : `<span class="chip quiet">第 ${Math.min(doneCount + 1, def.nodes.length)} 步</span>`;
   // 頁標題（樣稿 uxRunPage .heading）：同 pageHeadHtml 的結構，但說明行帶欄位值的 title 提示（pageHeadHtml 會把 HTML escape 掉）
-  const head = `<div class="page-head"><div><h1>${esc(def.name)}</h1><p>${meta}</p></div><div class="actions">${pill}<button class="btn" data-act="back"><i class="ph ph-caret-left"></i>回 Workflow</button></div></div>`;
+  // 模擬導覽（US-116）：標題掛「模擬」、不出「回 Workflow」（離開只走導覽列的跳過／結束）
+  const head = `<div class="page-head"><div><h1>${esc(def.name)}${state.demo ? ' <span class="chip violet simchip">模擬</span>' : ''}</h1><p>${meta}</p></div><div class="actions">${pill}${state.demo ? '' : '<button class="btn" data-act="back"><i class="ph ph-caret-left"></i>回 Workflow</button>'}</div></div>`;
   return `${crumbsHtml('這次的執行')}${head}${memoryNoticeHtml(run)}<div class="runlayout">${progressRailHtml(run)}<section class="runmain">${main}</section>${sideInfoHtml(run)}</div>`;
 }
 
@@ -3441,7 +3485,7 @@ function runStepHtml(run, node, other) {
   const joins = run.def.nodes.filter((j) => kindOf(j) === 'join' && outgoingOf(node).includes(j.id) && !['done', 'skipped'].includes(run.steps[j.id]?.status)).map((j) => joinBlockedCardHtml(j, run)).join('');
   const banner = other ? '<div class="runbanner branch"><i class="ph ph-arrows-split"></i><span>同時進行的另一條支線，這一步也在等你——可以直接在這裡處理</span><button class="btn btn-secondary sm2" data-act="run-current"><i class="ph ph-arrow-bend-up-left"></i>回到目前</button></div>' : '';
   const row = isBranch ? branchRowHtml(run, node, step) : taskRowHtml(run, node, step, seq) + flagsHtml(step);
-  return `${banner}<div class="panel runstep-now"><div class="stephead"><span class="caption">STEP ${String(seq).padStart(2, '0')}</span>${tries ? `<span class="chip">第 ${tries} 次交卷</span>` : ''}</div><h2>${esc(node.title)}</h2>${row}${out}${card}${hand}${step.status === 'done' ? editRulesHtml(node, step) : ''}${joins}</div>`;
+  return `${banner}<div class="panel runstep-now"><div class="stephead"><span class="caption">STEP ${String(seq).padStart(2, '0')}</span>${tries ? `<span class="chip">第 ${tries} 次交卷</span>` : ''}${demoGuardChipHtml(node)}</div><h2>${esc(node.title)}</h2>${row}${out}${card}${hand}${step.status === 'done' ? editRulesHtml(node, step) : ''}${joins}</div>`;
 }
 // ---------- 跑完的中欄（US-103／US-104，草稿 PROTO/文件閱讀-三案草稿.html 的 A 案＋「加畫　總覽頁」）----------
 // 中欄＝總覽（這次得到什麼）＋成品清單（一列＝標題＋一行摘要）；點一列從右側滑出閱讀面板（readerHtml）。
@@ -3605,15 +3649,16 @@ function artifactRowHtml(run, n, i) {
 function runCompleteHtml(run) {
   const seq = stepSeqMap(run.def);
   const artifacts = runArtifactNodes(run).map((n) => artifactRowHtml(run, n, seq.get(n.id) ?? 0)).join('');
-  const feedbackBox = state.feedbackSent
-    ? feedbackReplyHtml(state.feedbackSent) // （M2）：回覆照 memory_notice 講記成卡了／沒記成
-    : `<div class="card proposal">
+  const feedbackBox = state.demo ? demoYourTurnHtml() // 模擬導覽（US-116）第 6 張：回饋框換成「換你的事」兩鈕
+    : state.feedbackSent
+      ? feedbackReplyHtml(state.feedbackSent) // （M2）：回覆照 memory_notice 講記成卡了／沒記成
+      : `<div class="card proposal">
           回來丟一句結果吧——「主管說哪裡好、哪裡不行」，它會學起來。
           <div class="chatin" style="margin-top:8px"><input id="run-feedback-input" placeholder="例：主管說數據太細了⋯">
           <button class="btn btn-primary" data-act="send-run-feedback"><i class="ph-fill ph-paper-plane-tilt"></i></button></div>
         </div>`;
   return `<div class="panel runcomplete"><div class="stephead"><span class="chip quiet"><i class="ph-fill ph-check-circle"></i>完成</span></div><h2>這次的成品已備妥</h2>
-    ${overviewHtml(run)}<div class="artifacts">${artifacts || '<p class="note">這趟沒有留下成品</p>'}</div>
+    ${overviewHtml(run)}${state.demo ? demoArtifactsHtml() : `<div class="artifacts">${artifacts || '<p class="note">這趟沒有留下成品</p>'}</div>`}
     <div id="run-record-anchor"></div>${recordHtml(run)}${proposalsHtml()}${feedbackBox}</div>`;
 }
 
@@ -3634,7 +3679,8 @@ function readerHtml() {
   const key = `art:${n.id}`;
   const { notice, body } = splitDataNotice(s.edited_output ?? s.output);
   const nav = (node, dir, label) => `<button type="button" class="btn sm2" data-act="reader-${dir}"${node ? ` data-node="${esc(node.id)}"` : ' disabled'}>${label}</button>`;
-  const dl = s.file
+  // 模擬導覽（US-116）：示範趟沒有真檔，不印下載連結（原生 <a href> 沒有 data-act，零 API 護欄擋不到，點了會打 /api 404）
+  const dl = s.file && !state.demo
     ? `<a class="btn sm2" href="${esc(runFileUrl(run.workflow.category, run.workflow.id, run.run_id, s.file))}" download="${esc(s.file)}"><i class="ph ph-download-simple"></i>下載</a>` : '';
   return `<div class="rdback" data-act="reader-back"><aside class="rddrawer" role="dialog" aria-modal="true" aria-label="讀「${esc(n.title)}」">
     <div class="rdhead"><span class="step">第 ${stepSeqMap(run.def).get(n.id) ?? 0} 步／共 ${list.length} 份</span><b class="t" title="${esc(n.title)}">${esc(n.title)}</b>
@@ -3696,9 +3742,23 @@ function taskRowHtml(run, node, step, seq) {
   const fileChip = step.file ? fileChipHtml(run.workflow.category, run.workflow.id, run.run_id, step.file, step.file_note) : '';
   let h = `<div class="step ${cls}" data-steprow="${esc(node.id)}" ${dim}><span class="n">${step.status === 'done' ? '<i class="ph ph-check"></i>' : step.status === 'skipped' ? '—' : seq}</span><b>${esc(node.title)}</b>
       <span class="chip">${node.executor === 'human' ? '<i class="ph ph-user"></i>你來' : 'AI'}</span>
-      <span class="pillslot">${fileChip}${checkChip(step, run.usage_by_node?.[node.id]?.check)}${supChip(run.usage_by_node?.[node.id]?.supervisor)}${stepPill(step)}</span></div>`;
+      <span class="pillslot">${fileChip}${checkChip(step, run.usage_by_node?.[node.id]?.check)}${checkWrongBtnHtml(run, node, step)}${supChip(run.usage_by_node?.[node.id]?.supervisor)}${stepPill(step)}</span></div>`;
   if (step.file_note && step.file) h += `<p class="note" style="margin:2px 0 6px 20px">${esc(step.file_note)}</p>`;
   return h;
+}
+// US-119 ⑦「這條查錯了」：只給查核攔過的步（attempts 任一 blocked、最終 redone、或正被攔著）；與後端 check-wrong 的 wasBlocked 同一套判法。
+// 按過＝「已回報」灰掉不可再按（state.checkWrong 記 run:node，重繪保持）；模擬導覽全程不打 API，不出鈕
+function checkWasBlocked(step) {
+  if (!step || typeof step !== 'object') return false;
+  if (Array.isArray(step.attempts) && step.attempts.some((a) => a?.check?.status === 'blocked')) return true;
+  return step.check?.status === 'blocked' || step.check?.status === 'redone' || (Array.isArray(step.check?.first_blocks) && step.check.first_blocks.length > 0);
+}
+function checkWrongBtnHtml(run, node, step) {
+  if (state.demo || !checkWasBlocked(step)) return '';
+  const done = state.checkWrong?.has(`${run.run_id}:${node.id}`) === true;
+  return done
+    ? `<button type="button" class="mini ckwrong done" data-act="check-wrong" data-node="${esc(node.id)}" disabled>已回報</button>`
+    : `<button type="button" class="mini ckwrong" data-act="check-wrong" data-node="${esc(node.id)}" title="這次查核攔錯了——只記一次計數，不送內容">這條查錯了</button>`;
 }
 // 本機時區的「YYYY-MM-DDTHH:mm」（datetime-local 的值格式；後端 scheduler.fmtLocal 同一式）
 // 精簡: 本檔另有數處手寫的日期字串組法，之後一起收斂到這一支；不順手改既有呼叫點
@@ -3761,7 +3821,7 @@ function timeCardHtml(node, step) {
 function stepCardHtml(node, step) {
   if (kindOf(node) === 'branch') return step.status === 'waiting_branch' ? branchChoiceCardHtml(node) : step.status === 'failed' ? failCardHtml(node, step) : '';
   switch (step.status) {
-    case 'waiting_review': return stopCardHtml(node, step);
+    case 'waiting_review': return state.demo ? demoStopCardHtml(node, step) : stopCardHtml(node, step); // 模擬導覽（US-116）：停點那張真的讓他打一句，不出真的三顆鈕（stopCardHtml 原文不動）
     case 'waiting_check': return checkCardHtml(node, step);
     case 'waiting_human': return humanCardHtml(node);
     case 'waiting_data': return dataCardHtml(node, step);
@@ -3868,6 +3928,7 @@ function sideDataHtml(run, node, step) {
 }
 // 來源一行：健檢（preflightFor，快取沒有就背景打一次、回來 patchPreflightDom 只補這一行）的 inputs[node]；讀不到就不佔位
 function sideSourceHtml(run, node) {
+  if (state.demo) return '<p class="note" data-srcline>來源：示範資料（寫死在前端，不連任何系統）</p>'; // 模擬導覽不打健檢（零 API）
   const pf = preflightFor(run.def);
   if (!pf) return preflightCache.failed && preflightCache.key === JSON.stringify(run.def) ? '' : '<p class="note" data-srcline>來源：檢查中⋯</p>';
   const list = pfInputs(pf, node.id).map(inputSourceText);
@@ -3902,6 +3963,7 @@ function sideInfoHtml(run) {
   // 第二塊「本次補充」只在開跑時有寫才出
   const note = String(run.note ?? '').trim() ? `<div class="panel sidenote"><h3>本次補充</h3><p class="note">${esc(run.note)}</p></div>` : '';
   return `<aside class="sideinfo"><div class="panel"><h3>目前這步</h3><div class="curstep"><b>${esc(node.title ?? '')}</b>${stepPill(step)}</div>
+    ${state.demo ? demoCheckHtml(node, step) : ''}
     ${fold('sup', '監工交代', sup)}
     ${fold('data', '這步會用到的資料', sideDataHtml(run, node, step))}
     ${fold('focus', '驗收重點', focus)}
@@ -3921,6 +3983,8 @@ function promptModalHtml(view) {
 
 // ---------- 儀表板：要你處理／系統通知／最近完成／用量監控 ----------
 // 離開儀表板的唯一出口（照 closeCalendar 的教訓）：任何切去別的畫面的動作都要走這裡
+// 儀表板初值（開站、側欄「儀表板」、引導卡底下鋪的那張三處共用，才不會漂）
+const freshDash = () => ({ data: null, usageView: 'flow', open: {}, promptView: null, usageOpen: false, showAll: false, calendar: null });
 function closeDash() {
   if (!state.dash) return;
   clearTimeout(state.dashPollTimer);
@@ -3930,15 +3994,17 @@ function closeDash() {
 async function loadDash() {
   const d = state.dash;
   if (!d) return;
-  const [data, todos, notices, calendar] = await Promise.all([
+  const [data, todos, notices, calendar, manual] = await Promise.all([
     api('GET', '/api/dashboard?limit=12&days=30'),
     api('GET', '/api/todos'),
     api('GET', '/api/notices'),
     api('GET', `/api/calendar?month=${ymOf(new Date())}`).catch(() => null), // U5「接下來的安排」：讀不到＝null，那塊印一句，不擋儀表板
+    api('GET', '/api/memory/manual').catch(() => null), // 初次體驗輪：說明書現況（頂端提醒行「說明書還沒寫」判這個）；讀不到＝不提醒
   ]);
   if (!state.dash) return; // 載入途中已離開
   d.data = data;
   d.calendar = calendar;
+  state.introManual = manual;
   state.recent = Array.isArray(data?.recent) ? data.recent : state.recent; // 樹的狀態點跟儀表板看同一份
   state.todos = todos.items;
   applyNotices(notices);
@@ -3946,7 +4012,7 @@ async function loadDash() {
 
 function dashPoll() {
   clearTimeout(state.dashPollTimer);
-  if (!state.dash) return;
+  if (!state.dash || state.demo) return; // 模擬導覽期間不輪詢（零 API）；正在等回應的那一輪回來也不再排下一輪，導覽結束 demoEnd 會重啟
   state.dashPollTimer = setTimeout(async () => {
     try {
       await loadDash();
@@ -4140,6 +4206,7 @@ function dashHtml() {
   const head = (title, right = '') => `<div class="section-head"><h2>${title}</h2>${right}</div>`;
   return `<div class="dashpage">
     ${pageHeadHtml('工作，逐件有進展。', sub, '<button class="btn" data-act="new-flow">＋ 建立新 Workflow</button>')}
+    ${introRemindHtml()}
     <div class="homegrid">
     <section class="homemain">
       <section class="panel panel-wait">
@@ -4529,34 +4596,491 @@ async function loadCategoryPage() {
   cp.err = null;
 }
 
-// ---------- （M2）：首次三題介紹、一行通知 ----------
-// 三題（順序與層級跟後端 INTRO_QUESTIONS 一致）：前兩題按場合帶、第三題每步帶。答案原文就是卡的內容
-const INTRO_QUESTIONS = [
-  { key: 'who', label: '你是誰、做什麼', ex: '例：小公司負責人，看不懂程式，要用比喻講', layer: 'content' },
-  { key: 'audience', label: '你做出來的東西通常給誰看', ex: '例：大多給主管或客戶看，偶爾自己用', layer: 'content' },
-  { key: 'dislike', label: '你最受不了什麼', ex: '例：長篇鋪陳、看不懂的術語', layer: 'expression' },
-];
-const introInputId = (key) => `intro-${key}`;
-const introAnswers = () => Object.fromEntries(INTRO_QUESTIONS.map((q) => [q.key, (kept(introInputId(q.key)) ?? document.getElementById(introInputId(q.key))?.value ?? '').trim()]));
+// ---------- 初次體驗輪（US-114／US-115）：第一次打開的三步引導卡——連線 › 你的說明書 › 帶你走一次 ----------
+// state.intro＝{step:1|2|3, ...}；三步換內容不換頁，蓋在儀表板前。第 1 步看 state.claude（/api/health）；
+// 第 2 步問答走 /api/memory/manual 四個端點（round1 固定三題→第 2、3 輪它出題→寫五段草稿→逐行改→存）；
+// 第 3 步這輪只放佔位（模擬導覽由後續工單換上）。每步都能「先略過」；略過或做完＝introFinish 回儀表板，儀表板頂端由 introRemindHtml 留提醒行
+const INTRO_STEPS = ['連線', '你的說明書', '帶你走一次'];
+const MANUAL_LAYER_TXT = { content: '按場合帶', expression: '每步帶' };
+const MANUAL_ROUNDS_MAX = 3; // 後端 rounds_max／per_round_max 的預設複本（GET manual 讀到就以它為準）
+const MANUAL_PER_ROUND_MAX = 3;
+const TOUR_DONE_KEY = 'bojian.tourDone'; // 本機記「模擬導覽走過沒」（導覽工單走完時寫 '1'）；讀不到（隱私模式）＝沒走過
+const tourDone = () => { try { return localStorage.getItem(TOUR_DONE_KEY) === '1'; } catch { return false; } };
+const introAnsId = (q) => `intro-a-${q.id}`;
+const introLineId = (ln) => `intro-ln-${ln.lid}`;
+let introLid = 0; // 草稿每行一個不變的號碼——刪行不動其他行的 data-keep 鍵
+const introLayerOf = (it, key) => it.meta?.find((s) => s.key === key)?.layer ?? (key === 'who' ? 'content' : 'expression');
+
+// 進第 N 步：第 2 步先讀題（GET manual），其餘直接換內容。舊 timer（第 1 步的一秒）一律清掉
+function introGo(step) {
+  clearTimeout(state.intro?.timer);
+  state.intro = step === 2
+    ? { step: 2, phase: 'load', round: 1, roundsMax: MANUAL_ROUNDS_MAX, perRoundMax: MANUAL_PER_ROUND_MAX, questions: [], transcript: [], rounds: {}, draft: null, meta: null, err: null, inflight: false, doneWritten: false }
+    : { step, doneWritten: state.intro?.doneWritten === true };
+  if (step === 2) introLoadManual();
+}
+// 引導卡蓋在儀表板上：底下沒有儀表板就先鋪一張（引導結束直接落在儀表板，不會掉進空白）
+function dashUnderIntro() {
+  if (state.dash) return;
+  closeSettings(); closeAssets(); closeCalendar(); closeCategory();
+  stashWorkspace();
+  state.run = null;
+  state.showTrash = false;
+  state.importPreview = null;
+  state.dash = freshDash();
+  loadDash().then(() => { if (!state.intro) render(); }).catch(() => {});
+  dashPoll();
+}
+async function introLoadManual() {
+  const it = state.intro;
+  try {
+    const m = await api('GET', '/api/memory/manual');
+    if (state.intro !== it) return;
+    it.roundsMax = m.rounds_max ?? MANUAL_ROUNDS_MAX;
+    it.perRoundMax = m.per_round_max ?? MANUAL_PER_ROUND_MAX;
+    it.meta = (m.sections ?? []).map((s) => ({ key: s.key, label: s.label, layer: s.layer }));
+    it.questions = (m.round1 ?? []).slice(0, it.perRoundMax).map((q) => ({ ...q, why: '' }));
+    it.round = 1;
+    it.phase = 'ask';
+    it.err = null;
+  } catch (e) {
+    if (state.intro !== it) return;
+    it.phase = 'loadfail';
+    it.err = `題目讀不到：${e.message}`;
+  }
+  render();
+}
+// 這一輪框裡的字（打到一半由 data-keep 放回）；空的＝跳過，不進紀錄
+const introAnswerOf = (q) => (kept(introAnsId(q)) ?? document.getElementById(introAnsId(q))?.value ?? '').trim();
+const introTranscriptNow = (it) => [...it.transcript, ...it.questions.map((q) => ({ round: it.round, q: q.q, section: q.section, a: introAnswerOf(q) })).filter((t) => t.a)];
+const introDropAnswerKeep = (it) => { for (const q of it.questions) delete state.keep[keepKey(introAnsId(q))]; };
+const introDropLineKeep = (it) => { for (const s of it.draft ?? []) for (const ln of s.lines) delete state.keep[keepKey(introLineId(ln))]; };
+// 「下一輪」：把這輪答案收進紀錄→POST round 出下一輪題。每一輪只打一次：出過的輪存 it.rounds[n]（重繪、再點都不重打）；
+// 等回覆期間 inflight 擋連點；只有失敗（沒存進 rounds）再按才會重打。回 done＝五段都夠→直接寫草稿
+async function introNextRound() {
+  const it = state.intro;
+  if (!it || it.step !== 2) return;
+  if (it.inflight) return;
+  const next = it.round + 1;
+  if (next > it.roundsMax) return introDraft();
+  const transcript = introTranscriptNow(it);
+  const cached = it.rounds[next];
+  if (cached) {
+    introDropAnswerKeep(it);
+    it.transcript = transcript;
+    it.round = next;
+    it.questions = cached.questions;
+    it.phase = 'ask';
+    it.err = null;
+    render();
+    return;
+  }
+  it.inflight = true;
+  it.phase = 'thinking';
+  it.err = null;
+  render();
+  try {
+    const out = await api('POST', '/api/memory/manual/round', { round: next, transcript });
+    if (state.intro !== it) return;
+    it.inflight = false;
+    introDropAnswerKeep(it);
+    it.transcript = transcript;
+    if (out.done || !(out.questions ?? []).length) {
+      it.questions = [];
+      it.rounds[next] = { questions: [], done: true };
+      return introDraft();
+    }
+    it.rounds[next] = { questions: out.questions.slice(0, it.perRoundMax) };
+    it.round = next;
+    it.questions = it.rounds[next].questions;
+    it.phase = 'ask';
+  } catch (e) {
+    if (state.intro !== it) return;
+    it.inflight = false;
+    it.phase = 'ask';
+    it.err = `它出不了下一輪的題：${e.message}`;
+  }
+  render();
+}
+// 「夠了，先寫草稿」／第三輪答完／round 回 done：POST draft→五段草稿編輯器。失敗停在原地一行原因，答案還在框裡可再按
+async function introDraft() {
+  const it = state.intro;
+  if (!it || it.step !== 2) return;
+  if (it.inflight) return;
+  const transcript = introTranscriptNow(it);
+  it.inflight = true;
+  it.phase = 'drafting';
+  it.err = null;
+  render();
+  try {
+    const out = await api('POST', '/api/memory/manual/draft', { transcript });
+    if (state.intro !== it) return;
+    it.inflight = false;
+    introDropAnswerKeep(it);
+    it.transcript = transcript;
+    it.questions = [];
+    it.draft = (out.sections ?? []).map((s) => ({
+      key: s.key, label: s.label ?? it.meta?.find((m) => m.key === s.key)?.label ?? s.key, layer: introLayerOf(it, s.key),
+      lines: (s.lines ?? []).map((l) => ({ lid: ++introLid, text: String(l.text ?? ''), round: Number.isInteger(l.round) ? l.round : null })),
+    }));
+    it.phase = 'draft';
+  } catch (e) {
+    if (state.intro !== it) return;
+    it.inflight = false;
+    it.phase = it.questions.length ? 'ask' : 'draftfail';
+    it.err = `草稿沒寫成：${e.message}`;
+  }
+  render();
+}
+// 草稿編輯器：框裡的字（data-keep）先收回 state 再動結構（刪行／加行／存），重繪才不會把改到一半的字洗掉
+function introSyncDraft(it) {
+  for (const s of it.draft ?? []) for (const ln of s.lines) { const v = kept(introLineId(ln)) ?? document.getElementById(introLineId(ln))?.value; if (v != null) ln.text = v; }
+}
+// 「存成我的說明書，下一步」：POST save（空行不送）→寫了 intro_done→第 3 步。失敗停在編輯器一行原因，字都還在
+async function introSave() {
+  const it = state.intro;
+  if (!it || it.step !== 2) return;
+  if (it.inflight) return;
+  introSyncDraft(it);
+  const sections = it.draft.map((s) => ({ key: s.key, lines: s.lines.map((l) => ({ text: l.text.trim(), ...(l.round ? { round: l.round } : {}) })).filter((l) => l.text) }));
+  it.inflight = true;
+  it.phase = 'saving';
+  it.err = null;
+  render();
+  try {
+    await api('POST', '/api/memory/manual/save', { sections });
+    if (state.intro !== it) return;
+    introDropLineKeep(it);
+    state.introManual = null; // 儀表板提醒行重讀
+    it.doneWritten = true;
+    introGo(3);
+  } catch (e) {
+    if (state.intro !== it) return;
+    it.inflight = false;
+    it.phase = 'draft';
+    it.err = `沒存成：${e.message}`;
+  }
+  render();
+}
+// 第 2 步「先略過」：POST intro skip（寫 intro_done、零張卡）→第 3 步。失敗停在原地一行原因
+async function introSkipManual() {
+  const it = state.intro;
+  if (!it || it.step !== 2) return;
+  if (it.inflight) return;
+  const was = it.phase;
+  it.inflight = true;
+  it.phase = 'skipping';
+  it.err = null;
+  render();
+  try {
+    await api('POST', '/api/memory/intro', { skip: true });
+    if (state.intro !== it) return;
+    introDropAnswerKeep(it);
+    introDropLineKeep(it);
+    it.doneWritten = true;
+    introGo(3);
+  } catch (e) {
+    if (state.intro !== it) return;
+    it.inflight = false;
+    it.phase = was;
+    it.err = `沒略過成：${e.message}`;
+  }
+  render();
+}
+// 結束引導（第 3 步「開始」／「先略過」，或從儀表板入口進來的單步）：還沒寫過 intro_done 就補寫（skip 路徑）；回儀表板並重讀
+async function introFinish() {
+  const it = state.intro;
+  if (!it) return;
+  clearTimeout(it.timer);
+  if (!it.doneWritten) {
+    try { await api('POST', '/api/memory/intro', { skip: true }); } catch { /* 寫不進去就下次再問，不擋人 */ }
+  }
+  if (state.intro !== it) return;
+  state.intro = null;
+  state.introManual = null;
+  render();
+  if (state.dash) { try { await loadDash(); } catch { /* 首屏載不到照開 */ } render(); }
+}
 
 function introHtml() {
   const it = state.intro;
-  const rows = INTRO_QUESTIONS.map((q) => `<div class="q"><div class="flabel">${q.label}</div><div class="ex">${esc(q.ex)}</div>
-      <input id="${introInputId(q.key)}" data-keep value="${esc(kept(introInputId(q.key)) ?? '')}" ${it.saving ? 'disabled' : ''}></div>`).join('');
-  const willbe = INTRO_QUESTIONS.map((q) => `<li><span class="chip ${q.layer === 'expression' ? 'violet' : 'blue'}">${q.layer === 'expression' ? '每步帶' : '按場合帶'}</span><span>${q.label}</span></li>`).join('');
-  return `<div class="intro">
-    <div class="overline">第一次打開</div>
-    <h3>先讓它認識你，三題，可以跳過</h3>
-    <div class="sub">答了直接成三張「認識卡」，之後每次拆 Workflow、每一步指示都帶著。之後在設定的記憶頁隨時可以改、可以刪，不會再問你一次。</div>
-    ${rows}
-    <div class="willbe"><div class="overline">會記成</div><ul>${willbe}</ul></div>
-    <p class="note">健康、政治、宗教、財務這四類它不會記，除非你在設定裡打開。</p>
-    <div class="btns" style="margin-top:14px;align-items:center">
-      <button class="btn btn-primary" data-act="intro-save" ${it.saving ? 'disabled' : ''}><i class="ph ph-check"></i>${it.saving ? '記著⋯' : '儲存'}</button>
-      <button class="btn btn-ghost" data-act="intro-skip" ${it.saving ? 'disabled' : ''}>先略過</button>
-      ${it.err ? `<span class="note" style="margin:0;color:var(--red-text)">${esc(it.err)}</span>` : ''}
+  const prog = INTRO_STEPS.map((t, i) => { const n = i + 1; return `<span class="${n < it.step ? 'done' : n === it.step ? 'on' : ''}"><i class="b">${n < it.step ? '✓' : n}</i>${t}</span>`; }).join('<i class="sep">›</i>');
+  const body = it.step === 1 ? introStep1Html(it) : it.step === 2 ? introStep2Html(it) : introStep3Html(it);
+  return `<div class="intro" data-step="${it.step}"><div class="prog">${prog}</div>${body}</div>`;
+}
+// 第 1 步三態（參考物 1-a／1-b）：連上→找到了、一秒後自動進第 2 步（timer 只排一次，重繪不重排）；沒連上→三件事＋重新檢查＋先略過；還在查→骨架
+function introStep1Html(it) {
+  const lead = '<h3>剝繭掛在你自己的 Claude 上跑</h3><p class="sub">不另外付 AI 的錢、資料全在你電腦。先確認它找得到你的 Claude Code。</p>';
+  if (state.claude === true) {
+    if (!it.timer) it.timer = setTimeout(() => { if (state.intro === it && it.step === 1) { introGo(2); render(); } }, 1000);
+    return `${lead}<div class="okbox"><i class="ph-fill ph-check-circle"></i><span><b>找到了：Claude Code 裝好了、叫得到</b><br><span class="note">一秒後自動進下一步</span></span></div>`;
+  }
+  if (state.claude === false) {
+    return `${lead}<div class="badbox"><b>找不到 Claude Code（終端機叫不到 claude，桌面版資料夾裡也沒有）</b>照下面三件做完，按「重新檢查」。</div>
+      <ul class="steps">
+        <li><span class="n">1</span><span>裝 Claude Code<small>claude.com/claude-code，桌面版或終端機版都可以</small></span></li>
+        <li><span class="n">2</span><span>登入你的 Claude 帳號<small>剝繭用的就是這個帳號的額度</small></span></li>
+        <li><span class="n">3</span><span>回到這裡按「重新檢查」<small>裝在非標準位置的，設定頁可以指定路徑</small></span></li>
+      </ul>
+      <div class="btns acts"><button class="btn btn-primary" data-act="intro-recheck"><i class="ph ph-arrows-clockwise"></i>重新檢查</button><button class="btn btn-ghost" data-act="intro-skip">先略過（第 3 步是模擬的，照樣能走）</button></div>`;
+  }
+  return `${lead}<div class="skel" style="height:56px"></div><p class="note">正在找你的 Claude Code⋯</p>`;
+}
+// 第 2 步：問答（2-a／2-b）→草稿編輯器（2-c）
+function introStep2Html(it) {
+  if (it.phase === 'draft' || it.phase === 'saving') return introDraftHtml(it);
+  if (it.phase === 'load') return '<h3>讓它認識你：最多三輪，每輪三題</h3><div class="skel" style="height:120px"></div>';
+  if (it.phase === 'loadfail') return `<h3>讓它認識你：最多三輪，每輪三題</h3><div class="badbox">${esc(it.err ?? '題目讀不到')}</div>
+    <div class="btns acts"><button class="btn btn-primary" data-act="intro-reload"><i class="ph ph-arrows-clockwise"></i>再讀一次</button><button class="btn btn-ghost" data-act="intro-skip">先略過</button></div>`;
+  if (it.phase === 'draftfail') return `<h3>讓它認識你：最多三輪，每輪三題</h3><div class="badbox">${esc(it.err ?? '草稿沒寫成')}</div>
+    <div class="btns acts"><button class="btn btn-primary" data-act="intro-draft"><i class="ph ph-arrows-clockwise"></i>再寫一次</button><button class="btn btn-ghost" data-act="intro-skip">先略過</button></div>`;
+  const busy = it.inflight;
+  const dis = busy ? ' disabled' : '';
+  const last = it.round >= it.roundsMax;
+  const head = it.round === 1
+    ? '<h3>讓它認識你：最多三輪，每輪三題</h3><p class="sub">答完它會寫成一份「怎麼跟我合作」的說明書，之後每一步都照著。用講的答就好，不用整齊。</p>'
+    : `<h3>再問${['零', '一', '兩', '三'][it.questions.length] ?? it.questions.length}題，把還沒講清楚的補上</h3><p class="sub">前面答過的段落不再問；下面只針對還空或還模糊的段。</p>`; // 照實際題數印（它常只出 2 題）
+  const rows = it.questions.map((q, i) => `<div class="q"><div class="lab">${i + 1}. ${esc(q.q)}${q.why ? `<small>${esc(q.why)}</small>` : ''}</div>
+      <textarea id="${introAnsId(q)}" class="notein autogrow" rows="2" data-keep placeholder="用講的就好⋯（留空＝跳過這題）"${dis}>${esc(kept(introAnsId(q)) ?? '')}</textarea></div>`).join('');
+  const wait = it.phase === 'thinking' ? '<span class="note waiting"><i class="ph ph-circle-notch spin"></i>它在想下一輪要問什麼⋯</span>'
+    : it.phase === 'drafting' ? '<span class="note waiting"><i class="ph ph-circle-notch spin"></i>它在把你的答案寫成說明書⋯</span>'
+      : it.phase === 'skipping' ? '<span class="note waiting">略過中⋯</span>' : '';
+  return `${head}${rows}
+    <div class="btns acts">
+      ${last ? `<button class="btn btn-primary" data-act="intro-draft"${dis}><i class="ph ph-pencil-line"></i>答完了，寫草稿</button>`
+    : `<button class="btn btn-primary" data-act="intro-next"${dis}>下一輪 ›</button><button class="btn btn-ghost" data-act="intro-draft"${dis}>夠了，先寫草稿</button>`}
+      <button class="btn btn-ghost" data-act="intro-skip"${dis}>先略過</button>
+      <span class="note">第 ${it.round} 輪／最多 ${it.roundsMax} 輪${it.round > 1 ? '・這輪題目是它出的' : ''}</span>${wait}
+      ${it.err ? `<span class="note err">${esc(it.err)}</span>` : ''}
+    </div>`;
+}
+// 草稿編輯器（2-c）：五段各標帶法、每行一個框（data-keep）標「第 N 輪」可刪、每段可加一行；存成我的說明書／再問我一輪（還沒到第三輪才有）
+function introDraftHtml(it) {
+  const busy = it.inflight;
+  const dis = busy ? ' disabled' : '';
+  const secs = (it.draft ?? []).map((s) => {
+    const lines = s.lines.map((ln) => `<div class="ln"><input id="${introLineId(ln)}" class="notein" data-keep value="${esc(kept(introLineId(ln)) ?? ln.text)}" placeholder="一句可以直接照做的話" maxlength="200"${dis}>
+        ${ln.round ? `<span class="chip quiet">第 ${ln.round} 輪</span>` : '<span class="chip quiet">自己加的</span>'}<button type="button" class="mini no" data-act="intro-ln-del" data-lid="${ln.lid}" title="整行刪掉"${dis}>刪</button></div>`).join('');
+    return `<div class="h">${esc(s.label)}<span class="chip ${s.layer === 'content' ? 'blue' : 'violet'}">${MANUAL_LAYER_TXT[s.layer] ?? '每步帶'}${s.key === 'redline' ? '・查核逐條對' : ''}</span></div>
+      ${lines || '<div class="ln ph">這段還沒有內容，可以加一行</div>'}
+      <div class="ln add"><button type="button" class="mini" data-act="intro-ln-add" data-key="${esc(s.key)}"${dis}>＋ 加一行</button></div>`;
+  }).join('');
+  return `<p class="sub">照你的回答寫成的。哪行不對點進去改，整行刪也可以；之後在設定 › 記憶隨時改。</p>
+    <div class="doc">${secs}</div>
+    <div class="btns acts">
+      <button class="btn btn-primary" data-act="intro-save"${dis}><i class="ph ph-check"></i>${it.phase === 'saving' ? '存著⋯' : '存成我的說明書，下一步 ›'}</button>
+      ${it.round < it.roundsMax ? `<button class="btn btn-ghost" data-act="intro-next"${dis}>再問我一輪</button>` : ''}
+      <button class="btn btn-ghost" data-act="intro-skip"${dis}>先略過</button>
+      <span class="note">健康、政治、宗教、財務不記</span>
+      ${it.err ? `<span class="note err">${esc(it.err)}</span>` : ''}
+    </div>`;
+}
+// 第 3 步：這輪只放佔位——「開始」先直接結束引導（模擬導覽由後續工單換上）
+function introStep3Html() {
+  return `<h3>帶你走一次</h3><p class="sub">用一條範例 Workflow、預錄的假資料，一張卡一張卡看它怎麼跑、怎麼停下來給你看、你改一句後面怎麼守。不用你的額度。</p>
+    <div class="btns acts"><button class="btn btn-primary" data-act="intro-tour-start"><i class="ph-fill ph-play"></i>開始</button><button class="btn btn-ghost" data-act="intro-skip">先略過</button></div>`;
+}
+// 儀表板頂端的提醒行（略過的第 2、3 步）：說明書五段全空→「說明書還沒寫」附「去寫」；本機沒記導覽走過→「還沒走過一次」附「走一次」；做完消失。
+// 說明書現況由 loadDash 順手讀（state.introManual）；讀不到＝不亂提醒
+function introRemindHtml() {
+  const m = state.introManual;
+  const noManual = !!m && !(m.sections ?? []).some((s) => (s.lines ?? []).length);
+  const rows = [];
+  if (noManual) rows.push('<div class="introremind" data-remind="manual"><i class="ph ph-book-open-text"></i><span>說明書還沒寫——它還不知道怎麼跟你合作</span><button class="btn sm2" data-act="intro-open" data-step="2">去寫</button></div>');
+  if (!tourDone()) rows.push('<div class="introremind" data-remind="tour"><i class="ph ph-footprints"></i><span>還沒走過一次——用假資料看它怎麼跑，不用額度</span><button class="btn sm2" data-act="intro-open" data-step="3">走一次</button></div>');
+  return rows.join('');
+}
+
+// ---------- 模擬導覽（US-116，參考物 PROTO/初次體驗輪-三步引導-草稿.html 第 3 步 3-a～3-d＋六張卡表） ----------
+// 第 3 步「開始」→用示範趟（ui/demo-run.js，寫死的假資料）在真正的執行頁版面上演六張卡：頂端深色導覽列一張一張帶，
+// 「下一張」才往下、隨時「跳過」；右上全程掛「模擬」。全程零 API：點擊分派先擋非導覽動作（DEMO_ACTS）、mdBlock／健檢／輪詢都不打。
+// 停點那張真的讓他打一句（打什麼都行、空著也能過），後面兩步的卡標「守：那句」；第 4 步演「攔到→重做 1 次→過」。
+// 結束（走完）＝本機記導覽走過＋introFinish（補寫 intro_done、回儀表板）；跳過＝只 introFinish，不記走過（儀表板提醒行留著）。
+// 重新整理＝回儀表板、不記半途（狀態只在記憶體）。
+const DEMO_ACTS = new Set([
+  'coach-next', 'coach-pass', 'coach-skip', 'coach-finish', 'demo-new-flow', 'demo-real-run', // 導覽動作
+  'run-inspect', 'run-current', 'side-toggle', 'md-toggle', 'sup-toggle', 'mem-toggle', // 純看的：左軌、右欄開合、看原文
+  'open-reader', 'reader-close', 'reader-back', 'reader-prev', 'reader-next', 'ov-cite', 'ov-record', 'edit-rules-open', 'edit-rules-cancel', // 閱讀面板、總覽出處
+]);
+const DEMO_GUARDED = ['analyze', 'compose']; // 停點之後的兩步：卡上標「守：那句」
+const DEMO_CLICK_GAP = 350; // 連點「下一張」不跳兩張：兩次換卡至少隔這麼久
+const demoData = () => (typeof window !== 'undefined' ? window.BJDemo : null) ?? null;
+const demoGuardText = (d) => (d?.guard ? d.guard : '（你沒打）');
+// 六張卡：n＝第幾張、text＝導覽列那句（第 4 張依他打沒打而不同）、next＝「下一張」鈕的字
+const DEMO_CARDS = [
+  { n: 1, key: 'form', text: '這是一條現成的 Workflow。開跑前先填這幾格，每次可以不一樣。這趟是模擬，不用你的額度。' },
+  { n: 2, key: 'step1', text: '第 1 步做完了。右邊「查核」那格：它把成品裡 12 個數字逐一對回原始資料，全對上才放行——每一步做完都有人對。' },
+  { n: 3, key: 'stop', text: '它停下來給你看了。在下面打一句要改的（例如「金額加千分位」），後面每一步都會守。打什麼都行，空著也能過。', next: '打完再下一張' },
+  { n: 4, key: 'guard', text: (d) => (d.guard ? `你打的「${esc(d.guard)}」變成後面每步的規矩了——第 3 步的卡上標著「守：${esc(d.guard)}」。` : '你沒打，也能過。真跑時打一句，後面每步的卡上就會標「守：那句」，查核也把它當必守。') },
+  { n: 5, key: 'redo', text: '第 4 步查核員攔到一個數字不對（9 月營收寫成 1,456,798，原始資料是 1,456,789），自動重做了一次才過。錯的東西交不出去。' },
+  { n: 6, key: 'done', text: '走完了，這趟沒用你的額度。真跑會等幾分鐘、內容會不同，但停點、查核、改一句後面都守——都一樣。' },
+];
+// 把示範趟切成「跑到第幾步」：第 2 張只做完第 1 步、第 3 張第 2 步停著等他、第 4 張做完第 3 步、第 5 張做完第 4 步、第 6 張全部跑完
+function demoRunFor(card, guard) {
+  const base = demoData()?.run;
+  if (!base) return null;
+  const run = JSON.parse(JSON.stringify(base));
+  const order = run.def.nodes.map((n) => n.id);
+  const doneN = { 2: 1, 3: 2, 4: 3, 5: 4 }[card] ?? order.length;
+  order.forEach((id, i) => { if (i >= doneN) run.steps[id] = { status: 'pending' }; });
+  run.started_at = state.demo?.at0 ?? run.started_at;
+  if (card === 3) { run.steps.organize.status = 'waiting_review'; run.status = 'paused'; }
+  else run.status = card >= 6 ? 'done' : 'running';
+  if (card < 6) { run.finished_at = null; delete run.record; delete run.overview; }
+  else { run.finished_at = run.started_at; if (run.overview) run.overview.at = run.started_at; } // 跑完時刻跟開跑同一刻（示範沒有真的等；不硬掰時長）
+  if (card >= 4 && guard) run.steps.organize.edit_rules = [{ text: guard, scope: 'all' }]; // 他打的那句＝第 2 步的「後面每步會守」
+  return run;
+}
+// 第 3 步「開始」：進導覽第 1 張。儀表板輪詢先停（導覽期間零 API），結束時恢復
+function demoStart() {
+  clearTimeout(state.dashPollTimer);
+  state.dashPollTimer = null;
+  stopPoll();
+  state.demo = { card: 1, guard: '', at: 0, at0: new Date().toISOString() };
+  demoGo(1);
+}
+function demoGo(card) {
+  const d = state.demo;
+  if (!d) return;
+  d.card = card;
+  d.at = Date.now();
+  state.run = card === 1 ? null : demoRunFor(card, d.guard);
+  state.runInspect = null;
+  state.runInspectLive = null;
+  state.reader = null;
+  state.editingNode = null;
+  state.editRulesOpen = null;
+  if (card === 5) state.sideOpen.attempts = true; // 第 5 張：右欄「每次交卷」打開，看得到第一次被攔
+  render();
+  // 換卡回到頁頂（捲的是 document；導覽列 sticky 在最上面，用 scrollIntoView 會把標題壓在導覽列底下）
+  if (typeof document !== 'undefined' && document.documentElement) { document.documentElement.scrollTop = 0; if (document.body) document.body.scrollTop = 0; }
+}
+// 「下一張」／停點卡「照這句往下」：第 3 張先收他打的那句；pass＝「不改，直接過」不帶那句。連點只走一張
+function demoNext({ pass = false } = {}) {
+  const d = state.demo;
+  if (!d) return;
+  if (Date.now() - d.at < DEMO_CLICK_GAP) return;
+  if (d.card === 3) {
+    d.guard = pass ? '' : String(kept('demo-say') ?? document.getElementById('demo-say')?.value ?? '').trim().slice(0, 60);
+    delete state.keep[keepKey('demo-say')];
+  }
+  if (d.card >= 6) return demoEnd(true);
+  demoGo(d.card + 1);
+}
+// 結束：done＝走完（記導覽走過）；跳過不記（儀表板「還沒走過一次」留著）。兩者都回 introFinish（補寫 intro_done、回儀表板重讀）
+async function demoEnd(done) {
+  if (!state.demo) return;
+  if (done) { try { localStorage.setItem(TOUR_DONE_KEY, '1'); } catch { /* 隱私模式記不住就下次再提醒 */ } }
+  delete state.keep[keepKey('demo-say')];
+  state.demo = null;
+  state.run = null;
+  state.runInspect = null;
+  state.runInspectLive = null;
+  state.reader = null;
+  state.editingNode = null;
+  await introFinish();
+  dashPoll();
+}
+// 「真的跑一次這條範例」：打開範例流程的本次資料分頁，開始由他自己按（會用額度，鈕上有寫）
+async function demoOpenExample() {
+  try {
+    if (await openWorkflow('範例', 'quarterly-report') === false) return;
+    state.flowTab = 'data';
+    render();
+  } catch (e) { toast(`範例 Workflow 打不開：${e.message}`, 'bad'); }
+}
+function demoHtml() {
+  const d = state.demo;
+  const c = DEMO_CARDS[d.card - 1] ?? DEMO_CARDS[0];
+  const body = d.card === 1 ? demoFormHtml() : state.run ? runHtml() : '<div class="panel"><p class="note">示範資料讀不到（demo-run.js 沒載到）</p></div>';
+  return `${coachHtml(c, d)}<div class="demo" data-demo-card="${d.card}">${body}</div><span class="simtag">模擬</span>`;
+}
+// 頂端深色導覽列：模擬 N／6・那句・下一張／跳過（最後一張只有「結束」）
+function coachHtml(c, d) {
+  const text = typeof c.text === 'function' ? c.text(d) : c.text;
+  const btns = c.n >= 6
+    ? '<button class="btn go" data-act="coach-finish">結束</button>'
+    : `<button class="btn go" data-act="coach-next">${esc(c.next ?? '下一張 ›')}</button><button class="btn" data-act="coach-skip">跳過</button>`;
+  return `<div class="coach" role="status" aria-live="polite"><span class="k">模擬 ${c.n}／6</span><span class="grow">${text}</span>${btns}</div>`;
+}
+// 第 1 張：開跑表單（參考物 3-a）——三個欄位亮起來、開跑健檢、「開始（模擬）」
+function demoFormHtml() {
+  const run = demoData()?.run;
+  if (!run) return '<div class="panel"><p class="note">示範資料讀不到（demo-run.js 沒載到）</p></div>';
+  const def = run.def;
+  const stops = def.nodes.filter((n) => n.stop_point === 'always' && n.executor !== 'human').length;
+  const rows = def.params.map((p) => `<div class="row"><span class="nm">${esc(p.label)}</span><strong>${esc(run.params[p.key] ?? p.default ?? '')}</strong></div>`).join('');
+  return `<div class="page-head"><div><h1>${esc(def.name)} <span class="chip violet simchip">模擬</span></h1><p>${def.nodes.length} 個步驟・${stops} 個停點</p></div></div>
+    <div class="demoform">
+      <section class="panel" data-coach="params"><h3>填寫這次的值</h3>${rows}<p class="note">這趟要填的三格，預設已經有值；每次開跑都可以不一樣。</p></section>
+      <section class="panel"><h3>開跑健檢 <span class="chip quiet"><i class="ph-fill ph-check-circle"></i>資料已備齊</span></h3><p class="note">${def.nodes.length} 個步驟已準備</p></section>
+      <div class="btns"><button class="btn btn-primary" data-act="coach-next"><i class="ph-fill ph-play"></i>開始（模擬）</button></div>
+    </div>`;
+}
+// 第 3 張的停點卡：同一張卡的結構（做好了給你過目→產出），但按鈕換成「打一句」：照這句往下／不改，直接過（真的三顆鈕不出現）
+function demoStopCardHtml(node, step) {
+  const key = `stop:${node.id}`;
+  return `<div class="card hold" style="margin:10px 0">
+    <b>「${esc(node.title)}」做好了，給你過目</b>
+    ${node.review_focus ? `<div class="sub" style="margin:6px 0"><i class="ph ph-list-magnifying-glass"></i> 檢查重點：${esc(node.review_focus)}</div>` : ''}
+    <div class="outbar">${mdToggleHtml(key)}</div>
+    ${mdBlock(step.output, key)}
+    ${memoryUsedHtml(node, step)}
+    <div class="flabel" data-coach="say">要改什麼？一句話，例：金額加千分位（打什麼都行，空著也能過）</div>
+    <input id="demo-say" class="notein" data-keep maxlength="60" placeholder="例：金額加千分位" value="${esc(kept('demo-say') ?? state.demo?.guard ?? '')}">
+    <div class="btns" style="margin-top:8px">
+      <button class="btn btn-primary" data-act="coach-next">照這句往下</button>
+      <button class="btn btn-secondary" data-act="coach-pass">不改，直接過</button>
     </div>
   </div>`;
+}
+// 停點之後兩步的卡標「守：他打的那句」（沒打＝「守：（你沒打）」也放行）
+function demoGuardChipHtml(node) {
+  if (!state.demo || !DEMO_GUARDED.includes(node?.id)) return '';
+  return `<span class="chip violet coachguard"><i class="ph ph-shield-check"></i>守：${esc(demoGuardText(state.demo))}</span>`;
+}
+// 右欄「查核」那格（參考物 3-b 右欄）：數字對原始資料 N／M、必守幾條；第 4 步講「第 1 次攔到→重做→第 2 次全對上」
+function demoCheckHtml(node, step) {
+  const items = Array.isArray(step?.check?.items) ? step.check.items : [];
+  const ok = items.filter((i) => i.verdict === 'ok').length;
+  const musts = Array.isArray(node?.constraints) ? node.constraints.length : 0;
+  let body;
+  if (node?.executor === 'human') body = '<p class="note">這步由你處理，不查核</p>';
+  else if (!step?.check) body = '<p class="note">還沒查</p>';
+  else if (step.check.status === 'redone') {
+    const first = step.check.first_blocks?.length ?? (step.attempts?.[0]?.check?.blocks?.length ?? 1);
+    body = `<p>第 1 次交卷：攔到 ${first} 個數字 → 自動重做</p><p>第 2 次：數字對原始資料 <b>${ok}／${items.length}</b> 對上</p>`;
+  } else body = `<p>數字對原始資料 <b>${ok}／${items.length}</b> 對上</p>${musts ? `<p>必守 ${musts} 條都有</p>` : ''}`;
+  return `<div class="democheck" data-coach="check"><b><i class="ph-fill ph-shield-check"></i>查核</b>${body}</div>`;
+}
+// 第 6 張：成品（示範）兩檔——「看」開第 4 步的閱讀面板（示範沒有真檔可下載）
+function demoArtifactsHtml() {
+  const list = demoData()?.artifacts ?? [];
+  const rows = list.map((a) => `<div class="row"><i class="ph ${FILE_ICON[String(a.name).split('.').pop().toLowerCase()] ?? 'ph-file-text'}"></i><span class="nm">${esc(a.name)}</span><span class="sum">${esc(a.note ?? '')}</span><button type="button" class="btn sm2" data-act="open-reader" data-node="${esc(a.node ?? 'compose')}">看</button></div>`).join('');
+  return `<div class="card demoart"><b>成品（示範）</b>${rows}</div>`;
+}
+// 第 6 張：換你的事——建自己的第一條／真的跑一次這條範例（會用額度）
+function demoYourTurnHtml() {
+  return `<div class="card hold demoturn" data-coach="yourturn"><b>換你的事</b>
+    <p class="sub" style="margin:6px 0 0">這趟沒用你的額度。真跑會等幾分鐘、內容會不同，停點與查核一樣。</p>
+    <div class="btns" style="margin-top:10px">
+      <button class="btn btn-primary" data-act="demo-new-flow"><i class="ph ph-chat-circle-text"></i>用講的建立我的第一條 Workflow</button>
+      <button class="btn btn-secondary" data-act="demo-real-run"><i class="ph-fill ph-play"></i>真的跑一次這條範例（會用額度）</button>
+    </div></div>`;
+}
+// 每一張卡的亮點：畫完 DOM 後把 .coach-hl 掛上去（參考物「亮點打在哪」那一欄）
+const DEMO_HL = {
+  1: ['[data-coach="params"]'],
+  2: ['.step[data-steprow="fetch-data"]', '[data-coach="check"]'],
+  3: ['#demo-say'],
+  4: ['.coachguard'],
+  5: ['.runstep-now .pillslot', '.sidefold:has(> summary[data-k="attempts"])'],
+  6: ['[data-coach="yourturn"]'],
+};
+function demoHighlight(root) {
+  const d = state.demo;
+  if (!d) return;
+  for (const sel of DEMO_HL[d.card] ?? []) root.querySelectorAll(sel).forEach((el) => el.classList.add('coach-hl'));
 }
 
 // 一行通知（run 頁頂、跑完回饋回覆、聊天氣泡下共用）：card＝「記下來了：… 不要記」可撤；撤了或其他種類＝灰字無鈕。
@@ -4673,7 +5197,7 @@ const SET_TABS = {
   'Workflow 預設': ['權限與查核', 'AI 步驟', '停點'],
   連線: ['Claude', 'Google 行事曆', '外部服務'],
   執行與排程: ['常駐', '排程', 'AI 工人'],
-  資料管理: ['組織', '位置與備份', '清理', '關於'],
+  資料管理: ['組織', '位置與備份', '清理', '使用計數', '關於'],
 };
 const SET_LEAD = {
   個人與記憶: '這裡的每一張卡，都會跟著每一次執行送給 AI。', 連線: '剝繭不自帶 AI，掛在你自己的 Claude 上；行事曆用你自己的 Google 授權。',
@@ -4712,15 +5236,16 @@ async function loadSettings() {
   const s = state.settings;
   if (!s) return;
   try {
-    const [summary, cards, groups, dict, cfg, identities, presets, autostart, backups, trashWf, trashCards, cal, conns] = await Promise.all([
+    const [summary, cards, groups, dict, cfg, identities, presets, autostart, backups, trashWf, trashCards, cal, conns, manual] = await Promise.all([
       api('GET', '/api/memory/summary'), api('GET', '/api/memory/cards'), api('GET', '/api/memory/groups'),
       api('GET', '/api/memory/dict?usage=1'), api('GET', '/api/settings'), api('GET', '/api/memory/identities'), api('GET', '/api/presets'),
       api('GET', '/api/autostart').catch(() => null), api('GET', '/api/backup').catch(() => []), api('GET', '/api/trash').catch(() => []), api('GET', '/api/memory/trash').catch(() => []),
       api('GET', '/api/calendar').catch(() => null),
       api('GET', '/api/connectors').catch(() => null),
+      api('GET', '/api/memory/manual').catch(() => null), // 關於你頁的五段說明書；讀不到＝那段講一句
     ]);
     if (state.settings !== s) return;
-    s.data = { summary, cards, groups, dict, cfg, identities, autostart, backups, trash: { wf: trashWf, cards: trashCards }, snapshot: cal?.snapshot ?? null };
+    s.data = { summary, cards, groups, dict, cfg, identities, autostart, backups, trash: { wf: trashWf, cards: trashCards }, snapshot: cal?.snapshot ?? null, manual };
     s.err = null;
     state.identities = Array.isArray(identities) ? identities : [];
     state.presets = presets;
@@ -4841,6 +5366,37 @@ const setSw = (on, act, extra = '') => `<span class="sw ${on ? 'on' : ''}" data-
 const setLater = (l, dsc) => setRow(`${l}${hint(dsc)}`, '', '<span class="chip">下一輪</span>'); // 續票項：「下一輪」膠囊已經說了還沒做，現在是什麼行為收進問號
 // 設定頁一句結果／錯誤（快照、備份、垃圾桶、清空）：state.settings.msg={key,text,err}，換組／換子分頁就清
 const setMsgHtml = (key) => { const m = state.settings?.msg; return m?.key === key ? `<div class="setmsg ${m.err ? 'err' : ''}" data-setmsg="${key}"><i class="ph ${m.err ? 'ph-warning-circle' : 'ph-check-circle'}"></i>${esc(m.text)}</div>` : ''; };
+// US-120「送到 GitHub」前的預覽：GET /api/metrics/issue-url 回的 {url, title, body, too_long} 放 state.settings.report；
+// body 全文印在可捲的框裡（傳前看得到每一個數字），底下「打開 GitHub 送出」＝window.open 預填頁；
+// too_long＝網址帶不下整份，改「複製內容」＋只開 issues/new 空白頁自己貼
+function reportPrevHtml(rep) {
+  if (!rep) return '';
+  const btns = rep.too_long
+    ? `<button class="btn sm2" data-act="set-report-copy"><i class="ph ph-copy"></i>複製內容</button><button class="btn sm2" data-act="set-report-open"><i class="ph ph-arrow-square-out"></i>打開 GitHub</button>`
+    : `<button class="btn btn-primary sm2" data-act="set-report-open"><i class="ph ph-arrow-square-out"></i>打開 GitHub 送出</button>`;
+  return `<div class="reportprev" data-reportprev><h5>要送出的內容（全文）・${esc(rep.title ?? '')}</h5>
+      ${rep.too_long ? '<p class="note">內容太長，GitHub 網址帶不下：先「複製內容」，再打開 GitHub 貼進去送出。</p>' : '<p class="note">下面就是會送出的全部內容，一個字不多。按「打開 GitHub 送出」會開一個預填好的頁面，由你自己按送出。</p>'}
+      <pre class="reportbody">${esc(rep.body ?? '')}</pre>
+      <div class="btns">${btns}<button class="btn btn-ghost sm2" data-act="set-report-close">關閉</button></div></div>`;
+}
+// 匯出檔名 bojian-report-<版本>-<日期>.json：版本與日期都從報告本身拿（沒有就「未知」／今天），不印 undefined
+function reportFileName(report) {
+  const ver = report?.version ?? '未知';
+  const day = typeof report?.generated_at === 'string' && report.generated_at.length >= 10 ? report.generated_at.slice(0, 10) : new Date().toISOString().slice(0, 10);
+  return `bojian-report-${ver}-${day}.json`;
+}
+// 前端 Blob 下載（不另開後端下載路由）：存成人可讀的 JSON（兩格縮排），用完收回網址
+function downloadJson(name, obj) {
+  const blob = new Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
 
 // ---- 連線：Claude／Google 行事曆（M5b；連接器與金鑰 T8 搬到記憶）----
 // Claude 狀態＝側欄底部同一份（state.claude：GET /api/health 只看得到 Claude 指令在不在，看不出登入過期）；「重新連線」＝既有 refreshHealth。
@@ -4952,6 +5508,14 @@ function setDataHtml(d) {
       ${setRow(`清空記憶${hint('習慣卡與認識卡進垃圾桶（30 天可復原）；詞典、分類守則、身分、Workflow 不動')}`, '', '<button class="btn sm2 btn-danger" data-act="set-clear-mem-open">清空記憶</button>')}
       ${setLater('匯出全部、清空全部', '')}${setMsgHtml('clear')}</div>`;
   const aboutSec = `${setSec('關於', `剝繭 ${d.cfg.app_version ?? ''}`)}<div class="group">${setRow(`剝繭 ${esc(d.cfg.app_version ?? '')}${hint('MIT 授權。資料僅存於本機與自有 Claude 帳號')}`, '', '')}</div>`;
+  // US-120 使用計數（ADR-013）：匯出封測報告＝只含計數的檔，自己寄；回傳開關預設關、開著才有「送到 GitHub」，傳前全文先給你看（reportPrevHtml）
+  const optin = d.cfg.report_optin === true;
+  const metricsSec = `${setSec('使用計數', optin ? '回傳：開' : '預設不回傳')}<div class="group" data-metrics>
+      <p class="note">預設不回傳；你打開才傳，且只傳計數。計數只有次數、比率、時間長度、用量與版本號，不含成品、欄位值、Workflow 名稱、檔名。</p>
+      ${setRow(`匯出封測報告${hint('存成一個只含計數的 JSON 檔，你自己寄給作者；寄之前可以打開來看')}`, '', `<button class="btn sm2" data-act="set-report-export" ${s.busy ? 'disabled' : ''}><i class="ph ph-download-simple"></i>${s.busy === 'report' ? '整理中⋯' : '匯出封測報告'}</button>`)}
+      ${setRow(`回傳使用計數${hint('內容與匯出檔完全相同；關掉立刻停')}`, '', setSw(optin, 'set-report-optin'))}
+      ${optin ? setRow(`送到 GitHub${hint('先把要送的內容全文列給你看，再由你在 GitHub 頁面按送出；不會替你送')}`, '', `<button class="btn sm2" data-act="set-report-issue" ${s.busy ? 'disabled' : ''}><i class="ph ph-paper-plane-tilt"></i>${s.busy === 'issue' ? '整理中⋯' : '送到 GitHub'}</button>`) : ''}
+      ${optin ? reportPrevHtml(s.report) : ''}${setMsgHtml('report')}</div>`;
   const bk = [...d.backups].sort((a, b) => String(b.at).localeCompare(String(a.at)));
     // 公司：名稱 change／Enter 即 PUT（處理在 app 的 change 監聽）；規範上限唯讀（三層 §三固定值，後端 checkRuleLimits 同一份）
   const orgSec = `${setSec('組織', d.cfg.company_name || '還沒取名')}<div class="group">
@@ -4965,7 +5529,7 @@ function setDataHtml(d) {
       ${setLater('每天自動備份、還原', '要還原，先把備份夾整個複製回資料夾位置。')}${setMsgHtml('backup')}
       <h5>備份清單・${bk.length} 份</h5>
       ${bk.length ? `<div style="overflow-x:auto"><table class="dict" data-backuptable><thead><tr><th>備份</th><th>時間</th></tr></thead><tbody>${bk.map((b) => `<tr data-backup="${esc(b.name)}"><td><b>${esc(b.name)}</b></td><td class="syn">${esc(memAt(b.at))}</td></tr>`).join('')}</tbody></table></div>` : '<div class="none">還沒備份過</div>'}</div>`;
-  return `${orgSec}${cleanSec}${aboutSec}`;
+  return `${orgSec}${cleanSec}${metricsSec}${aboutSec}`;
 }
 // 清空記憶的二次確認浮窗（放 .layout 外，同卡片浮窗）：確定才 POST /api/memory/clear；Esc、背景、取消都關
 function setConfirmModalHtml() {
@@ -5070,6 +5634,50 @@ function setExcHtml(d) {
     ${box('changed', '選了又改掉', 'ph-arrow-u-up-left', ex.changed.map((c) => row(c, `改掉 ${c.changed_count} 次`, mini('set-replace', c, '改') + mini('set-retire', c, '退休', 'no'))), '點了又當場改掉兩次以上：也許它該改了。')}
   </div>`;
 }
+// 關於你頂部：你的說明書（初次體驗輪 US-115，取代舊介紹三列）——五段各列行（GET manual 的 sections），每行改／刪、每段加一行，
+// 就地改＝整份重存（POST save：舊卡退休、新卡取代）；「重新問答」＝重開引導卡第 2 步。state.settings.manualEdit={key, idx}（idx -1＝這段加新的一行）
+function setManualHtml(d) {
+  const m = d.manual;
+  const h5 = `<h5>你的說明書${hint('五段、每行一句可以直接照做的話，每行都是一張認識卡：「我是誰」按場合帶、其餘四段每步帶。改一行＝整份重存（舊卡退休、新卡取代）；「重新問答」從頭用問的再寫一份。')}</h5>`;
+  if (!m) return `<div class="group" data-manual>${h5}<div class="none">說明書讀不到</div></div>`;
+  const ed = state.settings?.manualEdit;
+  const busy = state.settings?.busy === 'manual';
+  const dis = busy ? ' disabled' : '';
+  const any = (m.sections ?? []).some((s) => (s.lines ?? []).length);
+  const box = (text) => `<input id="set-man-text" class="notein" data-keep value="${esc(kept('set-man-text') ?? text)}" placeholder="一句可以直接照做的話" maxlength="200" autocomplete="off"${dis}>
+      <div class="acts"><button class="mini" data-act="set-man-save"${dis}>${busy ? '存著⋯' : '存'}</button><button class="mini" data-act="set-man-cancel"${dis}>取消</button></div>`;
+  const secs = (m.sections ?? []).map((s) => {
+    const rows = (s.lines ?? []).map((ln, i) => (ed?.key === s.key && ed.idx === i
+      ? `<div class="crow manln editing">${box(ln.text)}</div>`
+      : `<div class="crow manln"><div class="c">${esc(ln.text)}${ln.round ? `<span class="chip quiet">第 ${ln.round} 輪</span>` : ''}</div>
+        <div class="acts"><button class="mini" data-act="set-man-edit" data-key="${esc(s.key)}" data-idx="${i}"${dis}>改</button><button class="mini no" data-act="set-man-del" data-key="${esc(s.key)}" data-idx="${i}"${dis}>刪</button></div></div>`)).join('');
+    const add = ed?.key === s.key && ed.idx === -1 ? `<div class="crow manln editing">${box('')}</div>`
+      : `<div class="manadd"><button class="mini" data-act="set-man-add" data-key="${esc(s.key)}"${dis}>＋ 加一行</button></div>`;
+    return `<div class="mansec" data-section="${esc(s.key)}"><div class="manh">${esc(s.label)}<span class="chip ${s.layer === 'content' ? 'blue' : 'violet'}">${MANUAL_LAYER_TXT[s.layer] ?? '每步帶'}</span></div>${rows}${add}</div>`;
+  }).join('');
+  return `<div class="group" data-manual>${h5}${any || ed ? secs : '<div class="none">還沒寫——讓它用問的認識你，寫成一份「怎麼跟我合作」的說明書</div>'}
+    <div class="btns" style="margin-top:8px"><button class="btn sm2" data-act="intro-open" data-step="2"${dis}><i class="ph ph-chats"></i>${any ? '重新問答' : '用問的寫'}</button></div></div>`;
+}
+// 說明書就地改／刪／加：從現況五段組整份（帶原輪次）、套上這一處的改動→POST save 整份重存→重抓設定頁。失敗一句原因，字還在框裡
+async function setManualSave(mutate) {
+  const s = state.settings;
+  const m = s?.data?.manual;
+  if (!s || !m || s.busy) return;
+  const sections = (m.sections ?? []).map((sec) => ({ key: sec.key, lines: (sec.lines ?? []).map((ln) => ({ text: ln.text, ...(ln.round ? { round: ln.round } : {}) })) }));
+  mutate(sections);
+  for (const sec of sections) sec.lines = sec.lines.map((ln) => ({ ...ln, text: String(ln.text ?? '').trim() })).filter((ln) => ln.text);
+  s.busy = 'manual';
+  render();
+  try {
+    await api('POST', '/api/memory/manual/save', { sections });
+    s.manualEdit = null;
+    delete state.keep[keepKey('set-man-text')];
+    state.introManual = null; // 儀表板提醒行重讀
+  } catch (e) { toast(e.message, 'bad'); }
+  s.busy = null;
+  await afterMemChange();
+  render();
+}
 // 認識你：整層開關、敏感四類、「每步指示現在附的關於你」原文（＝表達層活著沒過期的卡依 created_at 串起來，跟後端 selectCore 同一規則；沒身分限縮）、兩層清單各列改／退休／刪
 // 兩層的「N 條」只數活著沒過期的（與預覽同口徑）；過期卡仍列在清單、標「（已到期，不帶）」
 function setKnowHtml(d) {
@@ -5083,14 +5691,8 @@ function setKnowHtml(d) {
   const crow = (c) => `<div class="crow" data-crow="${esc(c.id)}"><div class="c"><span class="cardlnk" data-act="mem-card" data-id="${esc(c.id)}" data-bucket="profile" data-text="${esc(c.text)}" title="點開看出處原話" tabindex="0" role="button">${esc(c.text)}</span></div>
     <div class="m">${esc(MEM_SOURCE_TXT[c.source?.kind] ?? '你說的')}・用在：${esc(memScopeText(c.scope))}・有效期：${c.expires ? esc(c.expires) : '永久'}${memExpired(c) ? '（已到期，不帶）' : ''}${c.last_used_at ? `・上次帶：${esc(memAt(c.last_used_at))}` : ''}</div>
     <div class="acts"><button class="mini" data-act="set-replace" data-id="${esc(c.id)}" data-bucket="profile" data-text="${esc(c.text)}" title="開一張新卡取代這張">改</button><button class="mini" data-act="set-retire" data-id="${esc(c.id)}">退休</button><button class="mini no" data-act="set-del" data-id="${esc(c.id)}">刪</button></div></div>`;
-  // 介紹你自己三題（demo 08 關於你頂部）：answer 卡＝出處 intro；第三題是表達層、前兩題是內容層，依 created_at 對回題目；「修改」＝開那張卡
-  const introCards = act.filter((c) => c.source?.kind === 'intro');
-  const introCtx = introCards.filter((c) => c.layer !== 'expression');
-  const introExp = introCards.filter((c) => c.layer === 'expression');
-  const introRows = INTRO_QUESTIONS.map((q, i) => { const c = q.layer === 'expression' ? introExp[0] : introCtx[i]; return setRow(esc(q.label), c ? esc(c.text) : '<span class="none">還沒答</span>', c ? `<button class="mini" data-act="mem-card" data-id="${esc(c.id)}" data-bucket="profile" data-text="${esc(c.text)}" title="點開卡片改">修改</button>` : ''); }).join('');
-  const introBlock = `<div class="group" data-intro><h5>介紹你自己${hint('三題各存一張卡，可於此修改')}</h5>${introCards.length ? introRows : `<div class="none">還沒介紹過</div><div class="btns" style="margin-top:8px"><button class="btn sm2" data-act="intro-open"><i class="ph ph-hand-waving"></i>介紹你自己</button></div>`}</div>`;
-  const injText = paused ? '（整層暫停中）' : expLive.length ? expLive.map((c) => `· ${c.text}`).join('\n') : '（還沒有每步帶的卡：介紹自己時答第三題，或在停點註記寫「以後都⋯」）';
-  return `${introBlock}<div class="group">
+  const injText = paused ? '（整層暫停中）' : expLive.length ? expLive.map((c) => `· ${c.text}`).join('\n') : '（還沒有每步帶的卡：寫你的說明書，或在停點註記寫「以後都⋯」）';
+  return `${setManualHtml(d)}<div class="group">
       ${setRow(`關於你${hint(paused ? '暫停期間每一步都不附「關於你」，卡片留著；分類守則與習慣選項照舊。' : '關掉＝每一步都不帶，卡片留著。交貨查核與監工本來就不帶。')}`, '', setSw(!paused, 'set-pause', 'data-paused'))}
       ${setRow(`記敏感資訊${hint('四類預設不記。開啟後僅記親口說過的，步驟產出不列入來源')}`, '', `<div class="pills">${Object.keys(SENSITIVE_TXT).map((k) => `<button type="button" class="pill${sens[k] ? ' on' : ''}" data-act="set-sens" data-k="${k}" aria-pressed="${!!sens[k]}">${SENSITIVE_TXT[k]}</button>`).join('')}</div>`, true)}</div>
     <div class="injected ${paused ? 'paused' : ''}" data-injected><div class="overline">每一步實際會附上這段${hint('由卡直接串接，AI 不改寫；未計入身分限縮')}</div><pre>${esc(injText)}</pre></div>
@@ -5131,7 +5733,7 @@ function setIdentitiesHtml(d) {
     if (e?.id === i.id) {
       return `<div class="asset editing" data-idedit="${esc(i.id)}"><div class="ih"><input class="notein" id="id-name" data-idf="name" value="${esc(e.name)}" placeholder="身分的名字" style="margin:0;max-width:260px"></div>
         <div class="ib">這個身分帶哪些認識卡：</div>
-        ${profiles.length ? `<ul class="ck">${profiles.map((c) => `<li><label><input type="checkbox" data-idc="${esc(c.id)}" ${e.cards.has(c.id) ? 'checked' : ''}>${memTagHtml(c)}<span>${esc(c.text)}</span></label></li>`).join('')}</ul>` : '<div class="none">還沒有認識卡——介紹你自己、聊天或停點註記寫「以後都⋯」都會生出來</div>'}
+        ${profiles.length ? `<ul class="ck">${profiles.map((c) => `<li><label><input type="checkbox" data-idc="${esc(c.id)}" ${e.cards.has(c.id) ? 'checked' : ''}>${memTagHtml(c)}<span>${esc(c.text)}</span></label></li>`).join('')}</ul>` : '<div class="none">還沒有認識卡——寫你的說明書、聊天或停點註記寫「以後都⋯」都會生出來</div>'}
         <div class="ib">預設綁哪些分類（開這些分類的 Workflow 時自動選它，開跑時可換）：</div>
         <div class="pills">${state.categories.map((c) => `<span class="pill ${e.categories.has(c) ? 'on' : ''}" data-act="id-bind" data-c="${esc(c)}" tabindex="0" role="button">${esc(catLabel(c))}</span>`).join('') || '<span class="none">還沒有分類</span>'}</div>
         <div class="btns" style="margin-top:8px"><button class="btn sm2 btn-primary" data-act="id-save">存</button><button class="btn sm2 btn-ghost" data-act="id-cancel">取消</button>${e.err ? `<span class="sub" style="margin:0;color:var(--red-text)">${esc(e.err)}</span>` : ''}</div></div>`;
@@ -5206,7 +5808,8 @@ function render() {
   if (state.wf || state.chat?.draft || state.importPreview) connEnsure(); // 服務清單：Workflow 頁（標籤、勾選、權限列）與匯入預覽要用，讀過一次就不再讀
   let inner;
   let landing = false; // Workflow 頁右邊是不是「沒有正在看的東西」（落地頁／正在打開上次那條）——狀態畫面整塊換上去；否則附在內容上方
-  if (state.intro) inner = introHtml(); // （M2）：第一次打開先讓它認識你——蓋在儀表板前，答了或跳過才看得到別的
+  if (state.demo) inner = demoHtml(); // 初次體驗輪（US-116）：模擬導覽——導覽列＋真正的執行頁版面畫示範趟，蓋在引導卡與儀表板前
+  else if (state.intro) inner = introHtml(); // （M2）：第一次打開先讓它認識你——蓋在儀表板前，答了或跳過才看得到別的
   else if (state.dash) inner = dashHtml();
   else if (state.calendar) inner = calendarHtml();
   else if (state.settings) inner = settingsHtml(); // （M5a）：設定頁，蓋在工作區上的整頁（同儀表板／行事曆）
@@ -5255,6 +5858,7 @@ function render() {
   try { app.innerHTML = `<div class="layout">${sideHtml()}<div class="work">${shell}${state.calendar ? calDrawerHtml() + calModalsHtml() : ''}</div></div>` + readerHtml() + previewHtml() + memCardModalHtml() + flowSettingsModalHtml() + flowMemModalHtml() + sharedModalHtml() + setConfirmModalHtml() + connPickPopHtml() + promptModalHtml(state.run ? state.promptView : state.dash?.promptView) + renameModalHtml() + rowMenuHtml() + drawerHtml(); }
   finally { rendering = false; }
   lockBehindOverlays(app); // L058：浮窗開著時後面的 .layout 設 inert（Tab 走不出浮窗）
+  if (state.demo) demoHighlight(app); // 模擬導覽：這一張卡的亮點框上
   if (state.reader) readerTagNums(); // 閱讀面板的表格：數字格補 .num（不折行）
   if (keepFocus && document.activeElement === document.body) {
     const again = [...app.querySelectorAll(`[data-act="${keepFocus.act}"]`)].find((x) => x.dataset.cat === keepFocus.cat && x.dataset.id === keepFocus.id && x.dataset.to === keepFocus.to && x.dataset.type === keepFocus.type);
@@ -6466,6 +7070,12 @@ app.addEventListener('click', async (e) => {
   const el = e.target.closest('[data-act]');
   if (!el) return;
   const act = el.dataset.act;
+  if (state.demo && !DEMO_ACTS.has(act)) { // 模擬導覽（US-116）：只放行導覽動作與純看的動作，其餘一律擋掉——不可能誤觸真跑、不打任何 API
+    e.preventDefault();
+    if (act === 'preview-file') { openReader('compose'); return; } // 成品檔 chip：示範沒有真檔，開那一步的閱讀面板
+    toast('模擬中：用上面的「下一張」往下，或按「跳過」', 'info');
+    return;
+  }
   try {
     if (act === 'reconnect') { await refreshHealth(); render(); }
     // ===== 連線輪：外部服務清單、步驟要用哪家 =====
@@ -6538,7 +7148,7 @@ app.addEventListener('click', async (e) => {
       state.run = null;
       state.showTrash = false;
       state.importPreview = null;
-      state.dash = { data: null, usageView: 'flow', open: {}, promptView: null, usageOpen: false, showAll: false, calendar: null };
+      state.dash = freshDash();
       if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
         Notification.requestPermission().catch(() => {}); // 通知住在這頁——授權一次；被拒頁內照常
       }
@@ -6666,6 +7276,15 @@ app.addEventListener('click', async (e) => {
       await api('POST', `${wfPath(state.run.workflow)}/runs/${state.run.run_id}/check-accept`, { node });
       delete state.keep[keepKey(`check-note-${node}`)];
       await refreshRun();
+    } else if (act === 'check-wrong') {
+      // US-119 ⑦：只記一次計數（後端重複按回 recorded:false 也算已回報）；按下先停用免連按，失敗放回
+      const node = el.dataset.node;
+      el.disabled = true;
+      try {
+        await api('POST', `${wfPath(state.run.workflow)}/runs/${state.run.run_id}/steps/${encodeURIComponent(node)}/check-wrong`, {});
+        state.checkWrong.add(`${state.run.run_id}:${node}`);
+      } catch (err) { el.disabled = false; toast(err.message, 'bad'); }
+      render();
     } else if (act === 'edit-rules-open') {
       delete state.keep[keepKey('edit-rules-text')]; // 別的步驟沒送出的草稿不准帶進這一步
       state.editRulesOpen = el.dataset.node;
@@ -7476,9 +8095,42 @@ app.addEventListener('click', async (e) => {
       treeStateSave();
       render();
     }
-    else if (act === 'set-group') { state.settings.group = el.dataset.g; state.settings.detail = false; state.settings.save = null; state.settings.merge = null; state.settings.msg = null; render(); }
-    else if (act === 'set-open') { state.settings.tab[el.dataset.g] = el.dataset.k; state.settings.detail = true; state.settings.save = null; state.settings.merge = null; state.settings.msg = null; render(); setScrollTop(); }
-    else if (act === 'set-back') { state.settings.detail = false; state.settings.merge = null; state.settings.msg = null; render(); setScrollTop(); }
+    else if (act === 'set-group') { state.settings.group = el.dataset.g; state.settings.detail = false; state.settings.save = null; state.settings.merge = null; state.settings.msg = null; state.settings.report = null; render(); }
+    else if (act === 'set-open') { state.settings.tab[el.dataset.g] = el.dataset.k; state.settings.detail = true; state.settings.save = null; state.settings.merge = null; state.settings.msg = null; state.settings.report = null; render(); setScrollTop(); }
+    else if (act === 'set-back') { state.settings.detail = false; state.settings.merge = null; state.settings.msg = null; state.settings.report = null; render(); setScrollTop(); }
+    // ===== US-120 使用計數：匯出＝GET 報告存成檔；開關＝PUT report_optin；送到 GitHub＝先拿預填內容給你看，再由你打開頁面送出 =====
+    else if (act === 'set-report-export') {
+      const s = state.settings;
+      s.busy = 'report';
+      render();
+      try {
+        const report = await api('GET', '/api/metrics/report');
+        const name = reportFileName(report);
+        downloadJson(name, report);
+        s.msg = { key: 'report', text: `已匯出：${name}。裡面只有計數，寄之前可以自己打開看。` };
+      } catch (err) { s.msg = { key: 'report', text: err.message, err: true }; }
+      s.busy = null;
+      render();
+    }
+    else if (act === 'set-report-optin') { state.settings.report = null; state.settings.msg = null; await setPut({ report_optin: !(state.settings.data.cfg.report_optin === true) }); }
+    else if (act === 'set-report-issue') {
+      const s = state.settings;
+      s.busy = 'issue';
+      s.msg = null;
+      render();
+      try { s.report = await api('GET', '/api/metrics/issue-url'); }
+      catch (err) { s.report = null; s.msg = { key: 'report', text: err.status === 403 ? '回傳開關是關的，先打開才能送。' : err.message, err: true }; }
+      s.busy = null;
+      render();
+    }
+    else if (act === 'set-report-open') { if (state.settings?.report?.url) window.open(state.settings.report.url, '_blank', 'noopener'); }
+    else if (act === 'set-report-copy') {
+      const s = state.settings;
+      try { await navigator.clipboard.writeText(state.settings.report.body); s.msg = { key: 'report', text: '已複製，到 GitHub 頁面貼上就好。' }; }
+      catch (err) { s.msg = { key: 'report', text: `複製不了：${err.message}`, err: true }; }
+      render();
+    }
+    else if (act === 'set-report-close') { state.settings.report = null; render(); }
     // ===== 設定頁後四組：新流程的預設／執行與排程的開關即 PUT；連線、資料的動作走既有 API =====
     else if (act === 'set-def-sw') { const k = el.dataset.k; await setPut({ defaults: { [k]: state.settings.data.cfg.defaults?.[k] === false } }); }
     else if (act === 'set-compose-sw') { await setPut({ compose: { confirm_shape: state.settings.data.cfg.compose?.confirm_shape === false } }); } // 缺值視為開，反轉
@@ -7545,11 +8197,32 @@ app.addEventListener('click', async (e) => {
       render();
     }
     else if (act === 'set-reload') { state.settings.err = null; render(); await loadSettings(); render(); }
-    else if (act === 'intro-open') { state.intro = { saving: false, err: null }; closeSettings(); closeAssets(); render(); } // 關於你頁還沒介紹過→重開三題（答完 POST /api/memory/intro 照舊）
+    else if (act === 'intro-open') { // 關於你頁「重新問答」／儀表板提醒行「去寫」「走一次」：開引導卡的第 2 或第 3 步（底下先鋪好儀表板，結束落在那）
+      const step = Number(el.dataset.step) === 3 ? 3 : 2;
+      dashUnderIntro();
+      introGo(step);
+      state.intro.doneWritten = true; // 從這裡進來的都已經走過第一次（intro_done 早就寫了），結束時不再補寫
+      render();
+    }
     else if (act === 'set-pause') { await setPut({ memory: { paused: !(state.settings.data.cfg.memory?.paused === true) } }); }
     else if (act === 'set-sens') { const k = el.dataset.k; await setPut({ memory: { sensitive: { [k]: !state.settings.data.cfg.memory?.sensitive?.[k] } } }); }
     else if (act === 'set-retire' || act === 'set-del' || act === 'set-revive' || act === 'set-extend' || act === 'set-extend-forever') { await setCardAct(act, el.dataset.id); }
     else if (act === 'set-replace') { await openMemCard(el, { replacing: true }); }
+    // 關於你 › 你的說明書：改／加＝那一行原地變框；存＝整份重存；刪＝先問一句再整份重存
+    else if (act === 'set-man-edit' || act === 'set-man-add') { const s = state.settings; if (s && !s.busy) { s.manualEdit = { key: el.dataset.key, idx: act === 'set-man-add' ? -1 : Number(el.dataset.idx) }; delete state.keep[keepKey('set-man-text')]; render(); document.getElementById('set-man-text')?.focus(); } }
+    else if (act === 'set-man-cancel') { const s = state.settings; if (s) { s.manualEdit = null; delete state.keep[keepKey('set-man-text')]; render(); } }
+    else if (act === 'set-man-save') {
+      const ed = state.settings?.manualEdit;
+      const text = (kept('set-man-text') ?? document.getElementById('set-man-text')?.value ?? '').trim();
+      if (!ed) return;
+      if (!text) { toast('要先寫一句', 'bad'); return; }
+      await setManualSave((sections) => { const sec = sections.find((x) => x.key === ed.key); if (!sec) return; if (ed.idx === -1) sec.lines.push({ text }); else if (sec.lines[ed.idx]) sec.lines[ed.idx] = { ...sec.lines[ed.idx], text }; });
+    }
+    else if (act === 'set-man-del') {
+      const { key, idx } = el.dataset;
+      if (!await askBox('把這一行從說明書拿掉？之後每一步就不再帶這句。')) return;
+      await setManualSave((sections) => { const sec = sections.find((x) => x.key === key); if (sec) sec.lines.splice(Number(idx), 1); });
+    }
     else if (act === 'dict-merge-start') {
       const others = state.settings.data.dict.fields.filter((f) => f.name !== el.dataset.name);
       state.settings.merge = { drop: el.dataset.name, keep: others[0]?.name ?? '', err: null };
@@ -7718,20 +8391,47 @@ app.addEventListener('click', async (e) => {
       pollProposalsSoon(state.run.workflow);
       await refreshRun(); // 頁頂那一行「記下來了…不要記」從 run 讀，剛寫進去的要重抓才看得到
     }
-    // ===== （M2）：首次三題介紹、通知「不要記」=====
-    else if (act === 'intro-save' || act === 'intro-skip') {
-      const body = act === 'intro-skip' ? { skip: true } : { answers: introAnswers() };
-      state.intro = { saving: true, err: null };
-      render();
-      try {
-        await api('POST', '/api/memory/intro', body);
-        state.intro = null;
-        for (const q of INTRO_QUESTIONS) delete state.keep[keepKey(introInputId(q.key))];
-      } catch (err) {
-        state.intro = { saving: false, err: `沒存成：${err.message}` };
+    // ===== 初次體驗輪：三步引導卡；（M2）通知「不要記」=====
+    else if (act === 'intro-recheck') { if (state.intro?.step === 1) { state.claude = null; render(); await refreshHealth(); render(); } } // 第 1 步「重新檢查」：先回到「還在查」再打 /api/health
+    else if (act === 'intro-skip') { // 每一步都能先略過：第 1 步→直接進第 2 步；第 2 步→POST intro skip（寫 intro_done）→第 3 步；第 3 步→結束引導
+      const step = state.intro?.step;
+      if (step === 1) { introGo(2); render(); }
+      else if (step === 2) await introSkipManual();
+      else if (step === 3) await introFinish();
+    }
+    else if (act === 'intro-reload') { if (state.intro?.step === 2) { state.intro.phase = 'load'; state.intro.err = null; render(); await introLoadManual(); } }
+    else if (act === 'intro-next') await introNextRound();
+    else if (act === 'intro-draft') await introDraft();
+    else if (act === 'intro-save') await introSave();
+    else if (act === 'intro-ln-del') { // 草稿編輯器：整行刪掉（先把框裡的字收回 state，其他行不受影響）
+      const it = state.intro;
+      if (it?.draft && !it.inflight) {
+        introSyncDraft(it);
+        const lid = Number(el.dataset.lid);
+        for (const s of it.draft) { const i = s.lines.findIndex((l) => l.lid === lid); if (i >= 0) { delete state.keep[keepKey(introLineId(s.lines[i]))]; s.lines.splice(i, 1); } }
+        render();
       }
-      render();
-    } else if (act === 'mem-undo') {
+    }
+    else if (act === 'intro-ln-add') { // 草稿編輯器：這段加一行空的（沒輪次＝自己加的）
+      const it = state.intro;
+      const sec = it?.draft?.find((s) => s.key === el.dataset.key);
+      if (sec && !it.inflight) { introSyncDraft(it); sec.lines.push({ lid: ++introLid, text: '', round: null }); render(); document.getElementById(introLineId(sec.lines[sec.lines.length - 1]))?.focus(); }
+    }
+    else if (act === 'intro-tour-start') demoStart(); // 第 3 步「開始」：開模擬導覽（US-116），走完／跳過都回 introFinish
+    // ===== 模擬導覽（US-116）：導覽列與第 6 張的兩顆鈕 =====
+    else if (act === 'coach-next') demoNext();
+    else if (act === 'coach-pass') demoNext({ pass: true });
+    else if (act === 'coach-skip') await demoEnd(false);
+    else if (act === 'coach-finish') await demoEnd(true);
+    else if (act === 'demo-new-flow') { // 「用講的建立我的第一條 Workflow」：結束導覽（回儀表板）→走側欄「建立新 Workflow」同一條路
+      await demoEnd(true);
+      document.querySelector('[data-act="new-flow"]')?.click();
+    }
+    else if (act === 'demo-real-run') { // 「真的跑一次這條範例（會用額度）」：結束導覽→打開範例流程的本次資料分頁，由他自己按開始
+      await demoEnd(true);
+      await demoOpenExample();
+    }
+    else if (act === 'mem-undo') {
       // run 頁頂的一行：卡進記憶垃圾桶＋這一趟的通知標「不記了」；重抓 run 讓頁頂照最新的畫
       const card = el.dataset.card;
       if (state.memUndoing[card]) return;
@@ -8105,12 +8805,12 @@ async function noticePollGlobal() {
   try {
     applyNotices(await api('GET', '/api/notices'));
   } catch { /* 通知讀不到就先空著 */ }
-  // （M2）：還沒介紹過自己（也沒跳過）→三題先蓋在儀表板前；摘要讀不到就不問，照開儀表板
+  // 初次體驗輪（US-114）：還沒走過引導（intro_done 為否）→三步引導卡先蓋在儀表板前，從第 1 步「連線」起；摘要讀不到就不擋，照開儀表板
   try {
-    if (!(await api('GET', '/api/memory/summary')).intro_done) state.intro = { saving: false, err: null };
-  } catch { /* 讀不到就當問過了 */ }
+    if (!(await api('GET', '/api/memory/summary')).intro_done) state.intro = { step: 1 };
+  } catch { /* 讀不到就當走過了 */ }
   // 預設首頁＝儀表板（定案第 5 點）：有事先看到事
-  state.dash = { data: null, usageView: 'flow', open: {}, promptView: null, usageOpen: false, showAll: false, calendar: null };
+  state.dash = freshDash();
   render();
   try {
     await loadDash();

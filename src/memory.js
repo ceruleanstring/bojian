@@ -92,6 +92,7 @@ export function makeCard(input = {}, now = new Date().toISOString()) {
     expires: input.expires ?? null,
   };
   if (bucket === 'profile') card.layer = input.layer ?? 'expression';
+  if (bucket === 'profile' && input.section != null) card.section = input.section; // 說明書五段之一（US-115）；沒給就不帶＝舊卡形狀不變
   if (bucket === 'habit' || input.field != null) card.field = input.field ?? null; // 認識卡選填，沒給就不帶
   return Object.assign(card, {
     status: input.status ?? 'active',
@@ -132,6 +133,7 @@ export function validateCard(card, dict = null) {
   if (c.expires != null && !isDateOnly(c.expires)) out.push('有效期要是 YYYY-MM-DD');
   if (c.bucket === 'profile' && !PROFILE_SOURCE_KINDS.includes(c.source?.kind)) out.push('認識卡的來源只限你打的字');
   if (c.bucket === 'profile' && !PROFILE_LAYERS.includes(c.layer)) out.push('認識卡的層級只能是表達層或內容層');
+  if (c.bucket === 'profile' && c.section != null && !MANUAL_SECTION_KEYS.includes(c.section)) out.push('說明書的段落只能是五段之一');
   return out;
 }
 
@@ -359,9 +361,40 @@ function normalizeRouteCard(c) {
   };
 }
 
+// 截尾修補（2026-09-25 實走抓到：模型偶發少收尾括號，整份 JSON 就不是候選）：忽略字串內的括號，數未關閉的 { [，
+// 依序補 } ]，最多補 3 個。字串沒關、括號對不上、沒缺或缺太多＝修不了回 null。只在 extractJson 一份候選都挑不出時才用
+export const JSON_REPAIR_MAX = 3;
+export function repairJsonTail(text) {
+  const s = str(text).trimEnd();
+  const stack = [];
+  let inString = false;
+  let escaped = false;
+  for (const c of s) {
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (c === '\\') escaped = true;
+      else if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') inString = true;
+    else if (c === '{' || c === '[') stack.push(c === '{' ? '}' : ']');
+    else if (c === '}' || c === ']') { if (stack.pop() !== c) return null; }
+  }
+  if (inString || !stack.length || stack.length > JSON_REPAIR_MAX) return null;
+  return s + stack.reverse().join('');
+}
+
+// extractJson 一份都挑不出→補括號再挑一次；含糊（CheckParseError）照丟，不修
+function extractJsonOrRepair(text, rank, normalize, ambiguousMessage) {
+  const v = extractJson(text, rank, normalize, ambiguousMessage);
+  if (v !== null) return v;
+  const fixed = repairJsonTail(text);
+  return fixed === null ? null : extractJson(fixed, rank, normalize, ambiguousMessage);
+}
+
 // 回覆→卡的清單（最多 3 張）。沒有像樣的 {"cards":[…]}／兩份內容不同的候選→CheckParseError（route() 接住變 fail_note）
 export function parseRoute(text) {
-  const v = extractJson(
+  const v = extractJsonOrRepair(
     text,
     (x) => (x && typeof x === 'object' && !Array.isArray(x) && Array.isArray(x.cards) ? [1] : [0]),
     (x) => x.cards.map(normalizeRouteCard).filter(Boolean).slice(0, ROUTE_MAX_CARDS),
@@ -394,6 +427,189 @@ export async function route({ adapter, meta, onPrompt, onReply, text, ...rest })
     return { ok: false, fail_note: failNote(humanReason(e)) };
   }
 }
+
+// ---- 說明書問答（US-115）：五段、最多三輪、每輪最多三題。出題與寫草稿各是一次小 AI 呼叫，走 route() 同一個 adapter 通道
+// （meta.kind='memory'，phase 分 manual-questions／manual-draft）；三輪與每輪三題由程式硬擋，不靠 AI 自律；AI 出不了題退備用題、寫不出草稿退原句。----
+
+// 五段（順序固定）：「我是誰」內容層按場合帶，其餘四段表達層每步帶
+export const MANUAL_SECTIONS = deepFreeze([
+  { key: 'who', label: '我是誰', layer: 'content' },
+  { key: 'talk', label: '怎麼跟我講話', layer: 'expression' },
+  { key: 'ask', label: '什麼事要問我、什麼事自己決定', layer: 'expression' },
+  { key: 'show', label: '什麼時候叫我看', layer: 'expression' },
+  { key: 'redline', label: '紅線', layer: 'expression' },
+]);
+const MANUAL_SECTION_KEYS = MANUAL_SECTIONS.map((s) => s.key);
+const sectionOf = (key) => MANUAL_SECTIONS.find((s) => s.key === key) ?? null;
+export const MANUAL_ROUNDS_MAX = 3;
+export const MANUAL_PER_ROUND_MAX = 3;
+// 第一輪三題固定（參考物 2-a；US-115 ①②③），分別對 who／talk／ask
+export const MANUAL_ROUND1 = deepFreeze([
+  { id: 'r1-who', q: '你是誰、平常在做什麼？哪些東西你看不懂、或不想自己碰？', section: 'who' },
+  { id: 'r1-talk', q: '你最常想請 AI 幫你做哪類事？它做出來的東西，通常哪裡讓你不滿意？', section: 'talk' },
+  { id: 'r1-ask', q: '做事的時候，哪些事你一定要自己決定？哪些你希望它自己定、事後跟你講一聲就好？', section: 'ask' },
+]);
+// 備用題（參考物 2-b 三題的通用版；who／talk 補通用問法）：AI 出不了題時每段一題、只取還空的段
+export const MANUAL_FALLBACK = deepFreeze({
+  who: { q: '再多講一點你自己：你的角色、平常經手哪些事、哪些領域你不熟或不想自己碰？', why: '為什麼問：「我是誰」這段還空著' },
+  talk: { q: '你希望它怎麼跟你講話？例如先講結論、不要術語、不要恭維——哪些是你受不了的？', why: '為什麼問：「怎麼跟我講話」這段還空著' },
+  ask: { q: '措辭、排版、二選一都差不多的事，要它自己定就好，還是也先問你？', why: '為什麼問：「什麼事要問我」這段還缺「什麼可以不問」' },
+  show: { q: '它做到一半，什麼時候你想被叫來看？每一步都看、只看做完的成品、還是只有出問題才叫你？', why: '為什麼問：「什麼時候叫我看」這段是空的' },
+  redline: { q: '有沒有不管做什麼都絕對不准的事？例如不准自己編數字、不准動你原文的口吻。', why: '為什麼問：「紅線」這段是空的' },
+});
+// 禁問關鍵字：給誰看／什麼形式／多長是分類層的事（ADR-012 第 3 條）；健康／政治／宗教／財務照 US-064 不記。AI 出的題含這些字＝剔掉
+export const MANUAL_BANNED = Object.freeze(['給誰看', '讀者', '對象', '什麼形式', '型態', '多長', '長度', '頁數', '健康', '政治', '宗教', '財務']);
+const MANUAL_TRANSCRIPT_MAX = MANUAL_ROUNDS_MAX * MANUAL_PER_ROUND_MAX; // 三輪×三題＝最多 9 筆問答
+const MANUAL_ANSWER_MAX = 2000; // 一題答案的字數上限（用講的，不是貼文件）
+const MANUAL_LINE_MAX = 200; // 說明書一行＝一句可直接照做的話（跟「一句話才成卡」同一條門檻）
+const MANUAL_LINES_MAX = 50; // 五段合計最多存幾行
+
+const err400 = (message) => Object.assign(new Error(message), { status: 400 });
+
+// 2026-09-25 實走抓到：輕裝系統提示只說「語言跟訊息一致」，第二輪題目整段飄成簡體。兩支提示都硬要求繁體；
+// 回覆再過一道保險——含常見簡體字就當「看不懂」走既有退路（備用題／原句落地），寧可退備用也不把簡體存進說明書。
+// 名單裡的 于／后 在繁體也偶爾出現（姓氏、皇后），誤判＝退備用，不會壞資料
+export const TRADITIONAL_RULE = '一律用繁體中文（台灣用語），不准出現簡體字。';
+export const SIMPLIFIED_CHARS = Object.freeze([...(
+  '么这说会为决对让问时间应还没过动东后们个关于发现该经验请报单' // 發單者指定的最少名單
+  + '设负责认识议论语书写读长门开车员业产务类术数据结处层电网页点线图标题规则总备选择义种样从与谁两几万钱买卖价计划' // 常見補充
+)]);
+const SIMPLIFIED_RE = new RegExp(`[${SIMPLIFIED_CHARS.join('')}]`);
+export const hasSimplified = (text) => SIMPLIFIED_RE.test(str(text));
+const rejectSimplified = (what) => { throw new CheckParseError(`說明書助手這次用了簡體字，${what}不收`); };
+const roundOr = (v) => (Number.isInteger(v) && v >= 1 && v <= MANUAL_ROUNDS_MAX ? v : null);
+
+// 問答紀錄→乾淨清單：沒答的題（跳過）不算；round 只認 1～3、section 只認五段（其餘 null）；問與答去前後空白
+export function normalizeTranscript(transcript) {
+  return arr(transcript)
+    .filter((t) => t && typeof t === 'object' && !Array.isArray(t))
+    .map((t) => ({ round: roundOr(t.round), q: str(t.q).trim(), section: MANUAL_SECTION_KEYS.includes(t.section) ? t.section : null, a: str(t.a).trim() }))
+    .filter((t) => t.a);
+}
+
+// 進門第一關（輸入面向）：要是清單、最多 9 筆、每題答案不超過 2000 字；不合法丟 400 並講哪裡不對
+function checkTranscript(transcript) {
+  if (!Array.isArray(transcript)) throw err400('問答紀錄要是清單（每筆含 round、q、section、a）');
+  if (transcript.length > MANUAL_TRANSCRIPT_MAX) throw err400(`問答最多 ${MANUAL_TRANSCRIPT_MAX} 筆（三輪、每輪三題），這次給了 ${transcript.length} 筆`);
+  for (const t of transcript) if (str(t?.a).length > MANUAL_ANSWER_MAX) throw err400(`一題的答案最多 ${MANUAL_ANSWER_MAX} 字，用講的就好`);
+  return normalizeTranscript(transcript);
+}
+
+// 已被答案覆蓋的段（有答案、且題目對到五段之一）
+export function manualCovered(transcript) {
+  return new Set(normalizeTranscript(transcript).map((t) => t.section).filter(Boolean));
+}
+
+const sectionLines = () => MANUAL_SECTIONS.map((s) => `- ${s.key}＝${s.label}`);
+const transcriptLines = (t) => t.map((x) => `第 ${x.round ?? '?'} 輪｜段落 ${x.section ?? '（沒對到段）'}｜問：${x.q || '（沒有題目）'}｜答：${x.a}`);
+
+// 出題那次呼叫的交代（參考物「它出題時照的規矩」表）：目標五段→只問空的→每題附理由→禁問→只輸出一個 JSON；上限由程式擋，這裡只是告知
+export function buildManualQuestionPrompt({ transcript, round } = {}) {
+  const t = normalizeTranscript(transcript);
+  const covered = new Set(t.map((x) => x.section).filter(Boolean));
+  const empty = MANUAL_SECTIONS.filter((s) => !covered.has(s.key)).map((s) => `- ${s.key}＝${s.label}`);
+  return [
+    '你是「剝繭」的說明書助手。使用者正在回答幾輪問題，剝繭要把答案寫成一份「怎麼跟我合作」的說明書，分五段：',
+    ...sectionLines(),
+    `請看「已答的問答」，判斷五段哪幾段還空或還模糊，只針對那幾段出第 ${round} 輪的題目，最多 ${MANUAL_PER_ROUND_MAX} 題；夠的段不問。`,
+    '每題附一句理由，格式「為什麼問：你剛說⋯，所以想確認⋯」，讓他知道不是亂問。用他聽得懂的話問，不用術語。',
+    `禁問（出了也會被剔掉）：${MANUAL_BANNED.join('、')}——給誰看、什麼形式、多長是分類層的事；健康、政治、宗教、財務一律不問。`,
+    TRADITIONAL_RULE,
+    '五段都夠了就回 {"done":true,"why":"一句話說為什麼夠了"}。',
+    '只輸出一個 JSON 物件，前後不要任何其他文字：{"questions":[{"q":"…","why":"為什麼問：…","section":"who|talk|ask|show|redline"}]}',
+    '', '# 已答的問答', ...(t.length ? transcriptLines(t) : [NONE_LINE]),
+    '', '# 還空的段落', ...(empty.length ? empty : [NONE_LINE]),
+  ].join('\n');
+}
+
+// 回覆→{done, why} 或 {questions:[{q, why, section}]}（q 空、section 不在五段的剔掉）。像樣的候選一個都沒有→CheckParseError
+export function parseManualQuestions(text) {
+  if (hasSimplified(text)) rejectSimplified('題目');
+  const v = extractJsonOrRepair(
+    text,
+    (x) => (x && typeof x === 'object' && !Array.isArray(x) && (x.done === true || Array.isArray(x.questions)) ? [1] : [0]),
+    (x) => (x.done === true
+      ? { done: true, why: str(x.why).trim() }
+      : { questions: x.questions.map((q) => (q && typeof q === 'object' && str(q.q).trim() && MANUAL_SECTION_KEYS.includes(q.section)
+        ? { q: str(q.q).trim(), why: str(q.why).trim(), section: q.section } : null)).filter(Boolean) }),
+    '說明書助手這次交了不只一份題目，分不出哪份是真的',
+  );
+  if (v === null) throw new CheckParseError('說明書助手這次沒有交出看得懂的題目');
+  return v;
+}
+
+// 程式硬擋：只留還沒被覆蓋的段、含禁問字的剔掉、最多 3 題；每題編 id（r<輪>-<序>）
+export function guardManualQuestions(questions, covered, round) {
+  const has = covered instanceof Set ? covered : new Set(arr(covered));
+  return arr(questions)
+    .filter((q) => q && !has.has(q.section) && !MANUAL_BANNED.some((w) => q.q.includes(w)))
+    .slice(0, MANUAL_PER_ROUND_MAX)
+    .map((q, i) => ({ id: `r${round}-${i + 1}`, q: q.q, why: q.why, section: q.section }));
+}
+
+// 備用題：還空的段各一題（五段順序）、最多 3 題；五段都覆蓋＝空清單（呼叫端當 done）
+export function fallbackManualQuestions(covered, round) {
+  const has = covered instanceof Set ? covered : new Set(arr(covered));
+  return MANUAL_SECTIONS.filter((s) => !has.has(s.key)).slice(0, MANUAL_PER_ROUND_MAX)
+    .map((s, i) => ({ id: `r${round}-fb-${i + 1}`, q: MANUAL_FALLBACK[s.key].q, why: MANUAL_FALLBACK[s.key].why, section: s.key }));
+}
+
+// 寫草稿那次呼叫的交代：每行一句可直接照做的話、用他的意思改寫不加東西、標第幾輪；敏感四類只寫允許的
+export function buildManualDraftPrompt({ transcript, sensitive } = {}) {
+  const t = normalizeTranscript(transcript);
+  const open = Object.entries(SENSITIVE_LABELS).filter(([k]) => sensitive?.[k] === true).map(([, name]) => `- ${name}`);
+  return [
+    '你是「剝繭」的說明書助手。把使用者幾輪問答的答案寫成一份「怎麼跟我合作」的說明書草稿，分五段：',
+    ...sectionLines(),
+    '規矩：每行一句可以直接照做的話；用他的意思改寫，不加他沒說的東西；每行標第幾輪說的（round＝1～3）；他沒講到的段落 lines 留空陣列，不要自己補；',
+    '不寫觀點與立場；健康、政治、宗教、財務一律不寫，除了「允許的敏感類別」列出的；「給誰看、什麼形式、多長」不屬於這份說明書，不寫。',
+    TRADITIONAL_RULE,
+    '只輸出一個 JSON 物件，前後不要任何其他文字：{"sections":[{"key":"who","lines":[{"text":"…","round":1}]},{"key":"talk","lines":[]},{"key":"ask","lines":[]},{"key":"show","lines":[]},{"key":"redline","lines":[]}]}',
+    '', '# 他的問答', ...(t.length ? transcriptLines(t) : [NONE_LINE]),
+    '', '# 允許的敏感類別', open.length ? open.join('\n') : NONE_LINE,
+  ].join('\n');
+}
+
+// 一行草稿正規化：text 去空白、空的剔掉、round 只認 1～3（其餘 null）
+const normalizeLine = (l) => {
+  const text = str(l && typeof l === 'object' ? l.text : l).trim();
+  return text ? { text, round: roundOr(l?.round) } : null;
+};
+const emptySections = () => MANUAL_SECTIONS.map((s) => ({ key: s.key, label: s.label, lines: [] }));
+
+// 回覆→五段固定順序（缺的段補空；不在五段的段丟掉）。像樣的候選一個都沒有→CheckParseError
+export function parseManualDraft(text) {
+  if (hasSimplified(text)) rejectSimplified('草稿');
+  const v = extractJsonOrRepair(
+    text,
+    (x) => (x && typeof x === 'object' && !Array.isArray(x) && Array.isArray(x.sections) ? [1] : [0]),
+    (x) => {
+      const out = emptySections();
+      for (const s of x.sections) {
+        const hit = s && typeof s === 'object' ? out.find((o) => o.key === s.key) : null;
+        if (hit) hit.lines.push(...arr(s.lines).map(normalizeLine).filter(Boolean));
+      }
+      return out;
+    },
+    '說明書助手這次交了不只一份草稿，分不出哪份是真的',
+  );
+  if (v === null) throw new CheckParseError('說明書助手這次沒有交出看得懂的草稿');
+  return v;
+}
+
+// 寫草稿的退路：各輪答案照題目所屬段落原句放進去，一題一行、標輪次；沒對到段的答案放不進任何段
+export function fallbackManualDraft(transcript) {
+  const out = emptySections();
+  for (const t of normalizeTranscript(transcript)) {
+    const hit = out.find((o) => o.key === t.section);
+    if (hit) hit.lines.push({ text: t.a, round: t.round });
+  }
+  return out;
+}
+
+// 卡的出處原話：（說明書第 N 輪）內容；沒輪次（他自己加的行）＝（說明書）內容。manual() 從這裡讀回輪次
+const manualQuote = (text, round) => `（說明書${round ? `第 ${round} 輪` : ''}）${text}`;
+const roundOfQuote = (quote) => { const m = /^（說明書第 (\d) 輪）/.exec(str(quote)); return m ? Number(m[1]) : null; };
 
 // ---- 門面（M1b 起）：拿 store 做的組合動作。四條記路的落地在這（M2）；每步要帶的（contextFor，M3a）；點了即核可與範圍擴大（accountPicks，M3b）----
 
@@ -653,7 +869,117 @@ export function createMemory({ store, adapter = null, now = () => Date.now() } =
         if (c?.id) picked[key] = { id: c.id, bucket: 'habit', text: c.text, field: c.field ?? null, level: c.scope?.level ?? null };
       } catch { /* 點的卡已經不在＝不算這一步用了它 */ }
     }
-    return { coreNotes: inj.coreLines, groupRules: inj.groupLines, groupName: category, cards: inj.used, overridden: inj.overridden, picks: picked, paused };
+    // 說明書五段分組（US-115／US-117 ①）：只放這一步真的帶進去（inj.used）、且有 section 的認識卡，各段照 created_at；
+    // coreNotes 逐字照舊（含沒 section 的舊卡），manual 只是另一個切面，不改既有輸出
+    const byId = new Map(core.map((c) => [c.id, c]));
+    const manual = Object.fromEntries(MANUAL_SECTION_KEYS.map((k) => [k, []]));
+    const usedManual = inj.used.filter((u) => u.bucket === 'profile').map((u) => byId.get(u.id)).filter((c) => c && MANUAL_SECTION_KEYS.includes(c.section)).sort(byCreated);
+    for (const c of usedManual) manual[c.section].push(c.text);
+    return { coreNotes: inj.coreLines, groupRules: inj.groupLines, groupName: category, cards: inj.used, overridden: inj.overridden, picks: picked, paused, manual, redlines: manual.redline };
+  }
+
+  // ---- 說明書問答（US-115）----
+
+  // 設定 › 記憶 › 關於你 與引導卡第 2 步的資料源：五段各列 active 且有 section 的認識卡（照 created_at），輪次從出處原話讀回
+  function manual() {
+    const settings = store.readSettings();
+    const cards = store.listCards('profile').filter((c) => c.status === 'active' && MANUAL_SECTION_KEYS.includes(c.section)).sort(byCreated);
+    return {
+      intro_done: settings.memory.intro_done_at != null,
+      rounds_max: MANUAL_ROUNDS_MAX,
+      per_round_max: MANUAL_PER_ROUND_MAX,
+      round1: MANUAL_ROUND1.map((q) => ({ ...q })),
+      sections: MANUAL_SECTIONS.map((s) => ({
+        key: s.key, label: s.label, layer: s.layer,
+        lines: cards.filter((c) => c.section === s.key).map((c) => ({ card: c.id, text: c.text, round: roundOfQuote(c.source?.quote) })),
+      })),
+    };
+  }
+
+  // 一次小 AI 呼叫（走 route() 同一個 adapter 通道、同一套卷宗）：回原文字串；沒有 adapter＝回 null；任何錯都接住回 null（呼叫端退備用）
+  async function askManual(phase, prompt, tail) {
+    if (!adapter?.complete) return null;
+    const { onPrompt, onReply } = logPair('manual', tail);
+    try {
+      await note(onPrompt, prompt);
+      const raw = str(await adapter.complete({ prompt, meta: { kind: 'memory', phase } }));
+      await note(onReply, raw);
+      return raw;
+    } catch (e) {
+      console.error(`[bojian] 說明書（${phase}）AI 沒回好，退備用：`, humanReason(e));
+      return null;
+    }
+  }
+
+  // 第二、三輪出題：五段都覆蓋→不打 AI 直接 done；否則一次 AI 呼叫→硬擋（覆蓋段不問、禁問字剔掉、最多 3 題）；
+  // AI 壞掉／看不懂／剔完是空→備用題（只取還空的段）。round 不是 2 或 3、紀錄不合法→400
+  async function manualRound({ round, transcript } = {}) {
+    if (!Number.isInteger(round) || round < 2 || round > MANUAL_ROUNDS_MAX) throw err400(`第 2、3 輪才由它出題（round 只能是 2 或 ${MANUAL_ROUNDS_MAX}）`);
+    const t = checkTranscript(transcript);
+    const covered = new Set(t.map((x) => x.section).filter(Boolean));
+    if (MANUAL_SECTION_KEYS.every((k) => covered.has(k))) return { done: true, why: '五段都有內容了，直接寫草稿' };
+    const raw = await askManual('manual-questions', buildManualQuestionPrompt({ transcript: t, round }), `round${round}`);
+    if (raw !== null) {
+      try {
+        const parsed = parseManualQuestions(raw);
+        if (parsed.done) return { done: true, why: parsed.why || '五段都夠了' };
+        const kept = guardManualQuestions(parsed.questions, covered, round);
+        if (kept.length) return { questions: kept };
+      } catch (e) {
+        console.error('[bojian] 說明書出題回覆看不懂，退備用題：', humanReason(e));
+      }
+    }
+    const fallback = fallbackManualQuestions(covered, round);
+    return fallback.length ? { questions: fallback } : { done: true, why: '五段都有內容了，直接寫草稿' };
+  }
+
+  // 寫草稿：一次 AI 呼叫→五段；AI 壞掉／看不懂／五段全空→各輪答案照題目段落原句放進去
+  async function manualDraft({ transcript } = {}) {
+    const t = checkTranscript(transcript);
+    const raw = await askManual('manual-draft', buildManualDraftPrompt({ transcript: t, sensitive: sensitiveNow() }), 'draft');
+    if (raw !== null) {
+      try {
+        const sections = parseManualDraft(raw);
+        if (sections.some((s) => s.lines.length)) return { sections };
+      } catch (e) {
+        console.error('[bojian] 說明書草稿回覆看不懂，退原句：', humanReason(e));
+      }
+    }
+    return { sections: fallbackManualDraft(t) };
+  }
+
+  // 存說明書：先全部驗過（段落鍵、行數、行長）一張都不寫→既有「有 section 的 active 認識卡」全部退休（新卡取代舊卡）→
+  // 逐行寫新卡（bucket profile、section、layer 照五段表、scope 全部、source.kind='intro'、quote 帶輪次）→寫 intro_done_at。空行不存
+  function manualSave({ sections } = {}) {
+    if (!Array.isArray(sections)) throw err400('要給五段的內容（sections 清單，每段含 key 與 lines）');
+    const at = nowIso();
+    const cards = [];
+    for (const s of sections) {
+      const sec = s && typeof s === 'object' ? sectionOf(s.key) : null;
+      if (!sec) throw err400(`沒有「${str(s?.key) || '（空）'}」這一段：只有 ${MANUAL_SECTION_KEYS.join('、')}`);
+      if (s.lines != null && !Array.isArray(s.lines)) throw err400(`「${sec.label}」的內容要是清單（一行一筆）`);
+      for (const raw of arr(s.lines)) {
+        const line = normalizeLine(raw);
+        if (!line) continue;
+        if (line.text.length > MANUAL_LINE_MAX) throw err400(`「${sec.label}」有一行超過 ${MANUAL_LINE_MAX} 字：一行寫一句可以直接照做的話，長的拆成幾行`);
+        const card = makeCard({
+          bucket: 'profile', text: line.text, layer: sec.layer, section: sec.key, scope: { level: 'all' },
+          source: { kind: 'intro', at, quote: manualQuote(line.text, line.round) }, route_reason: '你的說明書，逐行存成認識卡',
+        }, at);
+        const errs = validateCard(card);
+        if (errs.length) throw err400(`「${sec.label}」有一行存不成：${errs.join('；')}`);
+        cards.push(card);
+      }
+    }
+    if (cards.length > MANUAL_LINES_MAX) throw err400(`說明書最多 ${MANUAL_LINES_MAX} 行，這次有 ${cards.length} 行`);
+    for (const c of store.listCards('profile')) {
+      if (c.status === 'active' && MANUAL_SECTION_KEYS.includes(c.section)) store.writeCard({ ...c, status: 'retired' });
+    }
+    for (const c of cards) store.writeCard(c);
+    const settings = store.readSettings();
+    settings.memory.intro_done_at = at;
+    store.writeSettings(settings);
+    return { saved: cards.length, sections: manual().sections };
   }
 
   // 點了即核可、範圍靠證據擴大（M3b）：picks 逐張＝被選（被選次數、最近用、連續未選歸零）；同一張同時在 picks 與 changed＝選了優先
@@ -707,6 +1033,10 @@ export function createMemory({ store, adapter = null, now = () => Date.now() } =
     adapter,
     noteOnRun,
     contextFor,
+    manual,
+    manualRound,
+    manualDraft,
+    manualSave,
 
     // 開跑（runner.startRun 寫完 run 後呼叫）三件事各自包一層，一件炸了其他照做、run 照建（runner 那邊也包了一層）：
     // ①點了即核可與範圍擴大（M3b）②帶進工作單的認識卡寫 last_used_at（M3b）③記路①開跑同值連兩趟（M2）——
